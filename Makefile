@@ -14,6 +14,7 @@ GOARCH := $(shell $(GO) env GOARCH)
 
 GOLANGCI_LINT_VERSION := v2.15.0
 GOVULNCHECK_VERSION := v1.9.0
+ACTIONLINT_VERSION := v1.7.12
 
 GOLANGCI_LINT := $(BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 
@@ -50,6 +51,7 @@ image-multiarch: ## Build all platforms with an SBOM into bin/image-oci
 lint: $(GOLANGCI_LINT) ## Run linters and the vulnerability scan
 	$(GOLANGCI_LINT) config verify
 	$(GOLANGCI_LINT) run ./...
+	$(GO) run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) -tags e2e ./...
 
 .PHONY: fmt

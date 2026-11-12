@@ -18,8 +18,8 @@ tmp=$(mktemp -d)
 staged="$dest.tmp.$$"
 trap 'rm -rf "$tmp" "$staged"' EXIT
 
-curl -fsSL --retry 3 -o "$tmp/$asset" "$url"
-curl -fsSL --retry 3 -o "$tmp/checksums" "$checksum_url"
+curl --proto '=https' -fsSL --retry 3 -o "$tmp/$asset" "$url"
+curl --proto '=https' -fsSL --retry 3 -o "$tmp/checksums" "$checksum_url"
 
 if [[ $(grep -c . "$tmp/checksums") -le 1 ]]; then
 	want=$(awk '{print $1; exit}' "$tmp/checksums")

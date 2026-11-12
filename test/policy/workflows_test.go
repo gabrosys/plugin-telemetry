@@ -1,6 +1,7 @@
 package policy_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -14,8 +15,12 @@ import (
 )
 
 const (
-	workflowDir = "../../.github/workflows"
-	makefile    = "../../Makefile"
+	workflowDir     = "../../.github/workflows"
+	makefile        = "../../Makefile"
+	repoRoot        = "../.."
+	releaseConfig   = "release-please-config.json"
+	releaseManifest = ".release-please-manifest.json"
+	releaseWorkflow = "release.yml"
 )
 
 var (
@@ -25,14 +30,20 @@ var (
 	privileged    = regexp.MustCompile(`pull_request_target|workflow_run`)
 	pushPattern   = regexp.MustCompile(`docker\s+push|--push\b|push:\s*true|push=true|type=registry|packages:\s*write`)
 	readOnlyScope = map[string]bool{"read": true, "none": true}
+	semver        = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+
+	releaseWriteScopes = map[string]bool{"contents": true, "pull-requests": true, "packages": true}
 )
 
 type workflow struct {
+	On          any            `yaml:"on"`
 	Permissions any            `yaml:"permissions"`
 	Jobs        map[string]job `yaml:"jobs"`
 }
 
 type job struct {
+	If             string `yaml:"if"`
+	Needs          any    `yaml:"needs"`
 	Permissions    any    `yaml:"permissions"`
 	TimeoutMinutes int    `yaml:"timeout-minutes"`
 	Uses           string `yaml:"uses"`
@@ -89,20 +100,51 @@ func isEmptyMapping(v any) bool {
 	return ok && len(m) == 0
 }
 
-func nonReadScopes(v any) []string {
+func disallowedScopes(v any, writable map[string]bool) []string {
 	m, ok := v.(map[string]any)
 	if !ok {
 		return []string{fmt.Sprintf("not a mapping: %v", v)}
 	}
 	var bad []string
 	for scope, level := range m {
-		if s, _ := level.(string); !readOnlyScope[s] {
+		s, _ := level.(string)
+		if !readOnlyScope[s] && (s != "write" || !writable[scope]) {
 			bad = append(bad, fmt.Sprintf("%s: %v", scope, level))
 		}
 	}
 	sort.Strings(bad)
 
 	return bad
+}
+
+func writableScopes(name string) map[string]bool {
+	if name == releaseWorkflow {
+		return releaseWriteScopes
+	}
+
+	return nil
+}
+
+func findWorkflow(name string) (workflowFile, bool) {
+	for _, wf := range workflows {
+		if wf.name == name {
+			return wf, true
+		}
+	}
+
+	return workflowFile{}, false
+}
+
+func readJSON(name string, v any) error {
+	raw, err := fs.ReadFile(os.DirFS(repoRoot), name)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", name, err)
+	}
+	if err := json.Unmarshal(raw, v); err != nil {
+		return fmt.Errorf("parse %s: %w", name, err)
+	}
+
+	return nil
 }
 
 func sortedJobs(wf workflow) []string {
@@ -122,12 +164,12 @@ var _ = Describe("CI workflows", func() {
 		Expect(loadErr).NotTo(HaveOccurred())
 	})
 
-	It("include ci.yml", func() {
+	It("include ci.yml and release.yml", func() {
 		var names []string
 		for _, wf := range workflows {
 			names = append(names, wf.name)
 		}
-		Expect(names).To(ContainElement("ci.yml"))
+		Expect(names).To(ContainElements("ci.yml", releaseWorkflow))
 	})
 
 	It("are not pushed from the Makefile", func() {
@@ -158,10 +200,10 @@ var _ = Describe("CI workflows", func() {
 				Expect(isEmptyMapping(wf.doc.Permissions)).To(BeTrue())
 			})
 
-			It("grants each job read-only permissions", func() {
+			It("grants write permissions only where allowed", func() {
 				bad := map[string][]string{}
 				for _, name := range sortedJobs(wf.doc) {
-					if scopes := nonReadScopes(wf.doc.Jobs[name].Permissions); len(scopes) > 0 {
+					if scopes := disallowedScopes(wf.doc.Jobs[name].Permissions, writableScopes(wf.name)); len(scopes) > 0 {
 						bad[name] = scopes
 					}
 				}
@@ -210,11 +252,57 @@ var _ = Describe("CI workflows", func() {
 				Expect(injected).To(BeEmpty())
 			})
 
-			It("pushes nothing", func() {
-				Expect(pushPattern.FindAllString(wf.raw, -1)).To(BeEmpty())
-			})
+			if wf.name != releaseWorkflow {
+				It("pushes nothing", func() {
+					Expect(pushPattern.FindAllString(wf.raw, -1)).To(BeEmpty())
+				})
+			}
 		})
 	}
+})
+
+var _ = Describe("the release workflow", func() {
+	It("runs only on pushes to main", func() {
+		wf, ok := findWorkflow(releaseWorkflow)
+		Expect(ok).To(BeTrue())
+		Expect(wf.doc.On).To(Equal(map[string]any{"push": map[string]any{"branches": []any{"main"}}}))
+	})
+
+	It("publishes only after release-please creates a release", func() {
+		wf, ok := findWorkflow(releaseWorkflow)
+		Expect(ok).To(BeTrue())
+		var publishers []string
+		for _, name := range sortedJobs(wf.doc) {
+			j := wf.doc.Jobs[name]
+			perms, _ := j.Permissions.(map[string]any)
+			if perms["packages"] != "write" {
+				continue
+			}
+			publishers = append(publishers, name)
+			Expect(j.If).To(ContainSubstring("needs.release-please.outputs.release_created == 'true'"), name)
+			Expect(j.Needs).To(Equal("release-please"), name)
+		}
+		Expect(publishers).NotTo(BeEmpty())
+	})
+
+	It("versions a Go module and keeps breaking changes on 0.x", func() {
+		var cfg struct {
+			Packages map[string]struct {
+				ReleaseType       string `json:"release-type"`
+				BumpMinorPreMajor bool   `json:"bump-minor-pre-major"`
+			} `json:"packages"`
+		}
+		Expect(readJSON(releaseConfig, &cfg)).To(Succeed())
+		Expect(cfg.Packages).To(HaveKey("."))
+		Expect(cfg.Packages["."].ReleaseType).To(Equal("go"))
+		Expect(cfg.Packages["."].BumpMinorPreMajor).To(BeTrue())
+	})
+
+	It("tracks the current version in the manifest", func() {
+		var manifest map[string]string
+		Expect(readJSON(releaseManifest, &manifest)).To(Succeed())
+		Expect(manifest).To(HaveKeyWithValue(".", MatchRegexp(semver.String())))
+	})
 })
 
 var _ = DescribeTable("the push pattern",

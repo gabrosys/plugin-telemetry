@@ -17,6 +17,11 @@ GOVULNCHECK_VERSION := v1.9.0
 
 GOLANGCI_LINT := $(BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 
+IMG ?= ghcr.io/gabrosys/plugin-telemetry:$(VERSION)
+PLATFORMS ?= linux/amd64,linux/arm64
+# image-multiarch needs a docker-container builder.
+BUILDX_BUILDER ?=
+
 .PHONY: help
 help: ## Show the available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_%-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -29,6 +34,17 @@ build: ## Build bin/plugin-telemetry and compile every package
 .PHONY: test
 test: ## Run unit tests with the race detector
 	$(GO) test -race -count=1 ./...
+
+.PHONY: image
+image: ## Build the image for the local platform and load it into Docker
+	docker buildx build --load --build-arg VERSION=$(VERSION) -t $(IMG) .
+
+.PHONY: image-multiarch
+image-multiarch: ## Build all platforms with an SBOM into bin/image-oci
+	rm -rf $(BIN)/image-oci
+	docker buildx build $(if $(BUILDX_BUILDER),--builder $(BUILDX_BUILDER)) \
+		--platform $(PLATFORMS) --sbom=true --build-arg VERSION=$(VERSION) \
+		--output type=oci,dest=$(BIN)/image-oci,tar=false .
 
 .PHONY: lint
 lint: $(GOLANGCI_LINT) ## Run linters and the vulnerability scan

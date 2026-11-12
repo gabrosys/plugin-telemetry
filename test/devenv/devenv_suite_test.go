@@ -1,0 +1,13 @@
+package devenv_test
+
+import (
+	"testing"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+)
+
+func TestDevEnv(t *testing.T) {
+	RegisterFailHandler(Fail)
+	RunSpecs(t, "Dev Environment Suite")
+}

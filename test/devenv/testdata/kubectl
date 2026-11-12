@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Fake kubectl for the dev-env tests. State lives in $FAKE_STATE.
+set -euo pipefail
+
+state=${FAKE_STATE:?}
+if [[ ${1:-} != --context ]]; then
+	echo "fake kubectl: --context must come first: $*" >&2
+	exit 98
+fi
+shift 2
+echo "kubectl $*" >>"$state/calls"
+
+case "$*" in
+"get --raw=/readyz")
+	[[ ! -e $state/api-down ]]
+	;;
+"wait --for=condition=Ready node --all "*)
+	[[ ! -e $state/node-not-ready ]]
+	;;
+"get configmap -n default plugin-telemetry-dev-env --ignore-not-found -o go-template="*)
+	if [[ -e $state/marker ]]; then cat "$state/marker"; fi
+	;;
+"create configmap -n default plugin-telemetry-dev-env "*)
+	for arg in "$@"; do
+		if [[ $arg == --from-literal=* ]]; then echo "${arg#--from-literal=}"; fi
+	done
+	;;
+"apply -f -")
+	cat >"$state/marker"
+	;;
+"apply --dry-run=server -f -")
+	cat >/dev/null
+	;;
+"apply --server-side -f "*)
+	if [[ -n ${FAKE_FAIL_APPLY:-} && $* == *"$FAKE_FAIL_APPLY"* ]]; then
+		echo "fake kubectl: apply failed" >&2
+		exit 1
+	fi
+	;;
+"wait "* | "rollout status "*) ;;
+"get deployment cnpg-controller-manager "*)
+	echo "ghcr.io/cloudnative-pg/cloudnative-pg:fake"
+	;;
+*)
+	echo "fake kubectl: unexpected: $*" >&2
+	exit 99
+	;;
+esac

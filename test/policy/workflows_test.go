@@ -21,9 +21,9 @@ const (
 var (
 	pinnedAction  = regexp.MustCompile(`^[\w.-]+/[\w./-]+@[0-9a-f]{40}$`)
 	pinnedDocker  = regexp.MustCompile(`^docker://.+@sha256:[0-9a-f]{64}$`)
-	secretsUse    = regexp.MustCompile(`secrets\.|secrets:\s*inherit`)
+	secretsUse    = regexp.MustCompile(`\$\{\{[^}]*\bsecrets\b|secrets:\s*inherit`)
 	privileged    = regexp.MustCompile(`pull_request_target|workflow_run`)
-	pushPattern   = regexp.MustCompile(`docker\s+push|--push\b|push:\s*true|type=registry|packages:\s*write`)
+	pushPattern   = regexp.MustCompile(`docker\s+push|--push\b|push:\s*true|push=true|type=registry|packages:\s*write`)
 	readOnlyScope = map[string]bool{"read": true, "none": true}
 )
 
@@ -215,4 +215,42 @@ var _ = Describe("CI workflows", func() {
 			})
 		})
 	}
+})
+
+var _ = DescribeTable("the push pattern",
+	func(text string, want bool) {
+		Expect(pushPattern.MatchString(text)).To(Equal(want))
+	},
+	Entry("matches docker push", "docker push img", true),
+	Entry("matches buildx --push", "docker buildx build --push .", true),
+	Entry("matches push: true", "push: true", true),
+	Entry("matches an output with push=true", "--output type=image,name=img,push=true", true),
+	Entry("matches a registry output", "--output type=registry", true),
+	Entry("ignores the push trigger", "on:\n  push:\n    branches: [main]", false),
+)
+
+var _ = DescribeTable("the secrets pattern",
+	func(text string, want bool) {
+		Expect(secretsUse.MatchString(text)).To(Equal(want))
+	},
+	Entry("matches property access", "${{ secrets.TOKEN }}", true),
+	Entry("matches index access", "${{ secrets['TOKEN'] }}", true),
+	Entry("matches the whole context", "${{ toJSON(secrets) }}", true),
+	Entry("matches inherited secrets", "secrets: inherit", true),
+	Entry("ignores other expressions", "${{ github.ref }}", false),
+)
+
+var _ = It("builds the image and loads it into kind in e2e.yml", func() {
+	var runs []string
+	for _, wf := range workflows {
+		if wf.name != "e2e.yml" {
+			continue
+		}
+		for _, name := range sortedJobs(wf.doc) {
+			for _, s := range wf.doc.Jobs[name].Steps {
+				runs = append(runs, s.Run)
+			}
+		}
+	}
+	Expect(runs).To(ContainElement(MatchRegexp(`\bmake\b.*\bimage\b.*\bkind-load\b`)))
 })

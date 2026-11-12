@@ -29,6 +29,10 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      - name: Load image
+        env:
+          CNPG_VERSION: ${{ matrix.cnpg }}
+        run: make dev-up image kind-load CNPG_VERSION="${CNPG_VERSION}"
       - name: Run suite
         env:
           SUITE: ${{ inputs.suite }}

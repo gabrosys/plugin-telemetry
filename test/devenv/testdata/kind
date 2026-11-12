@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Fake kind for the dev-env tests. State lives in $FAKE_STATE.
+set -euo pipefail
+
+state=${FAKE_STATE:?}
+echo "kind $*" >>"$state/calls"
+
+case "$1 $2" in
+"get clusters")
+	if [[ -s $state/clusters ]]; then
+		cat "$state/clusters"
+	else
+		echo "No kind clusters found." >&2
+	fi
+	;;
+"create cluster")
+	if grep -qx "$4" "$state/clusters" 2>/dev/null; then
+		echo "ERROR: node(s) already exist for a cluster with the name \"$4\"" >&2
+		exit 1
+	fi
+	echo "$4" >>"$state/clusters"
+	;;
+"export kubeconfig")
+	if [[ -e $state/no-kubeconfig ]]; then
+		echo "ERROR: failed to get cluster internal kubeconfig" >&2
+		exit 1
+	fi
+	;;
+"delete cluster")
+	: >"$state/clusters"
+	;;
+*)
+	echo "fake kind: unexpected: $*" >&2
+	exit 99
+	;;
+esac

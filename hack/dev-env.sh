@@ -48,30 +48,70 @@ wait_cert_manager_webhook() {
 	done
 }
 
+fail() {
+	echo "dev-env: $*" >&2
+	exit 1
+}
+
+wait_reachable() {
+	"$KIND" export kubeconfig --name "$KIND_CLUSTER" >/dev/null 2>&1 ||
+		fail "cluster $KIND_CLUSTER exists but is not reachable; run 'make dev-down' first"
+	local deadline=$((SECONDS + 30))
+	until kctl get --raw=/readyz >/dev/null 2>&1; do
+		((SECONDS < deadline)) || fail "cluster $KIND_CLUSTER exists but is not reachable; run 'make dev-down' first"
+		sleep 2
+	done
+	kctl wait --for=condition=Ready node --all --timeout=120s >/dev/null 2>&1 ||
+		fail "cluster $KIND_CLUSTER node is not ready; run 'make dev-down' first"
+}
+
+write_marker() {
+	kctl create configmap -n default "$marker" \
+		--from-literal=cnpgVersion="$CNPG_VERSION" \
+		--from-literal=certManagerVersion="$CERT_MANAGER_VERSION" \
+		--from-literal=kindNodeImage="$KIND_NODE_IMAGE" \
+		--from-literal=complete="$1" \
+		--dry-run=client -o yaml | kctl apply -f - >/dev/null
+}
+
 up() {
 	: "${KIND_NODE_IMAGE:?}" "${CNPG_VERSION:?}" "${CERT_MANAGER_VERSION:?}"
 	[[ $CNPG_VERSION =~ ^(main|v[0-9]+\.[0-9]+\.[0-9]+)$ ]] ||
 		usage "CNPG_VERSION must be main or vX.Y.Z, got '$CNPG_VERSION'"
 
-	if ! "$KIND" get clusters | grep -qx "$KIND_CLUSTER"; then
+	local clusters
+	clusters=$("$KIND" get clusters)
+	if ! grep -qx "$KIND_CLUSTER" <<<"$clusters"; then
 		"$KIND" create cluster --name "$KIND_CLUSTER" --image "$KIND_NODE_IMAGE" --wait 120s
 	fi
+	wait_reachable
 
 	local -A want=(
 		[cnpgVersion]=$CNPG_VERSION
 		[certManagerVersion]=$CERT_MANAGER_VERSION
 		[kindNodeImage]=$KIND_NODE_IMAGE
 	)
-	if kctl get configmap -n default "$marker" >/dev/null 2>&1; then
-		local key have
+	local -A have=()
+	local recorded line key
+	# shellcheck disable=SC2016 # Go template, not a shell expansion
+	recorded=$(kctl get configmap -n default "$marker" --ignore-not-found \
+		-o go-template='{{range $k, $v := .data}}{{$k}}={{$v}}{{"\n"}}{{end}}')
+	while IFS= read -r line; do
+		if [[ -n $line ]]; then have[${line%%=*}]=${line#*=}; fi
+	done <<<"$recorded"
+
+	if [[ -n $recorded ]]; then
 		for key in "${marker_keys[@]}"; do
-			have=$(kctl get configmap -n default "$marker" -o "jsonpath={.data.$key}")
-			[[ $have == "${want[$key]}" ]] ||
-				usage "environment has $key=$have, requested ${want[$key]}; run 'make dev-down' first"
+			[[ ${have[$key]:-} == "${want[$key]}" ]] ||
+				usage "environment has $key=${have[$key]:-}, requested ${want[$key]}; run 'make dev-down' first"
 		done
-		kctl rollout status deployment/cnpg-controller-manager -n cnpg-system --timeout=300s >/dev/null
-		summary "dev-env up to date:"
-		return
+		if [[ ${have[complete]:-} == true ]]; then
+			kctl rollout status deployment/cnpg-controller-manager -n cnpg-system --timeout=300s >/dev/null
+			summary "dev-env up to date:"
+			return
+		fi
+	else
+		write_marker false
 	fi
 
 	kctl apply --server-side -f \
@@ -82,11 +122,7 @@ up() {
 	kctl apply --server-side -f "$(cnpg_manifest "$CNPG_VERSION")"
 	kctl rollout status deployment/cnpg-controller-manager -n cnpg-system --timeout=300s
 
-	kctl create configmap -n default "$marker" \
-		--from-literal=cnpgVersion="$CNPG_VERSION" \
-		--from-literal=certManagerVersion="$CERT_MANAGER_VERSION" \
-		--from-literal=kindNodeImage="$KIND_NODE_IMAGE" \
-		--dry-run=client -o yaml | kctl apply -f -
+	write_marker true
 	summary "dev-env ready:"
 }
 

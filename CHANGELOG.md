@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/gabrosys/plugin-telemetry/compare/v0.1.0...v0.2.0) (2026-11-13)
+
+
+### Features
+
+* add the cnpg-i plugin skeleton ([#4](https://github.com/gabrosys/plugin-telemetry/issues/4)) ([2b45e66](https://github.com/gabrosys/plugin-telemetry/commit/2b45e66a100321832d7969f0247c5ba5d9f60b79))
+
 ## 0.1.0 (2026-11-13)
 
 

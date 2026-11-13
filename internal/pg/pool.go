@@ -7,7 +7,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"k8s.io/utils/clock"
 )
 
@@ -26,6 +28,7 @@ type Pool struct {
 	maxConns    int
 	idleTimeout time.Duration
 	clk         clock.PassiveClock
+	log         logr.Logger
 	// base is the context connections are closed with; it is never cancelled.
 	base context.Context
 
@@ -52,9 +55,17 @@ type backoff struct {
 	retryAt  time.Time
 }
 
+// PoolOption configures a Pool.
+type PoolOption func(*Pool)
+
+// WithLogger sets the logger for errors that have no caller to return to; the default discards them.
+func WithLogger(l logr.Logger) PoolOption {
+	return func(p *Pool) { p.log = l }
+}
+
 // NewPool returns a pool that opens no connection until Acquire.
-func NewPool(c Config, maxConns int, idleTimeout time.Duration, clk clock.PassiveClock) *Pool {
-	return &Pool{
+func NewPool(c Config, maxConns int, idleTimeout time.Duration, clk clock.PassiveClock, opts ...PoolOption) *Pool {
+	p := &Pool{
 		cfg:         c,
 		maxConns:    max(1, maxConns),
 		idleTimeout: idleTimeout,
@@ -62,7 +73,12 @@ func NewPool(c Config, maxConns int, idleTimeout time.Duration, clk clock.Passiv
 		base:        context.Background(),
 		failed:      make(map[string]*backoff),
 		changed:     make(chan struct{}),
+		log:         logr.Discard(),
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // Acquire returns a connection to database. At the cap it closes the least recently used idle
@@ -86,12 +102,12 @@ func (p *Pool) Acquire(ctx context.Context, database string) (*pgx.Conn, func(br
 			return nil, nil, fmt.Errorf("database %s: %w", database, ErrBackoff)
 		}
 
-		var evicted *pgx.Conn
+		var evicted *idleConn
 		switch {
 		case p.total < p.maxConns:
 			p.total++
 		case len(p.idle) > 0:
-			evicted = p.idle[0].conn
+			evicted = p.idle[0]
 			p.idle = p.idle[1:]
 		default:
 			wait := p.changed
@@ -106,7 +122,7 @@ func (p *Pool) Acquire(ctx context.Context, database string) (*pgx.Conn, func(br
 		p.mu.Unlock()
 
 		if evicted != nil {
-			closeConn(context.WithoutCancel(ctx), evicted)
+			p.closeConn(context.WithoutCancel(ctx), evicted.conn, evicted.database)
 		}
 		return p.dial(ctx, database)
 	}
@@ -147,7 +163,12 @@ func (p *Pool) dial(ctx context.Context, database string) (*pgx.Conn, func(bool)
 			b.failures++
 		}
 		p.mu.Unlock()
-		return nil, nil, fmt.Errorf("connect to database %s: %w", database, err)
+		// ConnectError.Config holds the password; keep only the cause.
+		var ce *pgconn.ConnectError
+		if errors.As(err, &ce) {
+			err = ce.Unwrap()
+		}
+		return nil, nil, fmt.Errorf("connect to database %s as %s: %w", database, p.cfg.User, err)
 	}
 	delete(p.failed, database)
 	closed := p.closed
@@ -157,7 +178,7 @@ func (p *Pool) dial(ctx context.Context, database string) (*pgx.Conn, func(bool)
 	p.mu.Unlock()
 
 	if closed {
-		closeConn(context.WithoutCancel(ctx), conn)
+		p.closeConn(context.WithoutCancel(ctx), conn, database)
 		return nil, nil, ErrPoolClosed
 	}
 	return conn, p.releaser(conn, database), nil
@@ -170,7 +191,7 @@ func (p *Pool) connect(ctx context.Context, database string) (*pgx.Conn, error) 
 	}
 	conn, err := pgx.ConnectConfig(ctx, cc)
 	if err != nil {
-		return nil, fmt.Errorf("connect: %w", err)
+		return nil, fmt.Errorf("dial: %w", err)
 	}
 	return conn, nil
 }
@@ -200,7 +221,7 @@ func (p *Pool) release(conn *pgx.Conn, database string, broken bool) {
 		p.total--
 		p.notifyLocked()
 		p.mu.Unlock()
-		closeConn(p.base, conn)
+		p.closeConn(p.base, conn, database)
 		return
 	}
 	p.idle = append(p.idle, &idleConn{conn: conn, database: database, since: p.clk.Now()})
@@ -212,11 +233,11 @@ func (p *Pool) release(conn *pgx.Conn, database string, broken bool) {
 func (p *Pool) CloseIdle() {
 	p.mu.Lock()
 	now := p.clk.Now()
-	var stale []*pgx.Conn
+	var stale []*idleConn
 	kept := p.idle[:0]
 	for _, ic := range p.idle {
 		if now.Sub(ic.since) >= p.idleTimeout {
-			stale = append(stale, ic.conn)
+			stale = append(stale, ic)
 			continue
 		}
 		kept = append(kept, ic)
@@ -228,8 +249,8 @@ func (p *Pool) CloseIdle() {
 	}
 	p.mu.Unlock()
 
-	for _, conn := range stale {
-		closeConn(p.base, conn)
+	for _, ic := range stale {
+		p.closeConn(p.base, ic.conn, ic.database)
 	}
 }
 
@@ -238,17 +259,15 @@ func (p *Pool) CloseIdle() {
 func (p *Pool) Close() {
 	p.mu.Lock()
 	p.closed = true
-	stale := make([]*pgx.Conn, 0, len(p.idle))
-	for _, ic := range p.idle {
-		stale = append(stale, ic.conn)
-	}
+	stale := make([]*idleConn, 0, len(p.idle))
+	stale = append(stale, p.idle...)
 	p.idle = nil
 	p.total -= len(stale)
 	p.notifyLocked()
 	p.mu.Unlock()
 
-	for _, conn := range stale {
-		closeConn(p.base, conn)
+	for _, ic := range stale {
+		p.closeConn(p.base, ic.conn, ic.database)
 	}
 }
 
@@ -257,11 +276,11 @@ func (p *Pool) notifyLocked() {
 	p.changed = make(chan struct{})
 }
 
-// closeConn ends the session; a failed close leaves nothing to recover, the socket is closed regardless.
-func closeConn(ctx context.Context, conn *pgx.Conn) {
+// closeConn ends the session; the socket is closed even when the goodbye fails, so the error is only logged.
+func (p *Pool) closeConn(ctx context.Context, conn *pgx.Conn, database string) {
 	ctx, cancel := context.WithTimeout(ctx, closeTimeout)
 	defer cancel()
 	if err := conn.Close(ctx); err != nil {
-		return
+		p.log.V(1).Error(err, "close connection", "database", database)
 	}
 }

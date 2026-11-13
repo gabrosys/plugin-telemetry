@@ -115,6 +115,18 @@ var _ = Describe("ConnConfig", func() {
 		Expect(err).To(MatchError(pg.ErrInvalidConfig))
 	})
 
+	DescribeTable("refuses a timeout below one millisecond, which PostgreSQL reads as disabled",
+		func(query, lock time.Duration) {
+			cfg.QueryTimeout, cfg.LockTimeout = query, lock
+			_, err := pg.ConnConfig(cfg, "app")
+			Expect(err).To(MatchError(pg.ErrInvalidConfig))
+		},
+		Entry("zero query timeout", time.Duration(0), time.Second),
+		Entry("sub-millisecond query timeout", 999*time.Microsecond, time.Second),
+		Entry("zero lock timeout", time.Second, time.Duration(0)),
+		Entry("sub-millisecond lock timeout", time.Second, 999*time.Microsecond),
+	)
+
 	DescribeTable("refuses to build a config while a PG* variable is set, naming it",
 		func(name string) {
 			GinkgoT().Setenv(name, "x")

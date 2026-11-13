@@ -7,8 +7,10 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	. "github.com/onsi/ginkgo/v2"
@@ -227,6 +229,48 @@ var _ = Describe("Pool", func() {
 		Expect(backendPID(ctx, replacement)).NotTo(Equal(pid))
 	})
 
+	It("closes a live connection handed back broken", func(ctx SpecContext) {
+		newPool(2, time.Minute)
+		conn, release, err := pool.Acquire(ctx, "app")
+		Expect(err).NotTo(HaveOccurred())
+		pid := backendPID(ctx, conn)
+		Expect(conn.IsClosed()).To(BeFalse())
+
+		release(true)
+		Expect(conn.IsClosed()).To(BeTrue())
+
+		replacement, release, err := pool.Acquire(ctx, "app")
+		Expect(err).NotTo(HaveOccurred())
+		defer release(false)
+		Expect(replacement).NotTo(BeIdenticalTo(conn))
+		Expect(backendPID(ctx, replacement)).NotTo(Equal(pid))
+	})
+
+	It("logs a close error with the database name only", func(ctx SpecContext) {
+		var mu sync.Mutex
+		var lines []string
+		logger := funcr.New(func(prefix, args string) {
+			mu.Lock()
+			defer mu.Unlock()
+			lines = append(lines, prefix+args)
+		}, funcr.Options{Verbosity: 1})
+		pool = pg.NewPool(cfg, 2, 0, clk, pg.WithLogger(logger))
+		DeferCleanup(pool.Close)
+
+		conn, release, err := pool.Acquire(ctx, "app")
+		Expect(err).NotTo(HaveOccurred())
+		release(false)
+		Expect(conn.PgConn().Conn().Close()).To(Succeed())
+
+		pool.CloseIdle()
+
+		mu.Lock()
+		defer mu.Unlock()
+		Expect(lines).To(HaveLen(1))
+		Expect(lines[0]).To(ContainSubstring(`"database"="app"`))
+		Expect(lines[0]).NotTo(ContainSubstring(pgtest.MonitorPassword))
+	})
+
 	It("answers ErrBackoff after a failed connect until the delay has passed", func(ctx SpecContext) {
 		newPool(2, time.Minute)
 		good, err := os.ReadFile(cfg.PasswordFile)
@@ -236,6 +280,11 @@ var _ = Describe("Pool", func() {
 		_, _, err = pool.Acquire(ctx, "app")
 		Expect(err).To(HaveOccurred())
 		Expect(err).NotTo(MatchError(pg.ErrBackoff))
+		Expect(errors.As(err, new(*pgconn.ConnectError))).To(BeFalse(), "pgx's ConnectError holds the password")
+		Expect(err.Error()).NotTo(ContainSubstring("wrong"))
+		var authErr *pgconn.PgError
+		Expect(errors.As(err, &authErr)).To(BeTrue())
+		Expect(authErr.Code).To(Equal("28P01"))
 
 		Expect(os.WriteFile(cfg.PasswordFile, good, 0o600)).To(Succeed())
 		_, _, err = pool.Acquire(ctx, "app")

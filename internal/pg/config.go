@@ -70,7 +70,8 @@ func ConnConfig(c Config, database string) (*pgx.ConnConfig, error) {
 			return nil, fmt.Errorf("%w: %s", ErrPGEnv, name)
 		}
 	}
-	if c.Host == "" || c.User == "" || c.Port == 0 {
+	// Below a millisecond the value is written as 0, which PostgreSQL reads as "no timeout".
+	if c.Host == "" || c.User == "" || c.Port == 0 || c.QueryTimeout < time.Millisecond || c.LockTimeout < time.Millisecond {
 		return nil, ErrInvalidConfig
 	}
 

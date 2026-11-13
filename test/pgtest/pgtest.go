@@ -1,0 +1,154 @@
+// Package pgtest runs PostgreSQL in a container for integration and e2e tests.
+package pgtest
+
+import (
+	"context"
+	_ "embed"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/testcontainers/testcontainers-go"
+	tcexec "github.com/testcontainers/testcontainers-go/exec"
+	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/gabrosys/plugin-telemetry/internal/pg"
+)
+
+const (
+	// MonitorUser is the role MonitorConfig connects as; it only has pg_monitor.
+	MonitorUser = "cnpg_metrics_exporter"
+	// MonitorPassword is the password of MonitorUser.
+	MonitorPassword = "monitor-password"
+
+	holdFile   = "/tmp/pg-hold"
+	socketDir  = "/var/run/postgresql"
+	readyTries = 300
+)
+
+//go:embed server.sh
+var serverScript string
+
+// Postgres is a PostgreSQL server in a container.
+type Postgres struct {
+	Host string
+	Port uint16
+
+	container *testcontainers.DockerContainer
+}
+
+// Start runs PostgreSQL from image (POSTGRES_IMAGE) with initdb and postgres under a shell
+// that can stop and start the server without stopping the container, so the host port stays.
+func Start(ctx context.Context, image string) (*Postgres, error) {
+	c, err := testcontainers.Run(ctx, image,
+		testcontainers.WithCmd("bash", "-c", serverScript),
+		testcontainers.WithExposedPorts("5432/tcp"),
+		testcontainers.WithWaitStrategy(wait.ForLog("database system is ready to accept connections")),
+	)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("start container: %w", err), terminate(ctx, c))
+	}
+
+	host, err := c.Host(ctx)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("get container host: %w", err), terminate(ctx, c))
+	}
+	port, err := c.MappedPort(ctx, "5432/tcp")
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("get mapped port: %w", err), terminate(ctx, c))
+	}
+
+	p := &Postgres{Host: host, Port: port.Num(), container: c}
+	for _, stmt := range []string{
+		"CREATE ROLE " + MonitorUser + " LOGIN PASSWORD '" + MonitorPassword + "'",
+		"GRANT pg_monitor TO " + MonitorUser,
+		"CREATE DATABASE app",
+		"CREATE DATABASE noconnect",
+		"REVOKE CONNECT ON DATABASE noconnect FROM PUBLIC",
+	} {
+		if err := p.Exec(ctx, stmt); err != nil {
+			return nil, errors.Join(fmt.Errorf("bootstrap: %w", err), terminate(ctx, c))
+		}
+	}
+	return p, nil
+}
+
+func terminate(ctx context.Context, c *testcontainers.DockerContainer) error {
+	if err := c.Terminate(ctx); err != nil {
+		return fmt.Errorf("terminate container: %w", err)
+	}
+	return nil
+}
+
+// Exec runs one SQL statement as postgres over the container's socket.
+func (p *Postgres) Exec(ctx context.Context, sql string) error {
+	return p.run(ctx, "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-h", socketDir, "-U", "postgres", "-d", "postgres", "-c", sql)
+}
+
+// MonitorConfig returns the settings of the monitoring role, its password in a file under dir.
+// It panics when the password file cannot be written.
+func (p *Postgres) MonitorConfig(dir string) pg.Config {
+	file := filepath.Join(dir, "password")
+	if err := os.WriteFile(file, []byte(MonitorPassword+"\n"), 0o600); err != nil {
+		panic(fmt.Sprintf("write password file: %v", err))
+	}
+	return pg.Config{
+		Host:           p.Host,
+		Port:           p.Port,
+		User:           MonitorUser,
+		PasswordFile:   file,
+		QueryTimeout:   10 * time.Second,
+		LockTimeout:    5 * time.Second,
+		ConnectTimeout: 5 * time.Second,
+	}
+}
+
+// StopServer stops PostgreSQL and keeps it stopped, the container keeps running.
+func (p *Postgres) StopServer(ctx context.Context) error {
+	if err := p.run(ctx, "touch", holdFile); err != nil {
+		return err
+	}
+	return p.run(ctx, "pg_ctl", "-D", "/tmp/pgdata", "stop", "-m", "fast")
+}
+
+// StartServer starts PostgreSQL again and returns once it accepts connections on the same port.
+func (p *Postgres) StartServer(ctx context.Context) error {
+	if err := p.run(ctx, "rm", "-f", holdFile); err != nil {
+		return err
+	}
+	for range readyTries {
+		if err := p.run(ctx, "pg_isready", "-h", socketDir, "-q"); err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for the server: %w", ctx.Err())
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	return errors.New("the server did not accept connections after restart")
+}
+
+// Terminate removes the container.
+func (p *Postgres) Terminate(ctx context.Context) error {
+	return terminate(ctx, p.container)
+}
+
+func (p *Postgres) run(ctx context.Context, cmd ...string) error {
+	code, out, err := p.container.Exec(ctx, cmd, tcexec.Multiplexed())
+	if err != nil {
+		return fmt.Errorf("exec %s: %w", cmd[0], err)
+	}
+	if code != 0 {
+		output, readErr := io.ReadAll(out)
+		if readErr != nil {
+			return fmt.Errorf("exec %s: exit code %d (read output: %w)", cmd[0], code, readErr)
+		}
+		return fmt.Errorf("exec %s: exit code %d: %s", cmd[0], code, strings.TrimSpace(string(output)))
+	}
+	return nil
+}

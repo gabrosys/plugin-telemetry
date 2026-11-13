@@ -55,6 +55,10 @@ build: ## Build bin/plugin-telemetry and compile every package
 test: ## Run unit tests with the race detector
 	$(GO) test -race -count=1 ./...
 
+.PHONY: test-integration
+test-integration: ## Run the tests that need Docker (PostgreSQL in a container)
+	POSTGRES_IMAGE=$(POSTGRES_IMAGE) $(GO) test -race -count=1 -tags integration ./...
+
 .PHONY: generate
 generate: ## Regenerate docs/self-metrics.md
 	$(GO) run ./internal/selfmetrics/gen > docs/self-metrics.md
@@ -101,8 +105,8 @@ lint: $(GOLANGCI_LINT) ## Run linters and the vulnerability scan
 	$(GOLANGCI_LINT) config verify
 	$(GOLANGCI_LINT) run ./...
 	$(GO) run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
-	docker run --rm -v "$(CURDIR):/mnt:ro" -w /mnt $(SHELLCHECK_IMAGE) hack/*.sh test/devenv/testdata/*
-	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) -tags e2e ./...
+	docker run --rm -v "$(CURDIR):/mnt:ro" -w /mnt $(SHELLCHECK_IMAGE) hack/*.sh test/devenv/testdata/* test/pgtest/server.sh
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) -tags e2e,integration ./...
 
 .PHONY: fmt
 fmt: $(GOLANGCI_LINT) ## Format the code

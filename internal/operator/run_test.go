@@ -8,15 +8,19 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/cloudnative-pg/cnpg-i/pkg/identity"
 	"github.com/cloudnative-pg/cnpg-i/pkg/lifecycle"
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"google.golang.org/grpc"
@@ -244,6 +248,46 @@ var _ = Describe("Run", func() {
 		cancel()
 		Eventually(done, 5*time.Second).Should(Receive(BeNil()))
 		done <- nil
+	})
+
+	It("logs that it waits for the image and that it serves once loaded", func() {
+		var mu sync.Mutex // guards msgs
+		var msgs []string
+		sink := funcr.NewJSON(func(obj string) {
+			var entry struct {
+				Msg string `json:"msg"`
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if err := json.Unmarshal([]byte(obj), &entry); err != nil {
+				msgs = append(msgs, "undecodable log line: "+err.Error())
+
+				return
+			}
+			msgs = append(msgs, entry.Msg)
+		}, funcr.Options{})
+		logged := func() []string {
+			mu.Lock()
+			defer mu.Unlock()
+
+			return append([]string(nil), msgs...)
+		}
+
+		ctx, c := context.WithCancel(logr.NewContext(context.Background(), sink))
+		cancel = c
+		done = make(chan error, 1)
+		go func() {
+			done <- operator.Run(ctx, operator.Options{
+				ServerAddress:  addr,
+				ServerCertPath: pki.serverCert,
+				ServerKeyPath:  pki.serverKey,
+				ClientCAPath:   pki.clientCert,
+			}, waiter)
+		}()
+
+		Eventually(logged, 5*time.Second).Should(Equal([]string{"waiting for the sidecar image"}))
+		close(waiter.ready)
+		Eventually(logged, 5*time.Second).Should(ContainElement("sidecar image loaded, serving"))
 	})
 
 	It("returns nil when the context ends before the image is known", func() {

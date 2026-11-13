@@ -1,4 +1,4 @@
-// Package operator holds the plugin's runtime state shared by the lifecycle and operator servers.
+// Package operator serves the plugin's gRPC identity and lifecycle services and tracks the sidecar image they inject.
 package operator
 
 import (
@@ -23,6 +23,8 @@ const SidecarImageKey = "image"
 
 // ErrInvalidImageRef is returned for a sidecar image that is not a digest reference.
 var ErrInvalidImageRef = errors.New("sidecar image must be <repository>@sha256:<64 lowercase hex>")
+
+var errConfigMapDeleted = errors.New("sidecar image configmap deleted, a restarted replica will not serve")
 
 var imageRefPattern = regexp.MustCompile(
 	`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*@sha256:[0-9a-f]{64}$`)
@@ -133,7 +135,7 @@ func WatchSidecarImage(
 		AddFunc:    set,
 		UpdateFunc: func(_, obj any) { set(obj) },
 		DeleteFunc: func(any) {
-			logger.Info("sidecar image configmap deleted, keeping the last valid image")
+			logger.Error(errConfigMapDeleted, "keeping the last valid sidecar image")
 		},
 	})
 	if err != nil {

@@ -355,6 +355,22 @@ var _ = Describe("Lifecycle logging", func() {
 		}),
 	)
 
+	DescribeTable("logs an error before rejecting an undecodable request",
+		func(ctx context.Context, cluster, object []byte, what string) {
+			ctx, all := captureAll(ctx)
+			_, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, cluster, object))
+			Expect(status.Code(err)).To(Equal(codes.InvalidArgument))
+
+			Expect(all()).To(ContainElement(SatisfyAll(
+				HaveKey("error"),
+				HaveKeyWithValue("msg", ContainSubstring(what)),
+			)))
+		},
+		Entry("a malformed Cluster", []byte(`{"spec":`), []byte(`{"kind":"Pod"}`), "decode cluster"),
+		Entry("a malformed object", clusterJSON(ours(nil)), []byte(`{"kind":`), "get object kind"),
+		Entry("a Pod that does not decode", clusterJSON(ours(nil)), []byte(`{"kind":"Pod","spec":"x"}`), "decode pod"),
+	)
+
 	It("logs no hook line for a request it cannot decode", func(ctx context.Context) {
 		ctx, hookLines := captureLogs(ctx)
 		_, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,

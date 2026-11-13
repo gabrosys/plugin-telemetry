@@ -7,6 +7,7 @@ import (
 
 	"github.com/cloudnative-pg/cnpg-i-machinery/pkg/pluginhelper/http"
 	"github.com/cloudnative-pg/cnpg-i/pkg/lifecycle"
+	"github.com/cloudnative-pg/machinery/pkg/log"
 	"google.golang.org/grpc"
 )
 
@@ -38,6 +39,8 @@ func Run(ctx context.Context, opts Options, images ImageWaiter) error {
 		return ErrInvalidOptions
 	}
 
+	logger := log.FromContext(ctx)
+	logger.Info("waiting for the sidecar image")
 	if err := images.Wait(ctx); err != nil {
 		if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
 			return nil
@@ -45,6 +48,8 @@ func Run(ctx context.Context, opts Options, images ImageWaiter) error {
 
 		return fmt.Errorf("wait for sidecar image: %w", err)
 	}
+
+	logger.Info("sidecar image loaded, serving")
 
 	srv := &http.Server{
 		IdentityImpl: Identity{},

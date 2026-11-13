@@ -67,22 +67,24 @@ func (*Lifecycle) GetCapabilities(
 func (l *Lifecycle) LifecycleHook(
 	ctx context.Context, req *lifecycle.OperatorLifecycleRequest,
 ) (*lifecycle.OperatorLifecycleResponse, error) {
+	logger := log.FromContext(ctx)
+
 	cluster, err := decoder.DecodeClusterLenient(req.GetClusterDefinition())
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "decode cluster: %v", err)
+		return nil, invalidArgument(logger, "decode cluster", err)
 	}
+
+	logger = logger.WithValues("namespace", cluster.Namespace, "cluster", cluster.Name)
 
 	kind, err := object.GetKind(req.GetObjectDefinition())
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "get object kind: %v", err)
+		return nil, invalidArgument(logger, "get object kind", err)
 	}
 
 	var meta metav1.PartialObjectMetadata
 	if err := json.Unmarshal(req.GetObjectDefinition(), &meta); err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "decode object metadata: %v", err)
+		return nil, invalidArgument(logger, "decode object metadata", err)
 	}
-
-	logger := log.FromContext(ctx).WithValues("namespace", cluster.Namespace, "cluster", cluster.Name)
 
 	patch, outcome, err := l.hook(logger, cluster, kind, req.GetObjectDefinition())
 	if err != nil {
@@ -95,6 +97,13 @@ func (l *Lifecycle) LifecycleHook(
 		"outcome", outcome)
 
 	return &lifecycle.OperatorLifecycleResponse{JsonPatch: patch}, nil
+}
+
+// invalidArgument logs err at error level and returns it as an InvalidArgument status.
+func invalidArgument(logger log.Logger, what string, err error) error {
+	logger.Error(err, what)
+
+	return status.Errorf(codes.InvalidArgument, "%s: %v", what, err)
 }
 
 // hook returns the patch for one object and its outcome. It fails only for
@@ -113,7 +122,7 @@ func (l *Lifecycle) hook(
 
 	original, err := decoder.DecodePodJSON(definition)
 	if err != nil {
-		return nil, "", status.Errorf(codes.InvalidArgument, "decode pod: %v", err)
+		return nil, "", invalidArgument(logger, "decode pod", err)
 	}
 
 	patch, err := l.patch(logger, cluster, pluginConfig, original)

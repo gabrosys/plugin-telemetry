@@ -11,7 +11,7 @@
 - name: cnpg_otel_query_last_success_timestamp_seconds
   instrument: gauge
   unit: s
-  description: Unix time of the last run of a query that returned rows (ok or capped).
+  description: Unix time of the last run of a query that returned rows (outcome ok).
   attributes: [query, database]
 - name: cnpg_otel_query_interval_seconds
   instrument: gauge

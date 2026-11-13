@@ -52,6 +52,7 @@ type ExportRecord struct {
 	ErrorType                    string // semconv error.type; empty when ok
 	ComponentType, ServerAddress string
 	ServerPort                   int
+	HTTPStatusCode               int // 0 when there was no HTTP response
 }
 
 // Stats holds the self-metric values; Register exposes them through observable instruments.
@@ -112,7 +113,7 @@ func (s *Stats) QueryRun(query, database string, o Outcome, d time.Duration, at 
 	}
 	k := queryDB{query, database}
 	s.lastDur[k] = seconds(d)
-	if o == OutcomeOK || o == OutcomeCapped {
+	if o == OutcomeOK {
 		s.lastSuccess[k] = timestamp(at)
 	}
 }
@@ -258,7 +259,11 @@ func exportAttributes(r ExportRecord) []attribute.KeyValue {
 	if r.Outcome != OutcomeOK {
 		errorType = r.ErrorType
 	}
-	return exportAttrs(errorType, r.ComponentType, r.ServerAddress, r.ServerPort)
+	attrs := exportAttrs(errorType, r.ComponentType, r.ServerAddress, r.ServerPort)
+	if r.HTTPStatusCode != 0 {
+		attrs = append(attrs, attribute.Int("http.response.status_code", r.HTTPStatusCode))
+	}
+	return attrs
 }
 
 // points returns the current points of the catalogue metric called name.

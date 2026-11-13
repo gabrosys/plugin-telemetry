@@ -212,6 +212,40 @@ var _ = Describe("Stats", func() {
 		}
 	})
 
+	It("does not move the last success timestamp on a capped run", func() {
+		stats.QueryRun("q", "app", selfmetrics.OutcomeOK, time.Second, at)
+		stats.QueryRun("q", "app", selfmetrics.OutcomeCapped, time.Second, at.Add(time.Hour))
+
+		got := collect()
+		Expect(points(got["cnpg_otel_query_last_success_timestamp_seconds"])).
+			To(Equal(map[string]float64{"database=app,query=q": float64(at.Unix())}))
+	})
+
+	It("emits the HTTP status code on the duration only when non-zero", func() {
+		base := selfmetrics.ExportRecord{
+			Outcome: selfmetrics.OutcomeOK, Duration: time.Millisecond, At: at, Points: 1,
+			ComponentType: "otlp_http_metric_exporter", ServerAddress: "collector", ServerPort: 4318,
+		}
+		withCode := base
+		withCode.HTTPStatusCode = 200
+		stats.Export(base)
+		stats.Export(withCode)
+
+		hist, isHist := collect()["otel.sdk.exporter.operation.duration"].Data.(metricdata.Histogram[float64])
+		Expect(isHist).To(BeTrue())
+		Expect(hist.DataPoints).To(HaveLen(2))
+		var withKey, withoutKey int
+		for _, p := range hist.DataPoints {
+			if v, ok := p.Attributes.Value("http.response.status_code"); ok {
+				Expect(v.AsInt64()).To(Equal(int64(200)))
+				withKey++
+			} else {
+				withoutKey++
+			}
+		}
+		Expect([]int{withKey, withoutKey}).To(Equal([]int{1, 1}))
+	})
+
 	It("drops the series of queries not kept", func() {
 		for _, q := range []string{"gone", "kept"} {
 			stats.QueryRun(q, "app", selfmetrics.OutcomeOK, time.Second, at)

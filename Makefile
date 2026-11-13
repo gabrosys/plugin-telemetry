@@ -55,6 +55,10 @@ build: ## Build bin/plugin-telemetry and compile every package
 test: ## Run unit tests with the race detector
 	$(GO) test -race -count=1 ./...
 
+.PHONY: generate
+generate: ## Regenerate docs/self-metrics.md
+	$(GO) run ./internal/selfmetrics/gen > docs/self-metrics.md
+
 .PHONY: image
 image: ## Build the image for the local platform and load it into Docker
 	docker buildx build --load --build-arg VERSION=$(VERSION) -t $(IMG) .

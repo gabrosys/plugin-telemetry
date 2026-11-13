@@ -259,6 +259,25 @@ var _ = Describe("Executor", func() {
 			Expect(res.Samples).To(BeNil())
 		})
 
+		It("cancels the statement at the row cap instead of draining it", func(ctx SpecContext) {
+			l.MaxRowsPerQuery = 3
+			capExec := newExecutor(pool, l)
+			pid := jobFor("SELECT 'a' AS datname, pg_backend_pid() AS value")
+			first := capExec.Run(ctx, pid)
+			Expect(first.Err).NotTo(HaveOccurred())
+
+			start := time.Now()
+			res := capExec.Run(ctx, jobFor("SELECT 'x' || generate_series(1, 200000000) AS datname, 1 AS value"))
+			Expect(time.Since(start)).To(BeNumerically("<", 500*time.Millisecond))
+			Expect(res.Err).NotTo(HaveOccurred())
+			Expect(res.Outcome).To(Equal(selfmetrics.OutcomeCapped))
+			Expect(res.WouldBe).To(Equal(3))
+
+			again := capExec.Run(ctx, pid)
+			Expect(again.Err).NotTo(HaveOccurred())
+			Expect(again.Samples).To(HaveLen(1))
+		})
+
 		It("keeps a run at the caps", func(ctx SpecContext) {
 			l.MaxRowsPerQuery = 5
 			l.MaxSeriesPerQuery = 5

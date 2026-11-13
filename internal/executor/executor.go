@@ -27,6 +27,8 @@ const (
 	deadlineGrace = 2 * time.Second
 	// rollbackTimeout bounds the rollback of an unfinished transaction.
 	rollbackTimeout = 2 * time.Second
+	// cancelTimeout bounds the cancel request sent at the row cap.
+	cancelTimeout = 2 * time.Second
 
 	sqlstateQueryCanceled = "57014"
 	sqlstateLockNotAvail  = "55P03"
@@ -106,7 +108,7 @@ func (e *Executor) run(ctx context.Context, job planner.Job, res *Result) error 
 	defer func() { release(broken) }()
 
 	err = e.inTransaction(ctx, conn, job, res)
-	broken = err != nil && connectionFailed(ctx, conn, err)
+	broken = conn.IsClosed() || (err != nil && connectionFailed(ctx, conn, err))
 	return err
 }
 
@@ -119,7 +121,12 @@ func (e *Executor) inTransaction(ctx context.Context, conn *pgx.Conn, job planne
 	defer func() {
 		rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
 		defer cancel()
-		if rbErr := tx.Rollback(rbCtx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
+		rbErr := tx.Rollback(rbCtx)
+		if rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
+			// A capped run's statement was cancelled on purpose; the pool discards the connection if it closed.
+			if res.Outcome == selfmetrics.OutcomeCapped {
+				return
+			}
 			err = errors.Join(err, fmt.Errorf("roll back: %w", rbErr))
 		}
 	}()
@@ -234,6 +241,7 @@ func (e *Executor) collect(ctx context.Context, tx pgx.Tx, job planner.Job, res 
 		}
 		if maxRows > 0 && rowCount >= maxRows {
 			res.WouldBe = series
+			cancelStatement(ctx, tx.Conn())
 			return true, nil
 		}
 		rowCount++
@@ -275,6 +283,17 @@ func (e *Executor) collect(ctx context.Context, tx pgx.Tx, job planner.Job, res 
 		return true, nil
 	}
 	return false, nil
+}
+
+// cancelStatement asks the server to stop the running statement, so closing the rows does not
+// read the rest of the result. The request is best effort: a failure only means the rows are drained.
+func cancelStatement(ctx context.Context, conn *pgx.Conn) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cancelTimeout)
+	defer cancel()
+	// Ignored on purpose: pgconn documents that delivery is not guaranteed and the run is capped either way.
+	if err := conn.PgConn().CancelRequest(cctx); err != nil {
+		return
+	}
 }
 
 // seriesKey is the metric name and the labels, which are sorted by key.

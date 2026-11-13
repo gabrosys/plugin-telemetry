@@ -214,6 +214,10 @@ var _ = Describe("RowSamples", func() {
 			Entry("malformed counts", []any{"a", "{1}", "{x}", 1.0, int64(1)}),
 			Entry("bad sum", []any{"a", "{1}", "{3}", "abc", int64(1)}),
 			Entry("bad count", []any{"a", "{1}", "{3}", 1.0, "abc"}),
+			Entry("NaN bound", []any{"a", "{1,NaN}", "{3,4}", 1.0, int64(1)}),
+			Entry("repeated NaN bounds", []any{"a", "{NaN,NaN}", "{3,4}", 1.0, int64(1)}),
+			Entry("two-dimensional bounds", []any{"a", "{{1,2},{3,4}}", "{1,2,3,4}", 1.0, int64(1)}),
+			Entry("two-dimensional counts", []any{"a", "{1,2,3,4}", "{{1,2},{3,4}}", 1.0, int64(1)}),
 		)
 
 		It("drops the sample when x or x_bucket is not in the result", func() {

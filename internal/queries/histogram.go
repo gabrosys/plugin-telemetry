@@ -3,12 +3,17 @@ package queries
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-var errHistogramPart = errors.New("histogram column is missing")
+var (
+	errHistogramPart = errors.New("histogram column is missing")
+	errHistogramDims = errors.New("histogram array has more than one dimension")
+	errHistogramNaN  = errors.New("histogram bound is NaN")
+)
 
 // histogramFrom builds a histogram as CNPG's histogram.NewFromRawData does (pkg/management/postgres/metrics/histogram/histogram.go:46-105
 // at v1.30.1). The arrays arrive as text and are parsed with pgtype in place of pq.Array.
@@ -34,13 +39,23 @@ func histogramFrom(name string, byName map[string]any) (*Histogram, error) {
 		}
 	}
 
-	var bounds []float64
-	if err := scanArray(pgtype.Float8ArrayOID, rawBounds, &bounds); err != nil {
+	var boundArray pgtype.Array[float64]
+	if err := scanArray(pgtype.Float8ArrayOID, rawBounds, &boundArray); err != nil {
 		return nil, fmt.Errorf("load %s: %w", name, err)
 	}
-	var counts []int64
-	if err := scanArray(pgtype.Int8ArrayOID, rawCounts, &counts); err != nil {
+	var countArray pgtype.Array[int64]
+	if err := scanArray(pgtype.Int8ArrayOID, rawCounts, &countArray); err != nil {
 		return nil, fmt.Errorf("load %s_bucket: %w", name, err)
+	}
+	// lib/pq rejects arrays of more than one dimension.
+	if len(boundArray.Dims) > 1 || len(countArray.Dims) > 1 {
+		return nil, fmt.Errorf("%s: %w", name, errHistogramDims)
+	}
+	bounds, counts := boundArray.Elements, countArray.Elements
+	for _, bound := range bounds {
+		if math.IsNaN(bound) {
+			return nil, fmt.Errorf("%s: %w", name, errHistogramNaN)
+		}
 	}
 	if bounds == nil {
 		return nil, fmt.Errorf("%s: %w", name, errHistogramPart)

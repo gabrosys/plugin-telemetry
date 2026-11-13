@@ -21,7 +21,7 @@ func NewRootCommand() *cobra.Command {
 		},
 	}
 	logFlags.AddFlags(cmd.PersistentFlags())
-	cmd.AddCommand(newVersionCommand(), newOperatorCommand())
+	cmd.AddCommand(newVersionCommand(), newOperatorCommand(), newInstanceCommand())
 
 	return cmd
 }

@@ -338,8 +338,22 @@ q:
 			Entry("an unknown key", "q:\n", "q:\n  future: 1\n"),
 			Entry("mapping key order", "{up: 1, down: 0}", "{down: 0, up: 1}"),
 			Entry("the mapping key spelling", "metric_mapping:", "metrics_mapping:"),
+			Entry("cache_seconds", "  primary: false\n", "  primary: false\n  cache_seconds: 60\n"),
+			Entry("target_databases", "  primary: false\n", "  primary: false\n  target_databases: [a, b]\n"),
+			Entry("runonserver", "  primary: false\n", "  primary: false\n  runonserver: '>=17.0.0'\n"),
+			Entry("an invalid runonserver that disables the query", "  primary: false\n", "  primary: false\n  runonserver: nope\n"),
 			Entry("a column with an unknown usage", "  metrics:\n", "  metrics:\n    - z: {usage: nope}\n"),
 		)
+
+		It("is the same for the same query under two keys", func() {
+			named := strings.Replace(base, "  primary: false\n", "  primary: false\n  name: shared\n", 1)
+			other := strings.Replace(named, "q:\n", "r:\n", 1)
+
+			a := defineOne("q", named, opts)
+			b := defineOne("r", other, opts)
+			Expect(a.Key).ToNot(Equal(b.Key))
+			Expect(b.Fingerprint).To(Equal(a.Fingerprint))
+		})
 
 		It("is the same on every call", func() {
 			Expect(fingerprint(base)).To(Equal(fingerprint(base)))

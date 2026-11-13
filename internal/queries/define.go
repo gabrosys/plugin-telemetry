@@ -87,7 +87,7 @@ type Definition struct {
 	CacheSeconds    uint64
 	Columns         map[string]Column // one entry per expected result column
 	Labels          []string          // label columns in YAML order
-	Fingerprint     string            // hex sha256 over everything that shapes samples
+	Fingerprint     string            // hex sha256 over what shapes samples, not over scheduling or placement
 	Warnings        []string
 	Disabled        string // non-empty: never planned, with this reason
 }
@@ -133,7 +133,6 @@ func Define(key string, q UserQuery, opts Options) Definition {
 		Columns:         make(map[string]Column),
 	}
 
-	var runOnServerSource string
 	var disabled []string
 	if strings.TrimSpace(q.Query) == "" {
 		disabled = append(disabled, "query is empty")
@@ -144,7 +143,6 @@ func Define(key string, q UserQuery, opts Options) Definition {
 			disabled = append(disabled, fmt.Sprintf("invalid runonserver %q: %v", q.RunOnServer, err))
 		} else {
 			def.RunOnServer = constraint
-			runOnServerSource = q.RunOnServer
 		}
 	}
 
@@ -173,7 +171,7 @@ func Define(key string, q UserQuery, opts Options) Definition {
 		}
 	}
 
-	fingerprint, err := def.fingerprint(runOnServerSource, sources)
+	fingerprint, err := def.fingerprint(sources)
 	if err != nil {
 		def.Disabled = fmt.Sprintf("fingerprint: %v", err)
 	}
@@ -313,34 +311,22 @@ type canonicalColumn struct {
 }
 
 type canonicalDefinition struct {
-	Key             string            `json:"key"`
-	Namespace       string            `json:"namespace"`
-	SQL             string            `json:"sql"`
-	Predicate       string            `json:"predicate"`
-	PrimaryOnly     bool              `json:"primaryOnly"`
-	RunOnServer     string            `json:"runOnServer"`
-	TargetDatabases []string          `json:"targetDatabases"`
-	CacheSeconds    uint64            `json:"cacheSeconds"`
-	Columns         []canonicalColumn `json:"columns"`
-	Labels          []string          `json:"labels"`
-	Disabled        string            `json:"disabled"`
+	Namespace   string            `json:"namespace"`
+	SQL         string            `json:"sql"`
+	Predicate   string            `json:"predicate"`
+	PrimaryOnly bool              `json:"primaryOnly"`
+	Columns     []canonicalColumn `json:"columns"`
 }
 
-// fingerprint hashes the Definition without Warnings and Fingerprint, written from plain values
+// fingerprint hashes what shapes samples: namespace, SQL, predicate, primary-only and the columns. Written from plain values
 // (version constraints by source text, sorted columns, mapping values as text) so it is stable across runs.
-func (d *Definition) fingerprint(runOnServer string, versionSources map[string]string) (string, error) {
+func (d *Definition) fingerprint(versionSources map[string]string) (string, error) {
 	canonical := canonicalDefinition{
-		Key:             d.Key,
-		Namespace:       d.Namespace,
-		SQL:             d.SQL,
-		Predicate:       d.Predicate,
-		PrimaryOnly:     d.PrimaryOnly,
-		RunOnServer:     runOnServer,
-		TargetDatabases: d.TargetDatabases,
-		CacheSeconds:    d.CacheSeconds,
-		Columns:         []canonicalColumn{},
-		Labels:          d.Labels,
-		Disabled:        d.Disabled,
+		Namespace:   d.Namespace,
+		SQL:         d.SQL,
+		Predicate:   d.Predicate,
+		PrimaryOnly: d.PrimaryOnly,
+		Columns:     []canonicalColumn{},
 	}
 	for _, name := range sortedKeys(d.Columns) {
 		column := d.Columns[name]

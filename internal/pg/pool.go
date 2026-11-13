@@ -281,6 +281,6 @@ func (p *Pool) closeConn(ctx context.Context, conn *pgx.Conn, database string) {
 	ctx, cancel := context.WithTimeout(ctx, closeTimeout)
 	defer cancel()
 	if err := conn.Close(ctx); err != nil {
-		p.log.V(1).Error(err, "close connection", "database", database)
+		p.log.V(1).Info("close connection", "database", database, "error", err.Error())
 	}
 }

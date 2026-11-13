@@ -246,14 +246,14 @@ var _ = Describe("Pool", func() {
 		Expect(backendPID(ctx, replacement)).NotTo(Equal(pid))
 	})
 
-	It("logs a close error with the database name only", func(ctx SpecContext) {
+	closeWithLogger := func(ctx context.Context, verbosity int) []string {
 		var mu sync.Mutex
 		var lines []string
 		logger := funcr.New(func(prefix, args string) {
 			mu.Lock()
 			defer mu.Unlock()
 			lines = append(lines, prefix+args)
-		}, funcr.Options{Verbosity: 1})
+		}, funcr.Options{Verbosity: verbosity})
 		pool = pg.NewPool(cfg, 2, 0, clk, pg.WithLogger(logger))
 		DeferCleanup(pool.Close)
 
@@ -266,9 +266,18 @@ var _ = Describe("Pool", func() {
 
 		mu.Lock()
 		defer mu.Unlock()
+		return append([]string(nil), lines...)
+	}
+
+	It("logs a close error at V(1) with the database name only", func(ctx SpecContext) {
+		lines := closeWithLogger(ctx, 1)
 		Expect(lines).To(HaveLen(1))
 		Expect(lines[0]).To(ContainSubstring(`"database"="app"`))
 		Expect(lines[0]).NotTo(ContainSubstring(pgtest.MonitorPassword))
+	})
+
+	It("logs nothing at the default verbosity", func(ctx SpecContext) {
+		Expect(closeWithLogger(ctx, 0)).To(BeEmpty())
 	})
 
 	It("answers ErrBackoff after a failed connect until the delay has passed", func(ctx SpecContext) {

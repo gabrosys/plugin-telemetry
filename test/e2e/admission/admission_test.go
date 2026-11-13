@@ -155,6 +155,12 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		Expect(err).NotTo(HaveOccurred())
 		_, err = plugin.CoreV1().Secrets(ns).Create(ctx, tokenSecret(ns, telemetryToken, telemetryName), metav1.CreateOptions{})
 		Expect(err).NotTo(HaveOccurred())
+
+		Eventually(func(g Gomega, ctx SpecContext) {
+			var secret corev1.Secret
+			g.Expect(c.Get(ctx, client.ObjectKey{Namespace: ns, Name: telemetryToken}, &secret)).To(Succeed())
+			g.Expect(secret.Data[corev1.ServiceAccountTokenKey]).NotTo(BeEmpty())
+		}).WithContext(ctx).WithTimeout(timeout).WithPolling(time.Second).Should(Succeed())
 	})
 
 	It("denies an update that points adm-telemetry-token at another account", func(ctx SpecContext) {

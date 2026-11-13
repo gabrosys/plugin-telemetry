@@ -1,0 +1,588 @@
+[
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "backends",
+    "labels": [
+      "datname",
+      "usename",
+      "application_name",
+      "state"
+    ],
+    "metrics": [
+      {
+        "kind": "gauge",
+        "name": "cnpg_backends_max_tx_duration_seconds",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_backends_total",
+        "usage": "GAUGE"
+      }
+    ],
+    "namespace": "cnpg_backends",
+    "primaryOnly": false,
+    "runOnServer": "",
+    "targetDatabases": null,
+    "warnings": null
+  },
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "backends_waiting",
+    "labels": null,
+    "metrics": [
+      {
+        "kind": "gauge",
+        "name": "cnpg_backends_waiting_total",
+        "usage": "GAUGE"
+      }
+    ],
+    "namespace": "cnpg_backends_waiting",
+    "primaryOnly": false,
+    "runOnServer": "",
+    "targetDatabases": null,
+    "warnings": null
+  },
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "collector",
+    "labels": [
+      "datname"
+    ],
+    "metrics": [
+      {
+        "kind": "gauge",
+        "name": "cnpg_collector_lo_pages",
+        "usage": "GAUGE"
+      }
+    ],
+    "namespace": "cnpg_collector",
+    "primaryOnly": false,
+    "runOnServer": "",
+    "targetDatabases": [
+      "*"
+    ],
+    "warnings": null
+  },
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "pg_database",
+    "labels": [
+      "datname"
+    ],
+    "metrics": [
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_database_mxid_age",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_database_size_bytes",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_database_xid_age",
+        "usage": "GAUGE"
+      }
+    ],
+    "namespace": "cnpg_pg_database",
+    "primaryOnly": false,
+    "runOnServer": "",
+    "targetDatabases": null,
+    "warnings": null
+  },
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "pg_extensions",
+    "labels": [
+      "datname",
+      "extname",
+      "default_version",
+      "installed_version"
+    ],
+    "metrics": [
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_extensions_update_available",
+        "usage": "GAUGE"
+      }
+    ],
+    "namespace": "cnpg_pg_extensions",
+    "primaryOnly": false,
+    "runOnServer": "",
+    "targetDatabases": [
+      "*"
+    ],
+    "warnings": null
+  },
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "pg_postmaster",
+    "labels": null,
+    "metrics": [
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_postmaster_start_time",
+        "usage": "GAUGE"
+      }
+    ],
+    "namespace": "cnpg_pg_postmaster",
+    "primaryOnly": false,
+    "runOnServer": "",
+    "targetDatabases": null,
+    "warnings": null
+  },
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "pg_replication",
+    "labels": null,
+    "metrics": [
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_replication_in_recovery",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_replication_is_wal_receiver_up",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_replication_lag",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_replication_streaming_replicas",
+        "usage": "GAUGE"
+      }
+    ],
+    "namespace": "cnpg_pg_replication",
+    "primaryOnly": false,
+    "runOnServer": "",
+    "targetDatabases": null,
+    "warnings": null
+  },
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "pg_replication_slots",
+    "labels": [
+      "slot_name",
+      "slot_type",
+      "database"
+    ],
+    "metrics": [
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_replication_slots_active",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_replication_slots_pg_wal_lsn_diff",
+        "usage": "GAUGE"
+      }
+    ],
+    "namespace": "cnpg_pg_replication_slots",
+    "primaryOnly": false,
+    "runOnServer": "",
+    "targetDatabases": null,
+    "warnings": null
+  },
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "pg_settings",
+    "labels": [
+      "name"
+    ],
+    "metrics": [
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_settings_setting",
+        "usage": "GAUGE"
+      }
+    ],
+    "namespace": "cnpg_pg_settings",
+    "primaryOnly": false,
+    "runOnServer": "",
+    "targetDatabases": null,
+    "warnings": null
+  },
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "pg_stat_archiver",
+    "labels": null,
+    "metrics": [
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_archiver_archived_count",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_archiver_failed_count",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_stat_archiver_last_archived_time",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_stat_archiver_last_archived_wal_start_lsn",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_stat_archiver_last_failed_time",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_stat_archiver_last_failed_wal_start_lsn",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_stat_archiver_seconds_since_last_archival",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_stat_archiver_seconds_since_last_failure",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_stat_archiver_stats_reset_time",
+        "usage": "GAUGE"
+      }
+    ],
+    "namespace": "cnpg_pg_stat_archiver",
+    "primaryOnly": false,
+    "runOnServer": "",
+    "targetDatabases": null,
+    "warnings": null
+  },
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "pg_stat_bgwriter",
+    "labels": null,
+    "metrics": [
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_bgwriter_buffers_alloc",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_bgwriter_buffers_backend",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_bgwriter_buffers_backend_fsync",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_bgwriter_buffers_checkpoint",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_bgwriter_buffers_clean",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_bgwriter_checkpoint_sync_time",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_bgwriter_checkpoint_write_time",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_bgwriter_checkpoints_req",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_bgwriter_checkpoints_timed",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_bgwriter_maxwritten_clean",
+        "usage": "COUNTER"
+      }
+    ],
+    "namespace": "cnpg_pg_stat_bgwriter",
+    "primaryOnly": false,
+    "runOnServer": "<17.0.0",
+    "targetDatabases": null,
+    "warnings": null
+  },
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "pg_stat_bgwriter_17",
+    "labels": null,
+    "metrics": [
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_bgwriter_buffers_alloc",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_bgwriter_buffers_clean",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_bgwriter_maxwritten_clean",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_stat_bgwriter_stats_reset_time",
+        "usage": "GAUGE"
+      }
+    ],
+    "namespace": "cnpg_pg_stat_bgwriter",
+    "primaryOnly": false,
+    "runOnServer": ">=17.0.0",
+    "targetDatabases": null,
+    "warnings": null
+  },
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "pg_stat_checkpointer",
+    "labels": null,
+    "metrics": [
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_checkpointer_buffers_written",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_checkpointer_checkpoints_req",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_checkpointer_checkpoints_timed",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_checkpointer_restartpoints_done",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_checkpointer_restartpoints_req",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_checkpointer_restartpoints_timed",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_stat_checkpointer_stats_reset_time",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_checkpointer_sync_time",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_checkpointer_write_time",
+        "usage": "COUNTER"
+      }
+    ],
+    "namespace": "cnpg_pg_stat_checkpointer",
+    "primaryOnly": false,
+    "runOnServer": ">=17.0.0",
+    "targetDatabases": null,
+    "warnings": null
+  },
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "pg_stat_database",
+    "labels": [
+      "datname"
+    ],
+    "metrics": [
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_database_blk_read_time",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_database_blk_write_time",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_database_blks_hit",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_database_blks_read",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_database_conflicts",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_database_deadlocks",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_database_temp_bytes",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_database_temp_files",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_database_tup_deleted",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_database_tup_fetched",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_database_tup_inserted",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_database_tup_returned",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_database_tup_updated",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_database_xact_commit",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_database_xact_rollback",
+        "usage": "COUNTER"
+      }
+    ],
+    "namespace": "cnpg_pg_stat_database",
+    "primaryOnly": false,
+    "runOnServer": "",
+    "targetDatabases": null,
+    "warnings": null
+  },
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "pg_stat_replication",
+    "labels": [
+      "usename",
+      "application_name",
+      "client_addr",
+      "client_port"
+    ],
+    "metrics": [
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_replication_backend_start",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "counter",
+        "name": "cnpg_pg_stat_replication_backend_xmin_age",
+        "usage": "COUNTER"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_stat_replication_flush_diff_bytes",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_stat_replication_flush_lag_seconds",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_stat_replication_replay_diff_bytes",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_stat_replication_replay_lag_seconds",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_stat_replication_sent_diff_bytes",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_stat_replication_write_diff_bytes",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_pg_stat_replication_write_lag_seconds",
+        "usage": "GAUGE"
+      }
+    ],
+    "namespace": "cnpg_pg_stat_replication",
+    "primaryOnly": true,
+    "runOnServer": "",
+    "targetDatabases": null,
+    "warnings": null
+  }
+]

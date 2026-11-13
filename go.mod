@@ -3,6 +3,7 @@ module github.com/gabrosys/plugin-telemetry
 go 1.27.4
 
 require (
+	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/cloudnative-pg/api v1.30.0
 	github.com/cloudnative-pg/cnpg-i v0.6.0
 	github.com/cloudnative-pg/cnpg-i-machinery v0.4.2
@@ -13,6 +14,7 @@ require (
 	github.com/onsi/ginkgo/v2 v2.34.0
 	github.com/onsi/gomega v1.44.0
 	github.com/spf13/cobra v1.10.2
+	go.yaml.in/yaml/v3 v3.0.5
 	go.yaml.in/yaml/v4 v4.0.0
 	golang.org/x/sync v0.25.0
 	google.golang.org/grpc v1.85.0
@@ -25,7 +27,6 @@ require (
 )
 
 require (
-	github.com/Masterminds/semver/v3 v3.5.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudnative-pg/barman-cloud v0.5.1 // indirect
@@ -83,7 +84,6 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
-	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect

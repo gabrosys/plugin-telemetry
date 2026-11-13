@@ -296,23 +296,28 @@ var _ = Describe("the release workflow", func() {
 		Expect(publishers).NotTo(BeEmpty())
 	})
 
-	It("versions a Go module and keeps breaking changes on 0.x", func() {
+	It("versions a Go module from 0.1.0 and keeps breaking changes on 0.x", func() {
 		var cfg struct {
 			Packages map[string]struct {
 				ReleaseType       string `json:"release-type"`
+				InitialVersion    string `json:"initial-version"`
 				BumpMinorPreMajor bool   `json:"bump-minor-pre-major"`
 			} `json:"packages"`
 		}
 		Expect(readJSON(releaseConfig, &cfg)).To(Succeed())
 		Expect(cfg.Packages).To(HaveKey("."))
 		Expect(cfg.Packages["."].ReleaseType).To(Equal("go"))
+		Expect(cfg.Packages["."].InitialVersion).To(Equal("0.1.0"))
 		Expect(cfg.Packages["."].BumpMinorPreMajor).To(BeTrue())
 	})
 
-	It("tracks the current version in the manifest", func() {
+	It("keeps the manifest empty until the first release, then semver", func() {
 		var manifest map[string]string
 		Expect(readJSON(releaseManifest, &manifest)).To(Succeed())
-		Expect(manifest).To(HaveKeyWithValue(".", MatchRegexp(semver.String())))
+		if len(manifest) > 0 {
+			Expect(manifest).To(HaveKeyWithValue(".", MatchRegexp(semver.String())))
+			Expect(manifest["."]).NotTo(Equal("0.0.0"))
+		}
 	})
 })
 

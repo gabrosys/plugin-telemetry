@@ -30,12 +30,13 @@ const (
 // ColumnMapping describes one result column. Field tags follow CloudNativePG v1.30.1
 // pkg/management/postgres/metrics/parser.go:51-67, plus MetricsMapping.
 type ColumnMapping struct {
-	Usage          Usage              `yaml:"usage"`
-	Description    string             `yaml:"description"`
-	MetricMapping  map[string]float64 `yaml:"metric_mapping"`
-	MetricsMapping map[string]float64 `yaml:"metrics_mapping"`
-	PGVersion      string             `yaml:"pg_version"`
-	Name           string             `yaml:"name"`
+	Usage         Usage              `yaml:"usage"`
+	Description   string             `yaml:"description"`
+	MetricMapping map[string]float64 `yaml:"metric_mapping"`
+	// MetricsMapping is decoded loosely, so a malformed value can't fail the file; Define checks it.
+	MetricsMapping any    `yaml:"metrics_mapping"`
+	PGVersion      string `yaml:"pg_version"`
+	Name           string `yaml:"name"`
 }
 
 // Mapping is one item of a query's metrics list.

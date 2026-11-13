@@ -252,14 +252,19 @@ func (d *Definition) setValue(c Column, source string, sources map[string]string
 	d.setColumn(c, source, sources)
 }
 
-// mapping picks metric_mapping, else metrics_mapping.
+// mapping picks metric_mapping when the key is present, else a well-formed metrics_mapping.
 func (d *Definition) mapping(columnName string, cm ColumnMapping) map[string]float64 {
 	chosen := cm.MetricMapping
-	if len(cm.MetricMapping) > 0 && len(cm.MetricsMapping) > 0 {
-		d.Warnings = append(d.Warnings, fmt.Sprintf("column %q: both metric_mapping and metrics_mapping are set, using metric_mapping", columnName))
-	}
-	if len(chosen) == 0 {
-		chosen = cm.MetricsMapping
+	if cm.MetricsMapping != nil {
+		alt, ok := numberMap(cm.MetricsMapping)
+		switch {
+		case !ok:
+			d.Warnings = append(d.Warnings, fmt.Sprintf("column %q: ignoring metrics_mapping, it is not a map of numbers", columnName))
+		case cm.MetricMapping != nil:
+			d.Warnings = append(d.Warnings, fmt.Sprintf("column %q: both metric_mapping and metrics_mapping are set, using metric_mapping", columnName))
+		default:
+			chosen = alt
+		}
 	}
 
 	out := make(map[string]float64, len(chosen))
@@ -268,6 +273,44 @@ func (d *Definition) mapping(columnName string, cm ColumnMapping) map[string]flo
 	}
 
 	return out
+}
+
+// numberMap converts a decoded YAML mapping whose values are all numbers.
+func numberMap(v any) (map[string]float64, bool) {
+	var raw map[string]any
+	switch m := v.(type) {
+	case map[string]any:
+		raw = m
+	case map[any]any:
+		raw = make(map[string]any, len(m))
+		for k, val := range m {
+			key, ok := k.(string)
+			if !ok {
+				return nil, false
+			}
+			raw[key] = val
+		}
+	default:
+		return nil, false
+	}
+
+	out := make(map[string]float64, len(raw))
+	for k, val := range raw {
+		switch n := val.(type) {
+		case int:
+			out[k] = float64(n)
+		case int64:
+			out[k] = float64(n)
+		case uint64:
+			out[k] = float64(n)
+		case float64:
+			out[k] = n
+		default:
+			return nil, false
+		}
+	}
+
+	return out, true
 }
 
 // labelColumns lists the label columns in YAML order, once each, as they stand after overwrites.

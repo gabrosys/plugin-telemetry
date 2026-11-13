@@ -107,7 +107,7 @@ q:
         metric_mapping: {down: 0}
 `))
 		Expect(err).ToNot(HaveOccurred())
-		Expect(result["q"].Metrics[0]["a"].MetricsMapping).To(Equal(map[string]float64{"up": 1}))
+		Expect(result["q"].Metrics[0]["a"].MetricsMapping).To(Equal(map[string]any{"up": 1}))
 		Expect(result["q"].Metrics[1]["b"].MetricMapping).To(Equal(map[string]float64{"down": 0}))
 	})
 

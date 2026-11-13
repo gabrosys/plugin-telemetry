@@ -148,6 +148,17 @@ stats:
 		Expect(def.Disabled).To(BeEmpty())
 	})
 
+	It("uses an empty metric_mapping over metrics_mapping, with a warning", func() {
+		def := defineOne("stats", `
+stats:
+  query: SELECT 1
+  metrics:
+    - s: {usage: MAPPEDMETRIC, metric_mapping: {}, metrics_mapping: {up: 1}}
+`, opts)
+		Expect(def.Columns["s"].Mapping).To(BeEmpty())
+		Expect(def.Warnings).To(ConsistOf(ContainSubstring("metrics_mapping")))
+	})
+
 	It("accepts metrics_mapping alone", func() {
 		def := defineOne("stats", `
 stats:
@@ -156,6 +167,36 @@ stats:
     - s: {usage: MAPPEDMETRIC, metrics_mapping: {up: 1, down: 0}}
 `, opts)
 		Expect(def.Columns["s"].Mapping).To(Equal(map[string]float64{"up": 1, "down": 0}))
+		Expect(def.Warnings).To(BeEmpty())
+	})
+
+	DescribeTable("ignores a metrics_mapping that is not a map of numbers, with a warning, and still loads the file",
+		func(value string) {
+			defs := defineAll(`
+bad:
+  query: SELECT 1
+  metrics:
+    - s: {usage: MAPPEDMETRIC, metrics_mapping: ` + value + `}
+good:
+  query: SELECT 1
+  metrics:
+    - g: {usage: GAUGE}
+`)
+			Expect(defs).To(HaveKey("good"))
+			Expect(defs["good"].Warnings).To(BeEmpty())
+			Expect(defs["bad"].Disabled).To(BeEmpty())
+			Expect(defs["bad"].Columns["s"].Mapping).To(BeEmpty())
+			Expect(defs["bad"].Warnings).To(ConsistOf(ContainSubstring(`"s"`)))
+		},
+		Entry("a non-numeric value", "{up: x}"),
+		Entry("a scalar", "up"),
+		Entry("a list", "[1, 2]"),
+		Entry("a boolean value", "{up: true}"),
+	)
+
+	It("reads integer and float values of metrics_mapping", func() {
+		def := defineOne("stats", "stats:\n  query: SELECT 1\n  metrics:\n    - s: {usage: MAPPEDMETRIC, metrics_mapping: {a: 1, b: 2.5}}\n", opts)
+		Expect(def.Columns["s"].Mapping).To(Equal(map[string]float64{"a": 1, "b": 2.5}))
 		Expect(def.Warnings).To(BeEmpty())
 	})
 

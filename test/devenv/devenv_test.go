@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -18,6 +19,11 @@ import (
 const (
 	script    = "../../hack/dev-env.sh"
 	nodeImage = "kindest/node:v1.37.0@sha256:0000"
+
+	certManagerApply = "kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.21.3/cert-manager.yaml"
+	certManagerCheck = "cmctl check api --context kind-pt --wait=2m"
+	cnpgReleaseApply = "kubectl apply --server-side -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.30/releases/cnpg-1.30.1.yaml"
+	cnpgMainApply    = "kubectl apply --server-side -f https://raw.githubusercontent.com/cloudnative-pg/artifacts/main/manifests/operator-manifest.yaml"
 )
 
 type result struct {
@@ -55,11 +61,14 @@ func (f fakes) up(ctx context.Context, cnpgVersion string, extraEnv ...string) r
 	Expect(err).NotTo(HaveOccurred())
 	kubectl, err := filepath.Abs("testdata/kubectl")
 	Expect(err).NotTo(HaveOccurred())
+	cmctl, err := filepath.Abs("testdata/cmctl")
+	Expect(err).NotTo(HaveOccurred())
 
 	cmd := exec.CommandContext(ctx, "bash", script, "up")
 	cmd.Env = append(os.Environ(),
 		"KIND="+kind,
 		"KUBECTL="+kubectl,
+		"CMCTL="+cmctl,
 		"KIND_CLUSTER=pt",
 		"KIND_NODE_IMAGE="+nodeImage,
 		"CNPG_VERSION="+cnpgVersion,
@@ -93,6 +102,31 @@ var _ = Describe("dev-env.sh up", func() {
 		Expect(r.stdout).To(ContainSubstring("dev-env ready:"))
 		Expect(f.read("calls")).To(ContainSubstring("kind create cluster --name pt"))
 		Expect(f.read("marker")).To(And(ContainSubstring("cnpgVersion=v1.30.1"), ContainSubstring("complete=true")))
+	})
+
+	It("installs cert-manager and a CNPG release as their docs describe", func(ctx SpecContext) {
+		r := f.up(ctx, "v1.30.1")
+		Expect(r.code).To(Equal(0), r.stderr)
+		Expect(strings.Split(strings.TrimSpace(f.read("calls")), "\n")).To(ContainElements(
+			certManagerApply, certManagerCheck, cnpgReleaseApply,
+		))
+		Expect(f.read("calls")).To(MatchRegexp(
+			regexp.QuoteMeta(certManagerApply) + `(?s).*` + regexp.QuoteMeta(certManagerCheck) + `.*` + regexp.QuoteMeta(cnpgReleaseApply),
+		))
+	})
+
+	It("installs CNPG main from the artifacts manifest", func(ctx SpecContext) {
+		r := f.up(ctx, "main")
+		Expect(r.code).To(Equal(0), r.stderr)
+		Expect(f.read("calls")).To(ContainSubstring(cnpgMainApply))
+	})
+
+	It("stops when the cert-manager API never becomes ready", func(ctx SpecContext) {
+		f.write("cert-manager-api-down", "")
+		r := f.up(ctx, "v1.30.1")
+		Expect(r.code).NotTo(Equal(0))
+		Expect(f.read("calls")).NotTo(ContainSubstring("cloudnative-pg"))
+		Expect(f.read("marker")).To(ContainSubstring("complete=false"))
 	})
 
 	It("does nothing when the environment is complete and current", func(ctx SpecContext) {
@@ -145,7 +179,7 @@ var _ = Describe("dev-env.sh up", func() {
 		f.marker("v1.30.1", "false")
 		r := f.up(ctx, "v1.30.1")
 		Expect(r.code).To(Equal(0), r.stderr)
-		Expect(f.read("calls")).To(ContainSubstring("apply --server-side -f https://github.com/cloudnative-pg"))
+		Expect(f.read("calls")).To(ContainSubstring(cnpgReleaseApply))
 		Expect(f.read("marker")).To(ContainSubstring("complete=true"))
 	})
 

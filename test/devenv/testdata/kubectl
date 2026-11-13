@@ -28,16 +28,13 @@ case "$*" in
 "apply -f -")
 	cat >"$state/marker"
 	;;
-"apply --dry-run=server -f -")
-	cat >/dev/null
-	;;
-"apply --server-side -f "*)
+"apply --server-side -f "* | "apply -f https://"*)
 	if [[ -n ${FAKE_FAIL_APPLY:-} && $* == *"$FAKE_FAIL_APPLY"* ]]; then
 		echo "fake kubectl: apply failed" >&2
 		exit 1
 	fi
 	;;
-"wait "* | "rollout status "*) ;;
+"rollout status "*) ;;
 "get deployment cnpg-controller-manager "*)
 	echo "ghcr.io/cloudnative-pg/cloudnative-pg:fake"
 	;;

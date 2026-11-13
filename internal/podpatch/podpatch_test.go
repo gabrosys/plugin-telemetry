@@ -154,6 +154,21 @@ var _ = Describe("Apply", func() {
 				}
 			})
 
+			It("sets requests and limits from custom resources", func() {
+				custom := params(podpatch.AuthPeer)
+				custom.CPU, custom.Memory = resource.MustParse("100m"), resource.MustParse("128Mi")
+				Expect(podpatch.Apply(pod, cluster, custom, image)).To(Succeed())
+
+				c := sidecarOf(pod)
+				Expect(c.Resources.Requests).To(HaveLen(2))
+				Expect(c.Resources.Limits).To(HaveLen(2))
+				for _, list := range []corev1.ResourceList{c.Resources.Requests, c.Resources.Limits} {
+					cpu, mem := list[corev1.ResourceCPU], list[corev1.ResourceMemory]
+					Expect(cpu.Cmp(resource.MustParse("100m"))).To(BeZero())
+					Expect(mem.Cmp(resource.MustParse("128Mi"))).To(BeZero())
+				}
+			})
+
 			It("adapts to password mode", func() {
 				Expect(podpatch.Apply(pod, cluster, params(podpatch.AuthPassword), image)).To(Succeed())
 

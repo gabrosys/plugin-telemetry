@@ -11,12 +11,13 @@ import (
 var _ = Describe("ParseParams", func() {
 	DescribeTable("accepts",
 		func(raw map[string]string, auth podpatch.AuthMode, cpu, mem string, ignored []string) {
-			p, ign, err := podpatch.ParseParams(raw)
+			r, err := podpatch.ParseParams(raw)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(p.Auth).To(Equal(auth))
-			Expect(p.CPU.Cmp(resource.MustParse(cpu))).To(BeZero())
-			Expect(p.Memory.Cmp(resource.MustParse(mem))).To(BeZero())
-			Expect(ign).To(ConsistOf(ignored))
+			Expect(r.Params.Auth).To(Equal(auth))
+			Expect(r.Params.CPU.Cmp(resource.MustParse(cpu))).To(BeZero())
+			Expect(r.Params.Memory.Cmp(resource.MustParse(mem))).To(BeZero())
+			Expect(r.Ignored).To(ConsistOf(ignored))
+			Expect(r.Defaulted).To(BeEmpty())
 		},
 		Entry("no parameters", map[string]string(nil), podpatch.AuthPeer, "50m", "64Mi", nil),
 		Entry("password mode", map[string]string{"auth": "password", "passwordSecret": "s"}, podpatch.AuthPassword, "50m", "64Mi", nil),
@@ -27,22 +28,53 @@ var _ = Describe("ParseParams", func() {
 	)
 
 	It("returns ignored keys sorted", func() {
-		_, ign, err := podpatch.ParseParams(map[string]string{"zeta": "1", "alpha": "2", "mid": "3"})
+		r, err := podpatch.ParseParams(map[string]string{"zeta": "1", "alpha": "2", "mid": "3"})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(ign).To(Equal([]string{"alpha", "mid", "zeta"}))
+		Expect(r.Ignored).To(Equal([]string{"alpha", "mid", "zeta"}))
+	})
+
+	DescribeTable("accepts with the default",
+		func(raw map[string]string, cpu, mem, key string) {
+			r, err := podpatch.ParseParams(raw)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(r.Params.CPU.Cmp(resource.MustParse(cpu))).To(BeZero())
+			Expect(r.Params.Memory.Cmp(resource.MustParse(mem))).To(BeZero())
+			Expect(r.Defaulted).To(HaveLen(1))
+			Expect(r.Defaulted[0]).To(MatchError(podpatch.ErrInvalidParameters))
+			Expect(r.Defaulted[0]).To(MatchError(ContainSubstring(key)))
+			Expect(r.Defaulted[0]).To(MatchError(ContainSubstring(raw[key])))
+		},
+		Entry("memory without a unit", map[string]string{"sidecarMemory": "64"}, "50m", "64Mi", "sidecarMemory"),
+		Entry("memory below 32Mi", map[string]string{"sidecarMemory": "16Mi"}, "50m", "64Mi", "sidecarMemory"),
+		Entry("CPU below 10m", map[string]string{"sidecarCPU": "5m"}, "50m", "64Mi", "sidecarCPU"),
+		Entry("a negative CPU", map[string]string{"sidecarCPU": "-1"}, "50m", "64Mi", "sidecarCPU"),
+		Entry("a quantity that doesn't parse", map[string]string{"sidecarCPU": "lots"}, "50m", "64Mi", "sidecarCPU"),
+		Entry("a valid CPU next to an invalid memory", map[string]string{"sidecarCPU": "100m", "sidecarMemory": "x"}, "100m", "64Mi", "sidecarMemory"),
+	)
+
+	It("defaults both invalid resources, CPU first", func() {
+		r, err := podpatch.ParseParams(map[string]string{"sidecarMemory": "x", "sidecarCPU": "y"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(r.Params.CPU.Cmp(resource.MustParse("50m"))).To(BeZero())
+		Expect(r.Params.Memory.Cmp(resource.MustParse("64Mi"))).To(BeZero())
+		Expect(r.Defaulted).To(HaveLen(2))
+		Expect(r.Defaulted[0]).To(MatchError(ContainSubstring("sidecarCPU")))
+		Expect(r.Defaulted[1]).To(MatchError(ContainSubstring("sidecarMemory")))
 	})
 
 	DescribeTable("rejects",
 		func(raw map[string]string) {
-			_, _, err := podpatch.ParseParams(raw)
+			_, err := podpatch.ParseParams(raw)
 			Expect(err).To(MatchError(podpatch.ErrInvalidParameters))
 		},
 		Entry("an unknown mode", map[string]string{"auth": "ldap"}),
 		Entry("a mode in the wrong case", map[string]string{"auth": "Peer"}),
-		Entry("memory without a unit", map[string]string{"sidecarMemory": "64"}),
-		Entry("memory below 32Mi", map[string]string{"sidecarMemory": "16Mi"}),
-		Entry("CPU below 10m", map[string]string{"sidecarCPU": "5m"}),
-		Entry("a negative CPU", map[string]string{"sidecarCPU": "-1"}),
-		Entry("a quantity that doesn't parse", map[string]string{"sidecarCPU": "lots"}),
+		Entry("an invalid mode next to an invalid resource", map[string]string{"auth": "ldap", "sidecarCPU": "lots"}),
 	)
+
+	It("reports the auth error, not the resource, when both are invalid", func() {
+		_, err := podpatch.ParseParams(map[string]string{"auth": "ldap", "sidecarCPU": "lots"})
+		Expect(err).To(MatchError(ContainSubstring("auth")))
+		Expect(err).NotTo(MatchError(ContainSubstring("sidecarCPU")))
+	})
 })

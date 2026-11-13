@@ -48,47 +48,62 @@ type Params struct {
 	Memory resource.Quantity
 }
 
+// Result is the outcome of ParseParams.
+type Result struct {
+	Params    Params
+	Ignored   []string // unknown keys, sorted
+	Defaulted []error  // one per invalid sidecarCPU/sidecarMemory value; each wraps ErrInvalidParameters
+}
+
 // ParseParams reads the Cluster's plugin parameters. Known keys are exporter,
 // auth, passwordSecret, sidecarCPU and sidecarMemory; any other key is returned
-// in ignored, sorted.
-func ParseParams(raw map[string]string) (p Params, ignored []string, err error) {
-	p = Params{
+// in Ignored, sorted. An invalid sidecarCPU or sidecarMemory falls back to its
+// default and is reported in Defaulted. It returns an error wrapping
+// ErrInvalidParameters only for an invalid auth.
+func ParseParams(raw map[string]string) (Result, error) {
+	r := Result{Params: Params{
 		Auth:   AuthPeer,
 		CPU:    resource.MustParse(defaultCPU),
 		Memory: resource.MustParse(defaultMemory),
-	}
+	}}
 
 	for key := range raw {
 		switch key {
 		case keyExporter, keyAuth, keyPasswordSecret, keyCPU, keyMemory:
 		default:
-			ignored = append(ignored, key)
+			r.Ignored = append(r.Ignored, key)
 		}
 	}
-	slices.Sort(ignored)
+	slices.Sort(r.Ignored)
 
 	if v, ok := raw[keyAuth]; ok {
 		switch mode := AuthMode(v); mode {
 		case AuthPeer, AuthPassword:
-			p.Auth = mode
+			r.Params.Auth = mode
 		default:
-			return Params{}, nil, fmt.Errorf("%w: %s %q must be %q or %q", ErrInvalidParameters, keyAuth, v, AuthPeer, AuthPassword)
+			return Result{}, fmt.Errorf("%w: %s %q must be %q or %q", ErrInvalidParameters, keyAuth, v, AuthPeer, AuthPassword)
 		}
 	}
 
 	if v, ok := raw[keyCPU]; ok {
-		if p.CPU, err = parseQuantity(keyCPU, v, minCPU); err != nil {
-			return Params{}, nil, err
+		q, err := parseQuantity(keyCPU, v, minCPU)
+		if err != nil {
+			r.Defaulted = append(r.Defaulted, err)
+		} else {
+			r.Params.CPU = q
 		}
 	}
 
 	if v, ok := raw[keyMemory]; ok {
-		if p.Memory, err = parseQuantity(keyMemory, v, minMemory); err != nil {
-			return Params{}, nil, err
+		q, err := parseQuantity(keyMemory, v, minMemory)
+		if err != nil {
+			r.Defaulted = append(r.Defaulted, err)
+		} else {
+			r.Params.Memory = q
 		}
 	}
 
-	return p, ignored, nil
+	return r, nil
 }
 
 func parseQuantity(key, value, floor string) (resource.Quantity, error) {

@@ -180,6 +180,37 @@ var _ = Describe("Lifecycle", func() {
 		})
 	}
 
+	It("falls back to the default for an invalid sidecarMemory and still patches", func(ctx context.Context) {
+		ctx, all := captureAll(ctx)
+		pod := fixturePod("pod-main")
+		resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
+			clusterJSON(ours(map[string]string{"sidecarMemory": "16Mi"})), pod))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.GetJsonPatch()).NotTo(BeEmpty())
+
+		patched := &corev1.Pod{}
+		Expect(json.Unmarshal(applyPatch(pod, resp.GetJsonPatch()), patched)).To(Succeed())
+		var sidecar corev1.Container
+		for _, c := range patched.Spec.InitContainers {
+			if c.Name == metadata.SidecarContainerName {
+				sidecar = c
+			}
+		}
+		mem := sidecar.Resources.Limits[corev1.ResourceMemory]
+		Expect(mem.String()).To(Equal("64Mi"))
+
+		Expect(all()).To(ContainElement(SatisfyAll(
+			HaveKeyWithValue("msg", "invalid sidecar resource, using the default"),
+			HaveKeyWithValue("namespace", "fixture"),
+			HaveKeyWithValue("cluster", "fixture"),
+			HaveKeyWithValue("error", ContainSubstring("sidecarMemory")),
+		)))
+		Expect(all()).To(ContainElement(SatisfyAll(
+			HaveKeyWithValue("msg", "lifecycle hook"),
+			HaveKeyWithValue("outcome", "patched"),
+		)))
+	})
+
 	It("returns no patch for a Pod with no scratch volume in peer mode", func(ctx context.Context) {
 		pod := &corev1.Pod{}
 		Expect(json.Unmarshal(fixturePod("pod-main"), pod)).To(Succeed())
@@ -219,19 +250,33 @@ var _ = Describe("Lifecycle", func() {
 	})
 })
 
-// captureLogs returns a context whose logger keeps every line, and a
-// function returning the "lifecycle hook" lines decoded from JSON.
-func captureLogs(ctx context.Context) (context.Context, func() []map[string]any) {
+// captureAll returns a context whose logger keeps every line, and a
+// function returning all lines decoded from JSON.
+func captureAll(ctx context.Context) (context.Context, func() []map[string]any) {
 	var lines []string
 	sink := funcr.NewJSON(func(obj string) { lines = append(lines, obj) }, funcr.Options{})
 
 	return logr.NewContext(ctx, sink), func() []map[string]any {
 		GinkgoHelper()
 
-		var hook []map[string]any
+		entries := make([]map[string]any, 0, len(lines))
 		for _, line := range lines {
 			var entry map[string]any
 			Expect(json.Unmarshal([]byte(line), &entry)).To(Succeed())
+			entries = append(entries, entry)
+		}
+
+		return entries
+	}
+}
+
+// captureLogs is captureAll narrowed to the "lifecycle hook" lines.
+func captureLogs(ctx context.Context) (context.Context, func() []map[string]any) {
+	ctx, all := captureAll(ctx)
+
+	return ctx, func() []map[string]any {
+		var hook []map[string]any
+		for _, entry := range all() {
 			if entry["msg"] == "lifecycle hook" {
 				hook = append(hook, entry)
 			}
@@ -323,8 +368,8 @@ var _ = Describe("Lifecycle logging", func() {
 func mustParams(raw map[string]string) podpatch.Params {
 	GinkgoHelper()
 
-	p, _, err := podpatch.ParseParams(raw)
+	r, err := podpatch.ParseParams(raw)
 	Expect(err).NotTo(HaveOccurred())
 
-	return p
+	return r.Params
 }

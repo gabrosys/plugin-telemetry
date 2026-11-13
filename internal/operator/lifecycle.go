@@ -136,16 +136,19 @@ func (l *Lifecycle) patch(
 		return nil, errNoImage
 	}
 
-	params, ignored, err := podpatch.ParseParams(pluginConfig.Parameters)
+	parsed, err := podpatch.ParseParams(pluginConfig.Parameters)
 	if err != nil {
 		return nil, fmt.Errorf("parse plugin parameters: %w", err)
 	}
-	if len(ignored) > 0 {
-		logger.Warning("ignoring unknown plugin parameters", "keys", ignored)
+	for _, defaulted := range parsed.Defaulted {
+		logger.Error(defaulted, "invalid sidecar resource, using the default")
+	}
+	if len(parsed.Ignored) > 0 {
+		logger.Warning("ignoring unknown plugin parameters", "keys", parsed.Ignored)
 	}
 
 	mutated := original.DeepCopy()
-	if err := podpatch.Apply(mutated, cluster.Name, params, image); err != nil {
+	if err := podpatch.Apply(mutated, cluster.Name, parsed.Params, image); err != nil {
 		return nil, fmt.Errorf("apply sidecar patch: %w", err)
 	}
 

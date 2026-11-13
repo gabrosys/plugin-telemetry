@@ -32,7 +32,7 @@ var (
 	readOnlyScope = map[string]bool{"read": true, "none": true}
 	semver        = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
-	releaseWriteScopes = map[string]bool{"contents": true, "pull-requests": true, "packages": true}
+	releaseWriteScopes = map[string]bool{"contents": true, "issues": true, "pull-requests": true, "packages": true}
 )
 
 type workflow struct {
@@ -262,6 +262,17 @@ var _ = Describe("CI workflows", func() {
 })
 
 var _ = Describe("the release workflow", func() {
+	It("grants release-please the permissions it documents", func() {
+		wf, ok := findWorkflow(releaseWorkflow)
+		Expect(ok).To(BeTrue())
+		Expect(wf.doc.Jobs).To(HaveKey("release-please"))
+		Expect(wf.doc.Jobs["release-please"].Permissions).To(Equal(map[string]any{
+			"contents":      "write",
+			"issues":        "write",
+			"pull-requests": "write",
+		}))
+	})
+
 	It("runs only on pushes to main", func() {
 		wf, ok := findWorkflow(releaseWorkflow)
 		Expect(ok).To(BeTrue())

@@ -155,6 +155,36 @@ var _ = Describe("Load", func() {
 		Expect(err).To(MatchError(ContainSubstring("cluster")))
 	})
 
+	It("gives a group without interval the default interval", func() {
+		p := writeConfig("cluster: c\ndefaultInterval: 45s\nexporter:\n  endpoint: http://x\ngroups:\n  - name: g\n    queries: [q]\n")
+
+		s, err := settings.Load(p)
+
+		Expect(err).ToNot(HaveOccurred())
+		Expect(s.Groups[0].Interval).To(Equal(45 * time.Second))
+	})
+
+	It("rejects an explicit zero group interval", func() {
+		p := writeConfig("cluster: c\nexporter:\n  endpoint: http://x\ngroups:\n  - name: g\n    interval: 0s\n    queries: [q]\n")
+
+		_, err := settings.Load(p)
+
+		Expect(err).To(MatchError(ContainSubstring("groups[0].interval")))
+	})
+
+	DescribeTable("rejects an unknown key at every level",
+		func(doc, key string) {
+			_, err := settings.Load(writeConfig(doc))
+			Expect(err).To(MatchError(ContainSubstring(key)))
+		},
+		Entry("top level", "cluster: c\nbogusTop: 1\nexporter:\n  endpoint: http://x\n", "bogusTop"),
+		Entry("postgres", "cluster: c\npostgres:\n  bogusPg: 1\nexporter:\n  endpoint: http://x\n", "bogusPg"),
+		Entry("group item", "cluster: c\nexporter:\n  endpoint: http://x\ngroups:\n  - name: g\n    queries: [q]\n    bogusGroup: 1\n", "bogusGroup"),
+		Entry("limits", "cluster: c\nlimits:\n  bogusLimit: 1\nexporter:\n  endpoint: http://x\n", "bogusLimit"),
+		Entry("exclude", "cluster: c\nexclude:\n  bogusExclude: [a]\nexporter:\n  endpoint: http://x\n", "bogusExclude"),
+		Entry("exporter.tls", "cluster: c\nexporter:\n  endpoint: https://x\n  tls:\n    bogusTLS: 1\n", "bogusTLS"),
+	)
+
 	It("rejects a zero exporter timeout instead of defaulting it", func() {
 		p := writeConfig("cluster: c\nexporter:\n  endpoint: http://x\n  timeout: 0s\n")
 		_, err := settings.Load(p)

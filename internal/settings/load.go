@@ -12,8 +12,15 @@ import (
 	"go.yaml.in/yaml/v4"
 )
 
-// unsetTimeout marks exporter.timeout as absent from the file, so an explicit 0s still fails validation.
-const unsetTimeout = time.Duration(-1)
+// presence records which defaulted durations the file sets, so an explicit 0s is kept and fails validation.
+type presence struct {
+	Groups []struct {
+		Interval *time.Duration `yaml:"interval"`
+	} `yaml:"groups"`
+	Exporter struct {
+		Timeout *time.Duration `yaml:"timeout"`
+	} `yaml:"exporter"`
+}
 
 func defaults() Settings {
 	return Settings{
@@ -41,7 +48,6 @@ func defaults() Settings {
 			TLS:                 TLS{MinVersion: "1.2"},
 			Compression:         "gzip",
 			Interval:            30 * time.Second,
-			Timeout:             unsetTimeout,
 			MaxPointsPerRequest: 2000,
 		},
 	}
@@ -62,11 +68,15 @@ func Load(path string) (Settings, error) {
 		return Settings{}, fmt.Errorf("parse settings %s: %w", path, err)
 	}
 
-	if s.Exporter.Timeout == unsetTimeout {
+	var seen presence
+	if err := yaml.NewDecoder(bytes.NewReader(data)).Decode(&seen); err != nil && !errors.Is(err, io.EOF) {
+		return Settings{}, fmt.Errorf("parse settings %s: %w", path, err)
+	}
+	if seen.Exporter.Timeout == nil {
 		s.Exporter.Timeout = min(10*time.Second, s.Exporter.Interval/2)
 	}
 	for i := range s.Groups {
-		if s.Groups[i].Interval == 0 {
+		if i < len(seen.Groups) && seen.Groups[i].Interval == nil {
 			s.Groups[i].Interval = s.DefaultInterval
 		}
 	}

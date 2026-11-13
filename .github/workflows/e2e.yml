@@ -6,7 +6,7 @@ on:
       suite:
         description: e2e suite to run
         type: choice
-        options: [smoke]
+        options: [smoke, spikes]
         default: smoke
 
 permissions: {}

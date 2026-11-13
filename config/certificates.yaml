@@ -1,0 +1,38 @@
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: plugin-telemetry-selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: plugin-telemetry-server
+spec:
+  secretName: plugin-telemetry-server-tls
+  dnsNames:
+    - plugin-telemetry
+    - plugin-telemetry.cnpg-system.svc
+  usages:
+    - server auth
+  duration: 2160h
+  renewBefore: 360h
+  issuerRef:
+    name: plugin-telemetry-selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: plugin-telemetry-client
+spec:
+  secretName: plugin-telemetry-client-tls
+  commonName: plugin-telemetry-client
+  usages:
+    - client auth
+  duration: 2160h
+  renewBefore: 360h
+  issuerRef:
+    name: plugin-telemetry-selfsigned
+    kind: Issuer

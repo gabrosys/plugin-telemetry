@@ -227,6 +227,19 @@ var _ = Describe("Run", func() {
 			Expect(err).To(HaveOccurred())
 		})
 
+		It("rejects a client whose certificate the CA does not trust", func() {
+			otherKey, otherDER := selfSigned(3, x509.ExtKeyUsageClientAuth, nil)
+			cfg := goodTLS()
+			cfg.Certificates = []tls.Certificate{{Certificate: [][]byte{otherDER}, PrivateKey: otherKey}}
+			conn, err := dial(cfg)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(conn.Close)
+			ctx, c := context.WithTimeout(context.Background(), 5*time.Second)
+			defer c()
+			_, err = identity.NewIdentityClient(conn).GetPluginMetadata(ctx, &identity.GetPluginMetadataRequest{})
+			Expect(err).To(HaveOccurred())
+		})
+
 		It("rejects TLS 1.2", func() {
 			cfg := goodTLS()
 			cfg.MinVersion = tls.VersionTLS12

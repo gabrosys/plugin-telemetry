@@ -6,10 +6,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cloudnative-pg/machinery/pkg/log"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	toolscache "k8s.io/client-go/tools/cache"
 
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
 )
@@ -91,4 +93,65 @@ var _ = Describe("ImageStore", func() {
 		}
 		wg.Wait()
 	})
+})
+
+var _ = Describe("image event handler", func() {
+	var (
+		store   *operator.ImageStore
+		handler toolscache.ResourceEventHandlerFuncs
+		logs    func() []map[string]any
+	)
+
+	validImage := "ghcr.io/x@sha256:" + hex64
+	otherImage := "ghcr.io/y@sha256:" + strings.Repeat("0", 64)
+
+	BeforeEach(func(ctx context.Context) {
+		var logCtx context.Context
+		logCtx, logs = captureAll(ctx)
+		store = operator.NewImageStore()
+		handler = operator.ImageEventHandler(log.FromContext(logCtx), store)
+	})
+
+	It("sets the image on add", func() {
+		handler.OnAdd(configMap(map[string]string{operator.SidecarImageKey: validImage}), true)
+
+		Expect(store.Image()).To(Equal(validImage))
+		Expect(logs()).NotTo(ContainElement(HaveKey("error")))
+	})
+
+	It("replaces the image on a valid update", func() {
+		handler.OnAdd(configMap(map[string]string{operator.SidecarImageKey: validImage}), true)
+		handler.OnUpdate(nil, configMap(map[string]string{operator.SidecarImageKey: otherImage}))
+
+		Expect(store.Image()).To(Equal(otherImage))
+	})
+
+	It("keeps the previous image and logs an error on an update to an invalid value", func() {
+		handler.OnAdd(configMap(map[string]string{operator.SidecarImageKey: validImage}), true)
+		handler.OnUpdate(nil, configMap(map[string]string{operator.SidecarImageKey: "ghcr.io/x:latest"}))
+
+		Expect(store.Image()).To(Equal(validImage))
+		Expect(logs()).To(ContainElement(HaveKey("error")))
+	})
+
+	It("logs an error on an unexpected object type", func() {
+		handler.OnAdd("not a configmap", true)
+
+		Expect(store.Image()).To(BeEmpty())
+		Expect(logs()).To(ContainElement(HaveKeyWithValue("type", "string")))
+	})
+
+	DescribeTable("keeps the previous image and logs an error on a delete",
+		func(deleted func(*corev1.ConfigMap) any) {
+			handler.OnAdd(configMap(map[string]string{operator.SidecarImageKey: validImage}), true)
+			handler.OnDelete(deleted(configMap(nil)))
+
+			Expect(store.Image()).To(Equal(validImage))
+			Expect(logs()).To(ContainElement(HaveKey("error")))
+		},
+		Entry("of the object", func(cm *corev1.ConfigMap) any { return cm }),
+		Entry("seen as a tombstone", func(cm *corev1.ConfigMap) any {
+			return toolscache.DeletedFinalStateUnknown{Key: "cnpg-system/sidecar-image", Obj: cm}
+		}),
+	)
 })

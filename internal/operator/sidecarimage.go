@@ -24,6 +24,8 @@ const SidecarImageKey = "image"
 // ErrInvalidImageRef is returned for a sidecar image that is not a digest reference.
 var ErrInvalidImageRef = errors.New("sidecar image must be <repository>@sha256:<64 lowercase hex>")
 
+var errUnexpectedObject = errors.New("unexpected object type")
+
 var errConfigMapDeleted = errors.New("sidecar image configmap deleted, a restarted replica will not serve")
 
 var imageRefPattern = regexp.MustCompile(
@@ -119,25 +121,7 @@ func WatchSidecarImage(
 		return fmt.Errorf("get configmap informer: %w", err)
 	}
 
-	set := func(obj any) {
-		cm, ok := obj.(*corev1.ConfigMap)
-		if !ok {
-			logger.Error(nil, "unexpected object type", "type", fmt.Sprintf("%T", obj))
-			return
-		}
-		if err := store.Set(cm); err != nil {
-			logger.Error(err, "ignoring sidecar image configmap")
-			return
-		}
-		logger.Info("sidecar image updated", "image", store.Image())
-	}
-	_, err = informer.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
-		AddFunc:    set,
-		UpdateFunc: func(_, obj any) { set(obj) },
-		DeleteFunc: func(any) {
-			logger.Error(errConfigMapDeleted, "keeping the last valid sidecar image")
-		},
-	})
+	_, err = informer.AddEventHandler(imageEventHandler(logger, store))
 	if err != nil {
 		return fmt.Errorf("add configmap event handler: %w", err)
 	}
@@ -146,4 +130,29 @@ func WatchSidecarImage(
 		return fmt.Errorf("run configmap cache: %w", err)
 	}
 	return nil
+}
+
+// imageEventHandler feeds ConfigMap events to store. An invalid ConfigMap or a
+// delete (including a DeletedFinalStateUnknown tombstone) keeps the stored image.
+func imageEventHandler(logger log.Logger, store *ImageStore) toolscache.ResourceEventHandlerFuncs {
+	set := func(obj any) {
+		cm, ok := obj.(*corev1.ConfigMap)
+		if !ok {
+			logger.Error(errUnexpectedObject, "ignoring event", "type", fmt.Sprintf("%T", obj))
+			return
+		}
+		if err := store.Set(cm); err != nil {
+			logger.Error(err, "ignoring sidecar image configmap")
+			return
+		}
+		logger.Info("sidecar image updated", "image", store.Image())
+	}
+
+	return toolscache.ResourceEventHandlerFuncs{
+		AddFunc:    set,
+		UpdateFunc: func(_, obj any) { set(obj) },
+		DeleteFunc: func(any) {
+			logger.Error(errConfigMapDeleted, "keeping the last valid sidecar image")
+		},
+	}
 }

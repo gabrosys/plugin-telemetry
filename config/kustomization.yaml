@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: cnpg-system
+resources:
+  - certificates.yaml
+  - rbac.yaml
+  - service.yaml
+  - deployment.yaml
+  - pdb.yaml
+images:
+  - name: plugin-telemetry
+    newName: ghcr.io/gabrosys/plugin-telemetry
+configMapGenerator:
+  - name: telemetry-sidecar-image
+    literals:
+      - image=
+generatorOptions:
+  disableNameSuffixHash: true

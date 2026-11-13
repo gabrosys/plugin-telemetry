@@ -358,3 +358,28 @@ var _ = It("builds the image and loads it into kind in e2e.yml", func() {
 	}
 	Expect(runs).To(ContainElement(MatchRegexp(`\bmake\b.*\bimage\b.*\bkind-load\b`)))
 })
+
+var e2eSuites = regexp.MustCompile(`(?m)^E2E_SUITES\s*:?=\s*(.*)$`)
+
+var _ = It("offers every Makefile e2e suite in e2e.yml", func() {
+	raw, err := os.ReadFile(makefile)
+	Expect(err).NotTo(HaveOccurred())
+	match := e2eSuites.FindStringSubmatch(string(raw))
+	Expect(match).NotTo(BeNil())
+
+	wf, ok := findWorkflow("e2e.yml")
+	Expect(ok).To(BeTrue())
+	var doc struct {
+		On struct {
+			Dispatch struct {
+				Inputs map[string]struct {
+					Options []string `yaml:"options"`
+				} `yaml:"inputs"`
+			} `yaml:"workflow_dispatch"`
+		} `yaml:"on"`
+	}
+	Expect(yaml.Unmarshal([]byte(wf.raw), &doc)).To(Succeed())
+
+	Expect(doc.On.Dispatch.Inputs).To(HaveKey("suite"))
+	Expect(doc.On.Dispatch.Inputs["suite"].Options).To(ConsistOf(strings.Fields(match[1])))
+})

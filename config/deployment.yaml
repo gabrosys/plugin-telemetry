@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plugin-telemetry
+  labels:
+    app.kubernetes.io/name: plugin-telemetry
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: plugin-telemetry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: plugin-telemetry
+    spec:
+      serviceAccountName: plugin-telemetry
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: plugin-telemetry
+      containers:
+        - name: plugin-telemetry
+          image: plugin-telemetry
+          imagePullPolicy: IfNotPresent
+          args:
+            - operator
+            - --server-address=:9090
+            - --server-cert=/server/tls.crt
+            - --server-key=/server/tls.key
+            - --client-cert=/client/tls.crt
+            - --sidecar-image-configmap=telemetry-sidecar-image
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: grpc
+              containerPort: 9090
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: server-tls
+              mountPath: /server
+              readOnly: true
+            - name: client-tls
+              mountPath: /client
+              readOnly: true
+      volumes:
+        - name: server-tls
+          secret:
+            secretName: plugin-telemetry-server-tls
+        - name: client-tls
+          secret:
+            secretName: plugin-telemetry-client-tls
+            items:
+              - key: tls.crt
+                path: tls.crt

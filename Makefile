@@ -30,7 +30,7 @@ CMCTL := $(BIN)/cmctl-$(CMCTL_VERSION)
 KIND_CLUSTER ?= plugin-telemetry
 CNPG_VERSION ?= v1.30.1
 POSTGRES_IMAGE ?= ghcr.io/cloudnative-pg/postgresql:18.7-system-trixie@sha256:5a5dfbde88d5909fd4938189c141f53fb153f53c519f14907dce9e7c04baa153
-E2E_SUITES := smoke
+E2E_SUITES := smoke spikes
 E2E_TARGETS := $(addprefix e2e-,$(E2E_SUITES))
 
 DEV_ENV := KIND=$(KIND) KUBECTL=$(KUBECTL) CMCTL=$(CMCTL) KIND_CLUSTER=$(KIND_CLUSTER) KIND_NODE_IMAGE=$(KIND_NODE_IMAGE) \
@@ -75,13 +75,21 @@ dev-down: $(KIND) ## Delete the kind environment
 	$(DEV_ENV) hack/dev-env.sh down
 
 .PHONY: kind-load
-kind-load: $(KIND) ## Load the image into the kind cluster
+kind-load: $(KIND) ## Load the image into kind and record its digest reference in bin/image-ref
 	$(KIND) load docker-image $(IMG) --name $(KIND_CLUSTER)
+	KIND=$(KIND) hack/kind-image-ref.sh $(KIND_CLUSTER) $(IMG) > $(BIN)/image-ref
+
+.PHONY: deploy
+deploy: $(KUBECTL) ## Deploy the plugin to the kind environment (after image and kind-load)
+	@test -s $(BIN)/image-ref || { echo "run make image kind-load first" >&2; exit 1; }
+	KUBECTL=$(KUBECTL) KIND_CLUSTER=$(KIND_CLUSTER) BIN=$(BIN) hack/deploy.sh "$$(cat $(BIN)/image-ref)"
 
 .PHONY: $(E2E_TARGETS)
 $(E2E_TARGETS): e2e-%: dev-up
 	E2E_KUBE_CONTEXT=kind-$(KIND_CLUSTER) CNPG_VERSION=$(CNPG_VERSION) POSTGRES_IMAGE=$(POSTGRES_IMAGE) \
 		$(GO) test -tags e2e -count=1 -timeout 30m -v ./test/e2e/$*/... -ginkgo.v
+
+e2e-spikes: image kind-load deploy
 
 .PHONY: lint
 lint: $(GOLANGCI_LINT) ## Run linters and the vulnerability scan

@@ -2,8 +2,10 @@ package operator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	"github.com/cloudnative-pg/cnpg-i-machinery/pkg/pluginhelper/decoder"
@@ -13,12 +15,20 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/podpatch"
 )
 
 const podKind = "Pod"
+
+// Outcomes of a lifecycle hook call, as logged.
+const (
+	outcomePatched   = "patched"
+	outcomeUnchanged = "unchanged"
+	outcomeSkipped   = "skipped"
+)
 
 var errNoImage = errors.New("no sidecar image available yet")
 
@@ -52,7 +62,8 @@ func (*Lifecycle) GetCapabilities(
 
 // LifecycleHook returns the patch that adds the sidecar to an instance Pod.
 // Only undecodable requests fail; every other problem yields an empty patch,
-// because a failing hook blocks the Cluster's reconcile.
+// because a failing hook blocks the Cluster's reconcile. Every decoded
+// request logs one "lifecycle hook" line.
 func (l *Lifecycle) LifecycleHook(
 	ctx context.Context, req *lifecycle.OperatorLifecycleRequest,
 ) (*lifecycle.OperatorLifecycleResponse, error) {
@@ -65,29 +76,56 @@ func (l *Lifecycle) LifecycleHook(
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "get object kind: %v", err)
 	}
-	if kind != podKind {
-		return &lifecycle.OperatorLifecycleResponse{}, nil
-	}
 
-	pluginConfig, ok := ourPlugin(cluster)
-	if !ok {
-		return &lifecycle.OperatorLifecycleResponse{}, nil
-	}
-
-	original, err := decoder.DecodePodJSON(req.GetObjectDefinition())
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "decode pod: %v", err)
+	var meta metav1.PartialObjectMetadata
+	if err := json.Unmarshal(req.GetObjectDefinition(), &meta); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "decode object metadata: %v", err)
 	}
 
 	logger := log.FromContext(ctx).WithValues("namespace", cluster.Namespace, "cluster", cluster.Name)
 
+	patch, outcome, err := l.hook(logger, cluster, kind, req.GetObjectDefinition())
+	if err != nil {
+		return nil, err
+	}
+
+	logger.Info("lifecycle hook",
+		"operation", strings.TrimPrefix(req.GetOperationType().GetType().String(), "TYPE_"),
+		"pod", meta.Name,
+		"outcome", outcome)
+
+	return &lifecycle.OperatorLifecycleResponse{JsonPatch: patch}, nil
+}
+
+// hook returns the patch for one object and its outcome. It fails only for
+// an undecodable Pod.
+func (l *Lifecycle) hook(
+	logger log.Logger, cluster *apiv1.Cluster, kind string, definition []byte,
+) ([]byte, string, error) {
+	if kind != podKind {
+		return nil, outcomeSkipped, nil
+	}
+
+	pluginConfig, ok := ourPlugin(cluster)
+	if !ok {
+		return nil, outcomeSkipped, nil
+	}
+
+	original, err := decoder.DecodePodJSON(definition)
+	if err != nil {
+		return nil, "", status.Errorf(codes.InvalidArgument, "decode pod: %v", err)
+	}
+
 	patch, err := l.patch(logger, cluster, pluginConfig, original)
 	if err != nil {
 		logger.Error(err, "sidecar not injected, returning no patch")
-		return &lifecycle.OperatorLifecycleResponse{}, nil
+		return nil, outcomeSkipped, nil
+	}
+	if len(patch) == 0 {
+		return nil, outcomeUnchanged, nil
 	}
 
-	return &lifecycle.OperatorLifecycleResponse{JsonPatch: patch}, nil
+	return patch, outcomePatched, nil
 }
 
 func (l *Lifecycle) patch(

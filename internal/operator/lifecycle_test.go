@@ -8,6 +8,8 @@ import (
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	"github.com/cloudnative-pg/cnpg-i/pkg/lifecycle"
 	jsonpatch "github.com/evanphx/json-patch/v5"
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"google.golang.org/grpc/codes"
@@ -214,6 +216,107 @@ var _ = Describe("Lifecycle", func() {
 		_, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
 			clusterJSON(ours(nil)), []byte(`{"kind":`)))
 		Expect(status.Code(err)).To(Equal(codes.InvalidArgument))
+	})
+})
+
+// captureLogs returns a context whose logger keeps every line, and a
+// function returning the "lifecycle hook" lines decoded from JSON.
+func captureLogs(ctx context.Context) (context.Context, func() []map[string]any) {
+	var lines []string
+	sink := funcr.NewJSON(func(obj string) { lines = append(lines, obj) }, funcr.Options{})
+
+	return logr.NewContext(ctx, sink), func() []map[string]any {
+		GinkgoHelper()
+
+		var hook []map[string]any
+		for _, line := range lines {
+			var entry map[string]any
+			Expect(json.Unmarshal([]byte(line), &entry)).To(Succeed())
+			if entry["msg"] == "lifecycle hook" {
+				hook = append(hook, entry)
+			}
+		}
+
+		return hook
+	}
+}
+
+func hookLine(operation, outcome string) OmegaMatcher {
+	return SatisfyAll(
+		HaveKeyWithValue("operation", operation),
+		HaveKeyWithValue("namespace", "fixture"),
+		HaveKeyWithValue("cluster", "fixture"),
+		HaveKeyWithValue("pod", "fixture-1"),
+		HaveKeyWithValue("outcome", outcome),
+		HaveKeyWithValue("level", BeEquivalentTo(0)),
+		Not(HaveKey("error")),
+	)
+}
+
+var _ = Describe("Lifecycle logging", func() {
+	var srv *operator.Lifecycle
+
+	BeforeEach(func() {
+		srv = &operator.Lifecycle{Images: fakeImages(testImage)}
+	})
+
+	It("logs one line for an EVALUATE that patches", func(ctx context.Context) {
+		ctx, hookLines := captureLogs(ctx)
+		_, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
+			clusterJSON(ours(nil)), fixturePod("pod-main")))
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(hookLines()).To(HaveExactElements(hookLine("EVALUATE", "patched")))
+	})
+
+	It("logs one line for a CREATE that changes nothing", func(ctx context.Context) {
+		cluster, pod := clusterJSON(ours(nil)), fixturePod("pod-main")
+		resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, cluster, pod))
+		Expect(err).NotTo(HaveOccurred())
+		evaluated := applyPatch(pod, resp.GetJsonPatch())
+
+		ctx, hookLines := captureLogs(ctx)
+		resp, err = srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_CREATE, cluster, evaluated))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.GetJsonPatch()).To(BeEmpty())
+
+		Expect(hookLines()).To(HaveExactElements(hookLine("CREATE", "unchanged")))
+	})
+
+	DescribeTable("logs one skipped line",
+		func(ctx context.Context, cluster []byte, object func() []byte) {
+			ctx, hookLines := captureLogs(ctx)
+			resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, cluster, object()))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.GetJsonPatch()).To(BeEmpty())
+
+			Expect(hookLines()).To(HaveExactElements(SatisfyAll(
+				HaveKeyWithValue("operation", "EVALUATE"),
+				HaveKeyWithValue("outcome", "skipped"),
+				HaveKeyWithValue("level", BeEquivalentTo(0)),
+			)))
+		},
+		Entry("for a Cluster without the plugin", clusterJSON(), func() []byte { return fixturePod("pod-main") }),
+		Entry("for invalid plugin parameters", clusterJSON(ours(map[string]string{"auth": "ldap"})),
+			func() []byte { return fixturePod("pod-main") }),
+		Entry("for an object that is not a Pod", clusterJSON(ours(nil)), func() []byte {
+			job, err := json.Marshal(batchv1.Job{
+				TypeMeta:   metav1.TypeMeta{APIVersion: "batch/v1", Kind: "Job"},
+				ObjectMeta: metav1.ObjectMeta{Namespace: "fixture", Name: "fixture-1"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			return job
+		}),
+	)
+
+	It("logs no hook line for a request it cannot decode", func(ctx context.Context) {
+		ctx, hookLines := captureLogs(ctx)
+		_, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
+			clusterJSON(ours(nil)), []byte(`{"kind":`)))
+		Expect(status.Code(err)).To(Equal(codes.InvalidArgument))
+
+		Expect(hookLines()).To(BeEmpty())
 	})
 })
 

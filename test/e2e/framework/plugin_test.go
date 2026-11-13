@@ -1,6 +1,9 @@
 package framework_test
 
 import (
+	"strings"
+	"time"
+
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -131,4 +134,46 @@ var _ = Describe("RolloutComplete", func() {
 		_, err := framework.RolloutComplete(d)
 		Expect(err).To(MatchError(framework.ErrRolloutTimedOut))
 	})
+})
+
+var _ = Describe("ParseHookCalls", func() {
+	since := time.Date(2026, 11, 13, 18, 25, 34, 975000000, time.UTC)
+
+	It("returns the hook lines logged after since", func() {
+		logs := strings.Join([]string{
+			`{"level":"info","ts":"2026-11-13T18:25:30.476Z","msg":"Starting plugin","name":"telemetry.gabrosys.github.io"}`,
+			`{"level":"info","ts":"2026-11-13T18:25:34.900Z","msg":"lifecycle hook","namespace":"ns",` +
+				`"cluster":"c","operation":"EVALUATE","pod":"c-1","outcome":"patched"}`,
+			`goroutine 1 [running]:`,
+			`{"level":"info","ts":"2026-11-13T18:25:34.990123Z","msg":"lifecycle hook","namespace":"ns",` +
+				`"cluster":"c","operation":"EVALUATE","pod":"c-1","outcome":"patched"}`,
+			`{"level":"error","ts":"2026-11-13T18:25:35Z","msg":"sidecar not injected, returning no patch","error":"x"}`,
+			`{"level":"info","ts":"2026-11-13T18:25:35.5Z","msg":"lifecycle hook","namespace":"ns",` +
+				`"cluster":"d","operation":"CREATE","pod":"d-1","outcome":"unchanged"}`,
+			``,
+		}, "\n")
+
+		calls, err := framework.ParseHookCalls(logs, since)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(calls).To(Equal([]framework.HookCall{
+			{
+				Time:      time.Date(2026, 11, 13, 18, 25, 34, 990123000, time.UTC),
+				Operation: "EVALUATE", Namespace: "ns", Cluster: "c", Pod: "c-1", Outcome: "patched",
+			},
+			{
+				Time:      time.Date(2026, 11, 13, 18, 25, 35, 500000000, time.UTC),
+				Operation: "CREATE", Namespace: "ns", Cluster: "d", Pod: "d-1", Outcome: "unchanged",
+			},
+		}))
+	})
+
+	DescribeTable("rejects",
+		func(line string) {
+			_, err := framework.ParseHookCalls(line, since)
+			Expect(err).To(HaveOccurred())
+		},
+		Entry("a truncated JSON line", `{"msg":"lifecycle hook","ts":`),
+		Entry("a hook line without a timestamp", `{"msg":"lifecycle hook","operation":"EVALUATE"}`),
+		Entry("a hook line with a timestamp that is not RFC 3339", `{"msg":"lifecycle hook","ts":1763058335.0}`),
+	)
 })

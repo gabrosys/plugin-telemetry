@@ -41,9 +41,9 @@ const (
 	// invalid_authorization_specification, sent for peer and pg_hba rejections.
 	sqlStateInvalidAuthorization = "28000"
 
-	pluginNamespace = "cnpg-system"
-	pluginLabel     = "app.kubernetes.io/name"
-	pluginName      = "plugin-telemetry"
+	hookEvaluate = "EVALUATE"
+	hookPatched  = "patched"
+	hookTimeout  = 2 * time.Minute
 )
 
 const queries = `spikes:
@@ -71,6 +71,7 @@ var (
 
 // instance is what must not change on an instance Pod.
 type instance struct {
+	Cluster string
 	UID     types.UID
 	PodSpec string
 }
@@ -207,6 +208,8 @@ func forbidden(namespace, cluster, other string) []authorizationv1.ResourceAttri
 		{Namespace: namespace, Verb: "get", Resource: "secrets", Name: cluster + apiv1.ApplicationUserSecretSuffix},
 		{Namespace: namespace, Verb: "list", Resource: "secrets"},
 		{Namespace: namespace, Verb: "list", Resource: "configmaps"},
+		{Namespace: namespace, Verb: "watch", Resource: "secrets"},
+		{Namespace: namespace, Verb: "watch", Resource: "configmaps"},
 		{Namespace: namespace, Verb: "get", Group: cnpgGroup, Resource: "clusters", Name: other},
 	}
 
@@ -258,7 +261,11 @@ var _ = Describe("spikes", Ordered, ContinueOnFailure, func() {
 				return nil, err
 			}
 			for _, pod := range pods {
-				out[pod.Name] = instance{UID: pod.UID, PodSpec: pod.Annotations[framework.PodSpecAnnotation]}
+				out[pod.Name] = instance{
+					Cluster: name,
+					UID:     pod.UID,
+					PodSpec: pod.Annotations[framework.PodSpecAnnotation],
+				}
 			}
 		}
 
@@ -266,18 +273,41 @@ var _ = Describe("spikes", Ordered, ContinueOnFailure, func() {
 	}
 
 	pluginPods := func(ctx context.Context) []string {
-		var pods corev1.PodList
-		Expect(c.List(ctx, &pods, client.InNamespace(pluginNamespace),
-			client.MatchingLabels{pluginLabel: pluginName})).To(Succeed())
-		names := make([]string, 0, len(pods.Items))
-		for _, pod := range pods.Items {
-			if pod.DeletionTimestamp == nil {
-				names = append(names, pod.Name)
-			}
-		}
-		slices.Sort(names)
+		pods, err := framework.PluginPods(ctx, c)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(pods).NotTo(BeEmpty())
 
-		return names
+		return pods
+	}
+
+	// awaitEvaluations waits until one of plugins logs, after since, an
+	// EVALUATE that patched each Pod in pods, and returns those lines by Pod.
+	awaitEvaluations := func(
+		ctx context.Context, plugins []string, pods map[string]instance, since time.Time,
+	) map[string]framework.HookCall {
+		var found map[string]framework.HookCall
+		Eventually(func(g Gomega, ctx context.Context) {
+			found = map[string]framework.HookCall{}
+			for _, plugin := range plugins {
+				calls, err := framework.HookCalls(ctx, cfg, plugin, since)
+				g.Expect(err).NotTo(HaveOccurred())
+				for _, call := range calls {
+					in, ok := pods[call.Pod]
+					if !ok || call.Namespace != ns || call.Cluster != in.Cluster ||
+						call.Operation != hookEvaluate || call.Outcome != hookPatched {
+						continue
+					}
+					if _, seen := found[call.Pod]; !seen {
+						found[call.Pod] = call
+					}
+				}
+			}
+			for pod := range pods {
+				g.Expect(found).To(HaveKey(pod), "no %s of %s after %s by %v", hookEvaluate, pod, since, plugins)
+			}
+		}).WithContext(ctx).WithTimeout(hookTimeout).WithPolling(5 * time.Second).Should(Succeed())
+
+		return found
 	}
 
 	// bumpDescriptions changes spec.description, which bumps the generation and triggers a reconcile.
@@ -435,9 +465,12 @@ var _ = Describe("spikes", Ordered, ContinueOnFailure, func() {
 			}
 			AddReportEntry("instance pod UIDs before", toJSON(uids))
 
-			bumpDescriptions(ctx)
-
 			oldPlugins := pluginPods(ctx)
+			bumped := time.Now()
+			bumpDescriptions(ctx)
+			AddReportEntry("EVALUATE by the plugin pods before the restart",
+				toJSON(awaitEvaluations(ctx, oldPlugins, before, bumped)))
+
 			Expect(framework.RestartPlugin(ctx, c)).To(Succeed())
 			Eventually(framework.PluginRolledOut).WithContext(ctx).WithArguments(c).
 				WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(BeTrue())
@@ -445,8 +478,10 @@ var _ = Describe("spikes", Ordered, ContinueOnFailure, func() {
 			AddReportEntry("plugin pods", toJSON(map[string][]string{"before": oldPlugins, "after": newPlugins}))
 			Expect(newPlugins).NotTo(ContainElement(BeElementOf(oldPlugins)))
 
-			// CNPG does not reconcile on its own within the window; this reconcile reaches the new replicas.
+			bumped = time.Now()
 			bumpDescriptions(ctx)
+			AddReportEntry("EVALUATE by the plugin pods after the restart",
+				toJSON(awaitEvaluations(ctx, newPlugins, before, bumped)))
 
 			Consistently(func(g Gomega, ctx context.Context) {
 				now, err := instances(ctx)
@@ -466,7 +501,7 @@ var _ = Describe("spikes", Ordered, ContinueOnFailure, func() {
 				uids[pod] = in.UID
 			}
 			AddReportEntry("instance pod UIDs after", toJSON(uids))
-		}, SpecTimeout(7*time.Minute))
+		}, SpecTimeout(10*time.Minute))
 	})
 
 	Context("AC2: peer mode", func() {

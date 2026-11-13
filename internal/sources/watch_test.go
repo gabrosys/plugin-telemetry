@@ -29,14 +29,12 @@ var _ = Describe("Watch", func() {
 		ctx, cancel = context.WithCancel(context.Background())
 		done = make(chan error, 1)
 		count.Store(0)
-		started := make(chan struct{})
+		ready := make(chan struct{})
 		go func() {
-			close(started)
-			done <- sources.Watch(ctx, files, debounce, func() { count.Add(1) })
+			done <- sources.Watch(ctx, files, debounce, func() { count.Add(1) },
+				sources.WithReady(func() { close(ready) }))
 		}()
-		<-started
-		// Give the watcher time to register its directories.
-		time.Sleep(200 * time.Millisecond)
+		Eventually(ready).Should(BeClosed())
 	}
 
 	BeforeEach(func() {
@@ -95,6 +93,21 @@ var _ = Describe("Watch", func() {
 			write(file, "a:\n  query: SELECT "+string(rune('0'+i))+"\n")
 			time.Sleep(5 * time.Millisecond)
 		}
+		expectOne()
+	})
+
+	It("notifies for a write made right after ready fires", func() {
+		ctx, c := context.WithCancel(context.Background())
+		cancel = c
+		done = make(chan error, 1)
+		count.Store(0)
+		ready := make(chan struct{})
+		go func() {
+			done <- sources.Watch(ctx, []string{file}, debounce, func() { count.Add(1) },
+				sources.WithReady(func() { close(ready) }))
+		}()
+		<-ready
+		write(file, "a:\n  query: SELECT 9\n")
 		expectOne()
 	})
 

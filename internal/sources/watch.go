@@ -14,6 +14,7 @@ type WatchOption func(*watchConfig)
 
 type watchConfig struct {
 	onError func(error)
+	onReady func()
 }
 
 // WithErrorHandler sets the function that receives the watcher's asynchronous errors.
@@ -21,8 +22,14 @@ func WithErrorHandler(fn func(error)) WatchOption {
 	return func(c *watchConfig) { c.onError = fn }
 }
 
+// WithReady sets a function called once, after every directory is added and before events are read.
+func WithReady(fn func()) WatchOption {
+	return func(c *watchConfig) { c.onReady = fn }
+}
+
 // Watch calls notify, debounced, after any change in the directories holding files. It watches each
 // directory, not the files, because editors and Kubernetes replace files by rename or symlink swap.
+// Callers start Watch, wait for WithReady, then Load, so no change falls between the two.
 // It returns nil when ctx ends.
 func Watch(ctx context.Context, files []string, debounce time.Duration, notify func(), opts ...WatchOption) error {
 	var cfg watchConfig
@@ -47,6 +54,10 @@ func Watch(ctx context.Context, files []string, debounce time.Duration, notify f
 		if err := w.Add(dir); err != nil {
 			return fmt.Errorf("watch %s: %w", dir, err)
 		}
+	}
+
+	if cfg.onReady != nil {
+		cfg.onReady()
 	}
 
 	timer := time.NewTimer(debounce)

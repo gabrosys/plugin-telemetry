@@ -118,7 +118,7 @@ func CreateSidecarIdentity(
 
 // CanI is `kubectl auth can-i --as=<user>`: a SelfSubjectAccessReview under impersonation.
 func CanI(ctx context.Context, cfg *rest.Config, user string, attrs authorizationv1.ResourceAttributes) (bool, error) {
-	cs, err := impersonate(cfg, user)
+	cs, err := Impersonate(cfg, user)
 	if err != nil {
 		return false, err
 	}
@@ -136,7 +136,7 @@ func CanI(ctx context.Context, cfg *rest.Config, user string, attrs authorizatio
 // Rules is `kubectl auth can-i --list --as=<user> -n <namespace>`. It fails
 // with ErrIncompleteRules when the API server cannot list every rule.
 func Rules(ctx context.Context, cfg *rest.Config, user, namespace string) ([]authorizationv1.ResourceRule, error) {
-	cs, err := impersonate(cfg, user)
+	cs, err := Impersonate(cfg, user)
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +195,8 @@ func onlySelfReviews(r authorizationv1.ResourceRule) bool {
 	return true
 }
 
-func impersonate(cfg *rest.Config, user string) (*kubernetes.Clientset, error) {
+// Impersonate returns a clientset that acts as user.
+func Impersonate(cfg *rest.Config, user string) (*kubernetes.Clientset, error) {
 	impersonated := rest.CopyConfig(cfg)
 	impersonated.Impersonate = rest.ImpersonationConfig{UserName: user}
 

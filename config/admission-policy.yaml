@@ -1,0 +1,46 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: plugin-telemetry-identities
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [secrets, serviceaccounts]
+  matchConditions:
+    - name: plugin-service-account
+      expression: request.userInfo.username == 'system:serviceaccount:cnpg-system:plugin-telemetry'
+  variables:
+    - name: secret
+      expression: request.resource.resource == 'secrets'
+    - name: newAllowed
+      expression: >-
+        request.operation == 'DELETE' || (variables.secret
+          ? object.?type.orValue('') == 'kubernetes.io/service-account-token' &&
+            object.?metadata.annotations['kubernetes.io/service-account.name'].orValue('').endsWith('-telemetry') &&
+            object.metadata.name == object.metadata.annotations['kubernetes.io/service-account.name'] + '-token'
+          : object.metadata.name.endsWith('-telemetry'))
+    - name: oldAllowed
+      expression: >-
+        request.operation == 'CREATE' || (variables.secret
+          ? oldObject.?type.orValue('') == 'kubernetes.io/service-account-token' &&
+            oldObject.?metadata.annotations['kubernetes.io/service-account.name'].orValue('').endsWith('-telemetry') &&
+            oldObject.metadata.name == oldObject.metadata.annotations['kubernetes.io/service-account.name'] + '-token'
+          : oldObject.metadata.name.endsWith('-telemetry'))
+  validations:
+    - expression: variables.newAllowed && variables.oldAllowed
+      reason: Forbidden
+      message: >-
+        plugin-telemetry may write only ServiceAccounts named *-telemetry and their
+        kubernetes.io/service-account-token Secrets named <account>-token
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: plugin-telemetry-identities
+spec:
+  policyName: plugin-telemetry-identities
+  validationActions: [Deny]

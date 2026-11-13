@@ -30,7 +30,7 @@ CMCTL := $(BIN)/cmctl-$(CMCTL_VERSION)
 KIND_CLUSTER ?= plugin-telemetry
 CNPG_VERSION ?= v1.30.1
 POSTGRES_IMAGE ?= ghcr.io/cloudnative-pg/postgresql:18.7-system-trixie@sha256:5a5dfbde88d5909fd4938189c141f53fb153f53c519f14907dce9e7c04baa153
-E2E_SUITES := smoke spikes
+E2E_SUITES := smoke spikes admission
 E2E_TARGETS := $(addprefix e2e-,$(E2E_SUITES))
 
 DEV_ENV := KIND=$(KIND) KUBECTL=$(KUBECTL) CMCTL=$(CMCTL) KIND_CLUSTER=$(KIND_CLUSTER) KIND_NODE_IMAGE=$(KIND_NODE_IMAGE) \
@@ -90,6 +90,7 @@ $(E2E_TARGETS): e2e-%: dev-up
 		$(GO) test -tags e2e -count=1 -timeout 30m -v ./test/e2e/$*/... -ginkgo.v
 
 e2e-spikes: image kind-load deploy
+e2e-admission: image kind-load deploy
 
 .PHONY: lint
 lint: $(GOLANGCI_LINT) ## Run linters and the vulnerability scan

@@ -29,7 +29,7 @@ CMCTL := $(BIN)/cmctl-$(CMCTL_VERSION)
 
 KIND_CLUSTER ?= plugin-telemetry
 CNPG_VERSION ?= v1.30.1
-POSTGRES_IMAGE ?= ghcr.io/cloudnative-pg/postgresql:18.6-system-trixie@sha256:48a0038fdd9672d12853d5300666b2592f97f9d34a993ea42e3ecb5a9a5e43e3
+POSTGRES_IMAGE ?= ghcr.io/cloudnative-pg/postgresql:18.7-system-trixie@sha256:5a5dfbde88d5909fd4938189c141f53fb153f53c519f14907dce9e7c04baa153
 E2E_SUITES := smoke
 E2E_TARGETS := $(addprefix e2e-,$(E2E_SUITES))
 
@@ -38,7 +38,7 @@ DEV_ENV := KIND=$(KIND) KUBECTL=$(KUBECTL) CMCTL=$(CMCTL) KIND_CLUSTER=$(KIND_CL
 
 IMG ?= ghcr.io/gabrosys/plugin-telemetry:$(VERSION)
 PLATFORMS ?= linux/amd64,linux/arm64
-# image-multiarch needs a docker-container builder.
+# image-multiarch needs the containerd image store or a docker-container builder.
 BUILDX_BUILDER ?=
 
 .PHONY: help

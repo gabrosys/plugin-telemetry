@@ -18,12 +18,14 @@ ACTIONLINT_VERSION := v1.7.12
 KIND_VERSION := v0.33.0
 KUBECTL_VERSION := v1.37.2
 CERT_MANAGER_VERSION := v1.21.3
+CMCTL_VERSION := v2.6.2
 KIND_NODE_IMAGE := kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
 SHELLCHECK_IMAGE := koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
 
 GOLANGCI_LINT := $(BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 KIND := $(BIN)/kind-$(KIND_VERSION)
 KUBECTL := $(BIN)/kubectl-$(KUBECTL_VERSION)
+CMCTL := $(BIN)/cmctl-$(CMCTL_VERSION)
 
 KIND_CLUSTER ?= plugin-telemetry
 CNPG_VERSION ?= v1.30.1
@@ -31,7 +33,7 @@ POSTGRES_IMAGE ?= ghcr.io/cloudnative-pg/postgresql:18.6-system-trixie@sha256:48
 E2E_SUITES := smoke
 E2E_TARGETS := $(addprefix e2e-,$(E2E_SUITES))
 
-DEV_ENV := KIND=$(KIND) KUBECTL=$(KUBECTL) KIND_CLUSTER=$(KIND_CLUSTER) KIND_NODE_IMAGE=$(KIND_NODE_IMAGE) \
+DEV_ENV := KIND=$(KIND) KUBECTL=$(KUBECTL) CMCTL=$(CMCTL) KIND_CLUSTER=$(KIND_CLUSTER) KIND_NODE_IMAGE=$(KIND_NODE_IMAGE) \
 	CNPG_VERSION=$(CNPG_VERSION) CERT_MANAGER_VERSION=$(CERT_MANAGER_VERSION)
 
 IMG ?= ghcr.io/gabrosys/plugin-telemetry:$(VERSION)
@@ -65,7 +67,7 @@ image-multiarch: ## Build all platforms with an SBOM into bin/image-oci
 		--output type=oci,dest=$(BIN)/image-oci,tar=false .
 
 .PHONY: dev-up
-dev-up: $(KIND) $(KUBECTL) ## Create the kind environment (CNPG_VERSION=v1.30.1|main)
+dev-up: $(KIND) $(KUBECTL) $(CMCTL) ## Create the kind environment (CNPG_VERSION=v1.30.1|main)
 	$(DEV_ENV) hack/dev-env.sh up
 
 .PHONY: dev-down
@@ -108,3 +110,7 @@ $(KIND):
 $(KUBECTL):
 	hack/fetch-tool.sh https://dl.k8s.io/release/$(KUBECTL_VERSION)/bin/$(GOOS)/$(GOARCH)/kubectl \
 		https://dl.k8s.io/release/$(KUBECTL_VERSION)/bin/$(GOOS)/$(GOARCH)/kubectl.sha256 $@
+
+$(CMCTL):
+	hack/fetch-tool.sh https://github.com/cert-manager/cmctl/releases/download/$(CMCTL_VERSION)/cmctl_$(GOOS)_$(GOARCH) \
+		https://github.com/cert-manager/cmctl/releases/download/$(CMCTL_VERSION)/checksums.txt $@

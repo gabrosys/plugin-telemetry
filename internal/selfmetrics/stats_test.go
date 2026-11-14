@@ -221,6 +221,30 @@ var _ = Describe("Stats", func() {
 			To(Equal(map[string]float64{"database=app,query=q": float64(at.Unix())}))
 	})
 
+	It("stops reporting the capped series of a query that recovered", func() {
+		capped := func() map[string]float64 {
+			GinkgoHelper()
+			return points(collect()["cnpg_otel_query_capped_series"])
+		}
+		for _, o := range []selfmetrics.Outcome{selfmetrics.OutcomeOK, selfmetrics.OutcomeError, selfmetrics.OutcomeTimeout} {
+			stats.QueryCapped("q", "app", 5)
+			stats.QueryRun("q", "app", selfmetrics.OutcomeCapped, time.Second, at)
+			stats.QueryCapped("q", "other", 7)
+			stats.QueryRun("q", "other", selfmetrics.OutcomeCapped, time.Second, at)
+			Expect(capped()).To(Equal(map[string]float64{"database=app,query=q": 5, "database=other,query=q": 7}), string(o))
+
+			stats.QueryRun("q", "app", o, time.Second, at)
+			Expect(capped()).To(Equal(map[string]float64{"database=other,query=q": 7}), string(o))
+		}
+	})
+
+	It("keeps the capped series across a skipped run, which is only counted", func() {
+		stats.QueryCapped("q", "app", 5)
+		stats.QueryRun("q", "app", selfmetrics.OutcomeCapped, time.Second, at)
+		stats.QueryRun("q", "app", selfmetrics.OutcomeSkipped, 0, at)
+		Expect(points(collect()["cnpg_otel_query_capped_series"])).To(Equal(map[string]float64{"database=app,query=q": 5}))
+	})
+
 	It("emits the HTTP status code on the duration only when non-zero", func() {
 		base := selfmetrics.ExportRecord{
 			Outcome: selfmetrics.OutcomeOK, Duration: time.Millisecond, At: at, Points: 1,
@@ -256,7 +280,7 @@ var _ = Describe("Stats", func() {
 		stats.Series(9)
 		stats.ConfigLoad("file", true, 0)
 
-		stats.Retain(map[string]bool{"kept": true})
+		stats.Retain(map[selfmetrics.QueryDatabase]bool{{Query: "kept", Database: "app"}: true})
 
 		got := collect()
 		for _, name := range []string{
@@ -277,6 +301,34 @@ var _ = Describe("Stats", func() {
 		Expect(points(got["cnpg_otel_config_loads_total"])).To(HaveLen(1))
 	})
 
+	It("drops the series of a database that leaves the plan and keeps the interval of a planned query", func() {
+		for _, db := range []string{"app", "gone"} {
+			stats.QueryRun("q", db, selfmetrics.OutcomeOK, time.Second, at)
+			stats.QueryRun("q", db, selfmetrics.OutcomeError, time.Second, at)
+			stats.QueryCapped("q", db, 5)
+			stats.SeriesDropped("q", db, "cap", 1)
+		}
+		stats.QueryInterval("q", time.Minute)
+		stats.QueryInterval("unplanned", time.Minute)
+
+		stats.Retain(map[selfmetrics.QueryDatabase]bool{{Query: "q", Database: "app"}: true})
+
+		got := collect()
+		for _, name := range []string{
+			"cnpg_otel_query_runs_total",
+			"cnpg_otel_query_last_duration_seconds",
+			"cnpg_otel_query_last_success_timestamp_seconds",
+			"cnpg_otel_query_capped_series",
+			"cnpg_otel_query_dropped_series_total",
+		} {
+			Expect(points(got[name])).NotTo(BeEmpty(), name)
+			for key := range points(got[name]) {
+				Expect(key).To(ContainSubstring("database=app,"), name)
+			}
+		}
+		Expect(points(got["cnpg_otel_query_interval_seconds"])).To(Equal(map[string]float64{"query=q": 60}))
+	})
+
 	It("is safe for concurrent use", func() {
 		var wg sync.WaitGroup
 		for i := range 8 {
@@ -287,7 +339,7 @@ var _ = Describe("Stats", func() {
 				for range 100 {
 					stats.QueryRun("q", "app", selfmetrics.OutcomeOK, time.Millisecond, at)
 					stats.Export(selfmetrics.ExportRecord{Outcome: selfmetrics.OutcomeOK, Duration: time.Millisecond, Points: i})
-					stats.Retain(map[string]bool{"q": true})
+					stats.Retain(map[selfmetrics.QueryDatabase]bool{{Query: "q", Database: "app"}: true})
 					collect()
 				}
 			}()

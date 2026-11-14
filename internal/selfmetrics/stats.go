@@ -1,6 +1,7 @@
 package selfmetrics
 
 import (
+	"maps"
 	"strconv"
 	"sync"
 	"time"
@@ -25,6 +26,9 @@ const (
 const errorTypeRejected = "rejected"
 
 type queryDB struct{ query, database string }
+
+// QueryDatabase is a query planned on a database.
+type QueryDatabase struct{ Query, Database string }
 
 type runKey struct {
 	query, database string
@@ -103,7 +107,8 @@ func seconds(d time.Duration) float64 { return d.Seconds() }
 
 func timestamp(t time.Time) float64 { return float64(t.UnixNano()) / float64(time.Second) }
 
-// QueryRun records one run of a query.
+// QueryRun records one run of a query. A run that was not capped clears the capped series;
+// a skipped run is only counted.
 func (s *Stats) QueryRun(query, database string, o Outcome, d time.Duration, at time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -115,6 +120,9 @@ func (s *Stats) QueryRun(query, database string, o Outcome, d time.Duration, at 
 	s.lastDur[k] = seconds(d)
 	if o == OutcomeOK {
 		s.lastSuccess[k] = timestamp(at)
+	}
+	if o != OutcomeCapped {
+		delete(s.capped, k)
 	}
 }
 
@@ -200,40 +208,23 @@ func (s *Stats) addPoints(k pointKey, n int) {
 	}
 }
 
-// Retain drops every series of queries not in keep, so removed queries stop reporting.
-func (s *Stats) Retain(keep map[string]bool) {
+// Retain drops the series of every query and database not in keep, and the interval of every
+// query no entry of keep has, so queries and databases that leave the plan stop reporting.
+func (s *Stats) Retain(keep map[QueryDatabase]bool) {
+	planned := make(map[string]bool, len(keep))
+	for k := range keep {
+		planned[k.Query] = true
+	}
+	gone := func(query, database string) bool { return !keep[QueryDatabase{query, database}] }
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for k := range s.runs {
-		if !keep[k.query] {
-			delete(s.runs, k)
-		}
-	}
-	for k := range s.lastDur {
-		if !keep[k.query] {
-			delete(s.lastDur, k)
-		}
-	}
-	for k := range s.lastSuccess {
-		if !keep[k.query] {
-			delete(s.lastSuccess, k)
-		}
-	}
-	for k := range s.interval {
-		if !keep[k] {
-			delete(s.interval, k)
-		}
-	}
-	for k := range s.capped {
-		if !keep[k.query] {
-			delete(s.capped, k)
-		}
-	}
-	for k := range s.dropped {
-		if !keep[k.query] {
-			delete(s.dropped, k)
-		}
-	}
+	maps.DeleteFunc(s.runs, func(k runKey, _ int64) bool { return gone(k.query, k.database) })
+	maps.DeleteFunc(s.lastDur, func(k queryDB, _ float64) bool { return gone(k.query, k.database) })
+	maps.DeleteFunc(s.lastSuccess, func(k queryDB, _ float64) bool { return gone(k.query, k.database) })
+	maps.DeleteFunc(s.capped, func(k queryDB, _ int64) bool { return gone(k.query, k.database) })
+	maps.DeleteFunc(s.dropped, func(k dropKey, _ int64) bool { return gone(k.query, k.database) })
+	maps.DeleteFunc(s.interval, func(query string, _ float64) bool { return !planned[query] })
 }
 
 type point struct {

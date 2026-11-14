@@ -187,10 +187,10 @@ func (r *replanner) replan(ctx context.Context) {
 	p := planner.Build(r.current.defs, r.current.settings, *r.facts)
 
 	planned := make(map[snapshot.Key]string, len(p.Jobs))
-	keep := make(map[string]bool, len(p.Jobs))
+	keep := make(map[selfmetrics.QueryDatabase]bool, len(p.Jobs))
 	for _, j := range p.Jobs {
 		planned[snapshot.Key{Query: j.Query, Database: j.Database}] = j.Fingerprint
-		keep[j.Query] = true
+		keep[selfmetrics.QueryDatabase{Query: j.Query, Database: j.Database}] = true
 	}
 
 	r.mu.Lock()

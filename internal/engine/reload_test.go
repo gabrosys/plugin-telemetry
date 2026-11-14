@@ -9,6 +9,9 @@ import (
 	"github.com/Masterminds/semver/v3"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/gabrosys/plugin-telemetry/internal/engine"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
@@ -55,6 +58,7 @@ var _ = Describe("Replanner", func() {
 		config  string
 		source  string
 		store   *snapshot.Store
+		stats   *selfmetrics.Stats
 		plans   []planner.Plan
 		r       *engine.Replanner
 		primary planner.Facts
@@ -91,8 +95,9 @@ var _ = Describe("Replanner", func() {
 		write(config, unitSettings)
 		write(source, alphaBeta)
 		store = snapshot.New(0)
+		stats = selfmetrics.NewStats()
 		plans = nil
-		r = engine.NewReplanner(config, selfmetrics.NewStats(), store, func(p planner.Plan) { plans = append(plans, p) })
+		r = engine.NewReplanner(config, stats, store, func(p planner.Plan) { plans = append(plans, p) })
 		primary = planner.Facts{Version: *semver.MustParse("18.0.7"), Databases: []string{"app", "postgres"}}
 	})
 
@@ -167,6 +172,43 @@ var _ = Describe("Replanner", func() {
 		points, _ := store.Points()
 		Expect(points).To(HaveLen(1))
 		Expect(points[0].Key).To(Equal(snapshot.Key{Query: "alpha", Database: "postgres"}))
+	})
+
+	It("stops reporting the query self-metrics of a database that leaves the plan", func(ctx SpecContext) {
+		reader := sdkmetric.NewManualReader()
+		mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+		DeferCleanup(mp.Shutdown)
+		Expect(selfmetrics.Register(mp.Meter("test"), stats)).To(Succeed())
+		databases := func() []string {
+			GinkgoHelper()
+			var rm metricdata.ResourceMetrics
+			Expect(reader.Collect(ctx, &rm)).To(Succeed())
+			var out []string
+			for _, sm := range rm.ScopeMetrics {
+				for _, m := range sm.Metrics {
+					if m.Name != "cnpg_otel_query_last_success_timestamp_seconds" {
+						continue
+					}
+					gauge, ok := m.Data.(metricdata.Gauge[float64])
+					Expect(ok).To(BeTrue())
+					for _, dp := range gauge.DataPoints {
+						db, _ := dp.Attributes.Value(attribute.Key("database"))
+						out = append(out, db.AsString())
+					}
+				}
+			}
+			return out
+		}
+
+		start(ctx)
+		for _, db := range primary.Databases {
+			stats.QueryRun("collector", db, selfmetrics.OutcomeOK, time.Millisecond, time.Now())
+		}
+		Expect(databases()).To(ConsistOf("app", "postgres"))
+
+		r.SetFacts(ctx, planner.Facts{Version: primary.Version, Databases: []string{"postgres"}})
+		Expect(plans).To(HaveLen(2))
+		Expect(databases()).To(ConsistOf("postgres"))
 	})
 
 	It("keeps the last good configuration when the settings become invalid", func(ctx SpecContext) {

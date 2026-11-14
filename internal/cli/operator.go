@@ -69,7 +69,7 @@ func newOperatorCommand() *cobra.Command {
 						Exporters: mgr.GetCache(),
 						Timeout:   operator.DefaultPreTimeout,
 					},
-					Status: &operator.Status{},
+					Status: &operator.Status{Reader: mgr.GetCache(), Identity: ensurer},
 				})
 			})
 

@@ -45,13 +45,26 @@ func Split(rm *metricdata.ResourceMetrics, maxPoints int) []*metricdata.Resource
 	return out
 }
 
+// pointCount counts the data points of every aggregation in metricdata v1.47.0 (data.go:47-261).
 func pointCount(a metricdata.Aggregation) int {
 	switch d := a.(type) {
+	case metricdata.Gauge[int64]:
+		return len(d.DataPoints)
 	case metricdata.Gauge[float64]:
+		return len(d.DataPoints)
+	case metricdata.Sum[int64]:
 		return len(d.DataPoints)
 	case metricdata.Sum[float64]:
 		return len(d.DataPoints)
+	case metricdata.Histogram[int64]:
+		return len(d.DataPoints)
 	case metricdata.Histogram[float64]:
+		return len(d.DataPoints)
+	case metricdata.ExponentialHistogram[int64]:
+		return len(d.DataPoints)
+	case metricdata.ExponentialHistogram[float64]:
+		return len(d.DataPoints)
+	case metricdata.Summary:
 		return len(d.DataPoints)
 	default:
 		return 0
@@ -60,19 +73,39 @@ func pointCount(a metricdata.Aggregation) int {
 
 func slicePoints(a metricdata.Aggregation, from, to int) metricdata.Aggregation {
 	switch d := a.(type) {
+	case metricdata.Gauge[int64]:
+		d.DataPoints = cut(d.DataPoints, from, to)
+		return d
 	case metricdata.Gauge[float64]:
-		d.DataPoints = d.DataPoints[from:to:to]
-
+		d.DataPoints = cut(d.DataPoints, from, to)
+		return d
+	case metricdata.Sum[int64]:
+		d.DataPoints = cut(d.DataPoints, from, to)
 		return d
 	case metricdata.Sum[float64]:
-		d.DataPoints = d.DataPoints[from:to:to]
-
+		d.DataPoints = cut(d.DataPoints, from, to)
+		return d
+	case metricdata.Histogram[int64]:
+		d.DataPoints = cut(d.DataPoints, from, to)
 		return d
 	case metricdata.Histogram[float64]:
-		d.DataPoints = d.DataPoints[from:to:to]
-
+		d.DataPoints = cut(d.DataPoints, from, to)
+		return d
+	case metricdata.ExponentialHistogram[int64]:
+		d.DataPoints = cut(d.DataPoints, from, to)
+		return d
+	case metricdata.ExponentialHistogram[float64]:
+		d.DataPoints = cut(d.DataPoints, from, to)
+		return d
+	case metricdata.Summary:
+		d.DataPoints = cut(d.DataPoints, from, to)
 		return d
 	default:
 		return a
 	}
+}
+
+// cut returns points[from:to] with no room to grow into the rest.
+func cut[T any](points []T, from, to int) []T {
+	return points[from:to:to]
 }

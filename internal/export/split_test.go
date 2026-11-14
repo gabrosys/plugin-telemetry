@@ -2,6 +2,7 @@ package export_test
 
 import (
 	"fmt"
+	"reflect"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -90,6 +91,45 @@ var _ = Describe("Split", func() {
 		Expect(sum.IsMonotonic).To(BeTrue())
 		Expect(sum.Temporality).To(Equal(metricdata.CumulativeTemporality))
 		Expect(fmt.Sprint(second[1].Name)).To(Equal("m2"))
+	})
+
+	It("keeps and splits every aggregation the SDK produces", func() {
+		metrics := []metricdata.Metrics{
+			{Name: "gauge-int", Data: metricdata.Gauge[int64]{DataPoints: make([]metricdata.DataPoint[int64], 2)}},
+			{Name: "sum-int", Data: metricdata.Sum[int64]{
+				Temporality: metricdata.CumulativeTemporality, IsMonotonic: true, DataPoints: make([]metricdata.DataPoint[int64], 3),
+			}},
+			{Name: "histogram-int", Data: metricdata.Histogram[int64]{DataPoints: make([]metricdata.HistogramDataPoint[int64], 2)}},
+			{Name: "exponential-float", Data: metricdata.ExponentialHistogram[float64]{
+				DataPoints: make([]metricdata.ExponentialHistogramDataPoint[float64], 2),
+			}},
+			{Name: "exponential-int", Data: metricdata.ExponentialHistogram[int64]{
+				DataPoints: make([]metricdata.ExponentialHistogramDataPoint[int64], 2),
+			}},
+			{Name: "summary", Data: metricdata.Summary{DataPoints: make([]metricdata.SummaryDataPoint, 2)}},
+		}
+		rm := &metricdata.ResourceMetrics{Resource: res, ScopeMetrics: []metricdata.ScopeMetrics{{Scope: scope, Metrics: metrics}}}
+
+		whole := export.Split(rm, 100)
+		Expect(whole).To(HaveLen(1))
+		Expect(whole[0].ScopeMetrics[0].Metrics).To(Equal(metrics))
+
+		var names []string
+		total := 0
+		for _, r := range export.Split(rm, 2) {
+			for _, m := range r.ScopeMetrics[0].Metrics {
+				names = append(names, m.Name)
+				n := reflect.ValueOf(m.Data).FieldByName("DataPoints").Len()
+				Expect(n).To(BeNumerically("<=", 2), m.Name)
+				total += n
+			}
+		}
+		// With a cap of 2 every metric after the 3-point sum straddles two requests.
+		Expect(names).To(Equal([]string{
+			"gauge-int", "sum-int", "sum-int", "histogram-int", "histogram-int", "exponential-float",
+			"exponential-float", "exponential-int", "exponential-int", "summary", "summary",
+		}))
+		Expect(total).To(Equal(13))
 	})
 
 	It("returns nil for no data and one request when everything fits", func() {

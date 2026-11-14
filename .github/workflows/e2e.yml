@@ -6,7 +6,7 @@ on:
       suite:
         description: e2e suite to run
         type: choice
-        options: [smoke, spikes, admission]
+        options: [smoke, spikes, admission, engine]
         default: smoke
 
 permissions: {}
@@ -14,6 +14,7 @@ permissions: {}
 jobs:
   e2e:
     name: e2e (${{ inputs.suite }}, CNPG ${{ matrix.cnpg }})
+    if: inputs.suite != 'engine'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -38,3 +39,20 @@ jobs:
           SUITE: ${{ inputs.suite }}
           CNPG_VERSION: ${{ matrix.cnpg }}
         run: make "e2e-${SUITE}" CNPG_VERSION="${CNPG_VERSION}"
+
+  e2e-engine:
+    name: e2e (engine)
+    if: inputs.suite == 'engine'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Run suite
+        run: make e2e-engine

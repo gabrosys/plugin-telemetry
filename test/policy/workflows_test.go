@@ -47,6 +47,7 @@ type job struct {
 	Permissions    any    `yaml:"permissions"`
 	TimeoutMinutes int    `yaml:"timeout-minutes"`
 	Uses           string `yaml:"uses"`
+	Strategy       any    `yaml:"strategy"`
 	Steps          []step `yaml:"steps"`
 }
 
@@ -344,19 +345,56 @@ var _ = DescribeTable("the secrets pattern",
 	Entry("ignores other expressions", "${{ github.ref }}", false),
 )
 
-var _ = It("builds the image and loads it into kind in e2e.yml", func() {
+const (
+	e2eWorkflow = "e2e.yml"
+	kindJob     = "e2e"
+	engineJob   = "e2e-engine"
+)
+
+func runsOf(j job) []string {
 	var runs []string
-	for _, wf := range workflows {
-		if wf.name != "e2e.yml" {
-			continue
-		}
-		for _, name := range sortedJobs(wf.doc) {
-			for _, s := range wf.doc.Jobs[name].Steps {
-				runs = append(runs, s.Run)
-			}
+	for _, s := range j.Steps {
+		if s.Run != "" {
+			runs = append(runs, s.Run)
 		}
 	}
-	Expect(runs).To(ContainElement(MatchRegexp(`\bmake\b.*\bimage\b.*\bkind-load\b`)))
+	return runs
+}
+
+func usesOf(j job) []string {
+	var uses []string
+	for _, s := range j.Steps {
+		if s.Uses != "" {
+			uses = append(uses, s.Uses)
+		}
+	}
+	return uses
+}
+
+var _ = Describe("the e2e workflow", func() {
+	var jobs map[string]job
+
+	BeforeEach(func() {
+		wf, ok := findWorkflow(e2eWorkflow)
+		Expect(ok).To(BeTrue())
+		jobs = wf.doc.Jobs
+		Expect(jobs).To(HaveKey(kindJob))
+		Expect(jobs).To(HaveKey(engineJob))
+	})
+
+	It("builds the image and loads it into kind in the kind job", func() {
+		Expect(jobs[kindJob].If).To(Equal("inputs.suite != 'engine'"))
+		Expect(runsOf(jobs[kindJob])).To(ContainElement(MatchRegexp(`\bmake\b.*\bimage\b.*\bkind-load\b`)))
+	})
+
+	It("runs the engine suite in its own job, without kind", func() {
+		j := jobs[engineJob]
+		Expect(j.If).To(Equal("inputs.suite == 'engine'"))
+		Expect(j.Strategy).To(BeNil())
+		Expect(j.Permissions).To(Equal(map[string]any{"contents": "read"}))
+		Expect(usesOf(j)).To(Equal(usesOf(jobs[kindJob])))
+		Expect(runsOf(j)).To(Equal([]string{"make e2e-engine"}))
+	})
 })
 
 var e2eSuites = regexp.MustCompile(`(?m)^E2E_SUITES\s*:?=\s*(.*)$`)
@@ -367,7 +405,7 @@ var _ = It("offers every Makefile e2e suite in e2e.yml", func() {
 	match := e2eSuites.FindStringSubmatch(string(raw))
 	Expect(match).NotTo(BeNil())
 
-	wf, ok := findWorkflow("e2e.yml")
+	wf, ok := findWorkflow(e2eWorkflow)
 	Expect(ok).To(BeTrue())
 	var doc struct {
 		On struct {

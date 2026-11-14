@@ -137,6 +137,50 @@ func ResourcePoints(lines []Line, name string) []ResourcePoint {
 	return out
 }
 
+// HistogramPoint is one explicit-bucket histogram data point.
+type HistogramPoint struct {
+	Time  time.Time
+	Attrs map[string]string
+	Count uint64
+	Sum   float64
+}
+
+// HistogramPoints returns the histogram data points of the metric called name, in file order.
+func HistogramPoints(lines []Line, name string) []HistogramPoint {
+	var out []HistogramPoint
+	eachMetric(lines, func(_ *commonpb.InstrumentationScope, m *metricpb.Metric) {
+		if m.GetName() != name {
+			return
+		}
+		for _, dp := range m.GetHistogram().GetDataPoints() {
+			out = append(out, HistogramPoint{
+				Time: unixNano(dp.GetTimeUnixNano()), Attrs: Attributes(dp.GetAttributes()), Count: dp.GetCount(), Sum: dp.GetSum(),
+			})
+		}
+	})
+	return out
+}
+
+// ForResource returns the lines cut to the resources whose attribute key is value, each stamped with
+// the latest point time of what it keeps. Lines left with no resource are dropped; lines is not modified.
+func ForResource(lines []Line, key, value string) []Line {
+	var out []Line
+	for _, l := range lines {
+		var kept []*metricpb.ResourceMetrics
+		for _, rm := range l.Request.GetResourceMetrics() {
+			if v, ok := Attributes(rm.GetResource().GetAttributes())[key]; ok && v == value {
+				kept = append(kept, rm)
+			}
+		}
+		if len(kept) == 0 {
+			continue
+		}
+		req := &colmetricpb.ExportMetricsServiceRequest{ResourceMetrics: kept}
+		out = append(out, Line{Time: latest(req), Request: req})
+	}
+	return out
+}
+
 // Export is the part of a request that one resource sent: its resource, the time of the request, and
 // its series as `name{key="value",...}`, attributes sorted by key, in file order, and its scopes.
 type Export struct {

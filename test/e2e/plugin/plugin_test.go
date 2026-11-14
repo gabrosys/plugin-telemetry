@@ -919,6 +919,10 @@ func describeMode(m mode) {
 			noRollout(ctx)
 		}, SpecTimeout(6*time.Minute))
 
+		itParity(func() parityTarget {
+			return parityTarget{env: env, c: c, cfg: cfg, ns: ns, cluster: cname, mode: m.name}
+		})
+
 		It("AC5: deleting the TelemetryExporter stops exports, and the status says missing after the next reconcile", func(ctx SpecContext) {
 			deleted := time.Now()
 			Expect(c.Delete(ctx, framework.ExporterFor(ns, exporterName))).To(Succeed())

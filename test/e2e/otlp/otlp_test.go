@@ -15,6 +15,15 @@ const (
 		`"dataPoints":[{"timeUnixNano":"2000000000","asInt":"3","attributes":[{"key":"hook","value":{"stringValue":"EVALUATE"}}]}]}}]}]}]}` + "\n"
 	gaugeLine = `{"resourceMetrics":[{"resource":{"attributes":[]},"scopeMetrics":[{"scope":{"name":"scope-b"},` +
 		`"metrics":[{"name":"up","gauge":{"dataPoints":[{"timeUnixNano":"3000000000","asDouble":1.5}]}}]}]}]}` + "\n"
+	// Two resources in one request: pod-a's counter at 2 s and pod-b's histogram at 4 s.
+	twoPodsLine = `{"resourceMetrics":[` +
+		`{"resource":{"attributes":[{"key":"k8s.pod.name","value":{"stringValue":"pod-a"}}]},` +
+		`"scopeMetrics":[{"scope":{"name":"scope-a"},"metrics":[{"name":"calls_total","sum":{"isMonotonic":true,` +
+		`"dataPoints":[{"timeUnixNano":"2000000000","asInt":"7"}]}}]}]},` +
+		`{"resource":{"attributes":[{"key":"k8s.pod.name","value":{"stringValue":"pod-b"}}]},` +
+		`"scopeMetrics":[{"scope":{"name":"scope-a"},"metrics":[{"name":"latency","histogram":{` +
+		`"dataPoints":[{"timeUnixNano":"4000000000","count":"5","sum":2.5,"bucketCounts":["2","3"],"explicitBounds":[1],` +
+		`"attributes":[{"key":"op","value":{"stringValue":"read"}}]}]}}]}]}]}` + "\n"
 )
 
 var _ = Describe("Lines", func() {
@@ -86,6 +95,33 @@ var _ = Describe("readers", func() {
 				Scopes: []otlp.Scope{{Name: "scope-b"}},
 			},
 		}))
+	})
+
+	It("keeps the resources with an attribute value, stamped with the latest point time of what is kept", func() {
+		var l otlp.Lines
+		Expect(l.Update([]byte(counterLine + gaugeLine + twoPodsLine))).To(Succeed())
+		all := l.All()
+
+		podA := otlp.ForResource(all, "k8s.pod.name", "pod-a")
+		Expect(podA).To(HaveLen(1))
+		Expect(podA[0].Time).To(Equal(time.Unix(2, 0)))
+		Expect(otlp.Resources(podA)).To(Equal([]map[string]string{{"k8s.pod.name": "pod-a"}}))
+		Expect(otlp.Points(podA, "calls_total")).To(HaveExactElements(HaveField("Value", 7.0)))
+		Expect(otlp.HistogramPoints(podA, "latency")).To(BeEmpty())
+
+		Expect(otlp.ForResource(all, "service.name", "plugin-telemetry")).To(HaveLen(1))
+		Expect(otlp.ForResource(all, "k8s.pod.name", "absent")).To(BeEmpty())
+		Expect(all[2].Request.GetResourceMetrics()).To(HaveLen(2), "the input lines are left as they were")
+	})
+
+	It("returns the histogram points of a metric", func() {
+		var l otlp.Lines
+		Expect(l.Update([]byte(twoPodsLine))).To(Succeed())
+
+		Expect(otlp.HistogramPoints(l.All(), "latency")).To(Equal([]otlp.HistogramPoint{{
+			Time: time.Unix(4, 0), Attrs: map[string]string{"op": "read"}, Count: 5, Sum: 2.5,
+		}}))
+		Expect(otlp.HistogramPoints(l.All(), "calls_total")).To(BeEmpty())
 	})
 
 	It("returns resources, scopes and shapes", func() {

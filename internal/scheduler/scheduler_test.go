@@ -1,7 +1,9 @@
 package scheduler_test
 
 import (
+	"cmp"
 	"context"
+	"maps"
 	"math/rand/v2"
 	"slices"
 	"sync"
@@ -124,6 +126,14 @@ func (h *harness) skipList() []skipRecord {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return slices.Clone(h.skips)
+}
+
+func closeOnce(ch chan struct{}) {
+	select {
+	case <-ch:
+	default:
+		close(ch)
+	}
 }
 
 func job(db, query string, interval time.Duration) planner.Job {
@@ -330,6 +340,135 @@ var _ = Describe("Scheduler", func() {
 
 		Expect(h.runsOf("qb")).To(HaveLen(1))
 		Expect(len(h.runsOf("qa"))).To(BeNumerically(">", aBefore))
+		Eventually(h.s.WorkerCount).Should(Equal(1))
+
+		h.s.Update(plan(job("a", "qa", 10*time.Second), job("b", "qb", 10*time.Second)))
+		Expect(h.s.WorkerCount()).To(Equal(2))
+		h.settle(2)
+		h.advance(scheduler.MaxInitialDelay+time.Second, q, 2)
+		Expect(h.runsOf("qb")).To(HaveLen(2))
+	})
+
+	It("runs the overdue jobs of a database earliest due first", func() {
+		const n = 5
+		interval := 10 * time.Second
+		var jobs []planner.Job
+		for i := range n {
+			jobs = append(jobs, job("a", "q"+string(rune('1'+i)), interval))
+		}
+		// Update draws one initial delay per job, in plan order, from the seeded source.
+		rnd := rand.New(rand.NewPCG(1, 2)) //nolint:gosec // same seed as the harness
+		due := map[string]time.Duration{}
+		for _, j := range jobs {
+			due[j.Query] = time.Duration(rnd.Int64N(int64(interval)))
+		}
+		want := slices.SortedFunc(maps.Keys(due), func(a, b string) int { return cmp.Compare(due[a], due[b]) })
+
+		gate := make(chan struct{})
+		var once sync.Once
+		h.hook = func(_ context.Context, _ planner.Job) { once.Do(func() { <-gate }) }
+		DeferCleanup(func() { once.Do(func() {}); closeOnce(gate) })
+
+		h.s.Update(plan(jobs...))
+		h.start()
+		h.settle(1)
+		h.clk.Step(11 * time.Second)
+		Eventually(h.runCount).Should(Equal(1))
+		close(gate)
+		Eventually(h.runCount).Should(Equal(n))
+
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		var got []string
+		for _, r := range h.runs[:n] {
+			got = append(got, r.job.Query)
+		}
+		Expect(got).To(Equal(want))
+	})
+
+	It("drops a job removed while it runs, without a skip or another run", func() {
+		entered := make(chan struct{})
+		gate := make(chan struct{})
+		h.hook = func(_ context.Context, _ planner.Job) {
+			close(entered)
+			<-gate
+		}
+		DeferCleanup(func() { closeOnce(gate) })
+
+		h.s.Update(plan(job("a", "q", 10*time.Second)))
+		h.start()
+		h.settle(1)
+		h.clk.Step(11 * time.Second)
+		Eventually(entered).Should(BeClosed())
+
+		h.s.Update(plan())
+		h.clk.Step(35 * time.Second)
+		close(gate)
+		Eventually(h.s.WorkerCount).Should(Equal(0))
+		h.advance(100*time.Second, time.Second, 0)
+
+		Expect(h.runsOf("q")).To(HaveLen(1))
+		Expect(h.skipList()).To(BeEmpty())
+	})
+
+	It("starts a job changed while it runs fresh, without a skip", func() {
+		var calls int
+		gate := make(chan struct{})
+		h.hook = func(_ context.Context, _ planner.Job) {
+			calls++
+			if calls == 1 {
+				<-gate
+			}
+		}
+		DeferCleanup(func() { closeOnce(gate) })
+
+		h.s.Update(plan(job("a", "q", 10*time.Second)))
+		h.start()
+		h.settle(1)
+		h.clk.Step(11 * time.Second)
+		Eventually(h.runCount).Should(Equal(1))
+
+		h.s.Update(plan(job("a", "q", 20*time.Second)))
+		h.clk.Step(35 * time.Second)
+		close(gate)
+		Eventually(h.runCount).Should(Equal(2))
+		h.settle(1)
+
+		Expect(h.skipList()).To(BeEmpty())
+	})
+
+	It("keeps the interval between the start of a late run and the next one", func() {
+		var calls int
+		gate := make(chan struct{})
+		h.hook = func(_ context.Context, _ planner.Job) {
+			calls++
+			if calls == 1 {
+				<-gate
+			}
+		}
+		DeferCleanup(func() { closeOnce(gate) })
+
+		interval := 10 * time.Second
+		h.s.Update(plan(job("a", "q1", interval), job("a", "q2", interval)))
+		h.start()
+		h.settle(1)
+		h.clk.Step(11 * time.Second)
+		Eventually(h.runCount).Should(Equal(1))
+		h.clk.Step(5 * time.Second)
+		close(gate)
+		Eventually(h.runCount).Should(Equal(2))
+		h.settle(1)
+
+		h.mu.Lock()
+		late := h.runs[1]
+		h.mu.Unlock()
+		Expect(late.at.Sub(epoch)).To(Equal(16 * time.Second))
+
+		q := 100 * time.Millisecond
+		h.advance(30*time.Second, q, 1)
+		runs := h.runsOf(late.job.Query)
+		Expect(len(runs)).To(BeNumerically(">=", 2))
+		Expect(runs[1].Sub(runs[0])).To(BeNumerically(">=", interval))
 	})
 
 	It("returns when the context ends, after the running job returns", func() {

@@ -218,13 +218,14 @@ func (s *Scheduler) work(ctx context.Context, db string, w *worker) {
 		j, due := e.job, e.due
 		s.mu.Unlock()
 
+		start := s.clk.Now()
 		s.run(ctx, j)
 		end := s.clk.Now()
 		if ctx.Err() != nil {
 			s.exit(db)
 			return
 		}
-		if missed := s.reschedule(e, due, end); missed > 0 {
+		if missed := s.reschedule(e, due, start, end); missed > 0 {
 			s.skip(j, missed)
 		}
 	}
@@ -236,9 +237,10 @@ func (s *Scheduler) exit(db string) {
 	delete(s.workers, db)
 }
 
-// reschedule sets the next due time of e after a run that was due at due and ended at end,
-// and returns the number of runs that were missed. It does nothing if e left the plan.
-func (s *Scheduler) reschedule(e *entry, due, end time.Time) int {
+// reschedule sets the next due time of e after a run that was due at due, started at start and ended at end:
+// the later of the next grid slot and one interval after start, moved past end.
+// It returns the number of runs that were missed, and does nothing if e left the plan.
+func (s *Scheduler) reschedule(e *entry, due, start, end time.Time) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.jobs[jobKey{e.job.Query, e.job.Database}] != e {
@@ -246,6 +248,9 @@ func (s *Scheduler) reschedule(e *entry, due, end time.Time) int {
 	}
 	interval := e.job.Interval
 	next := due.Add(interval + s.randDuration(min(interval/10, MaxJitter)))
+	if floor := start.Add(interval); floor.After(next) {
+		next = floor
+	}
 	missed := 0
 	for !next.After(end) {
 		missed++

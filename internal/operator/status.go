@@ -68,8 +68,9 @@ func (*Status) GetCapabilities(context.Context, *operator.OperatorCapabilitiesRe
 	}, nil
 }
 
-// SetStatusInCluster never fails. It returns NoOpResponse when the status is healthy and equal to the
-// stored one, so that CloudNativePG stops requeueing the Cluster every 5 s, and JSONStatusResponse otherwise.
+// SetStatusInCluster never fails. It returns NoOpResponse when the status equals the stored one and is
+// healthy or has the exporter missing, so that CloudNativePG stops requeueing the Cluster every 5 s, and
+// JSONStatusResponse otherwise.
 func (s *Status) SetStatusInCluster(ctx context.Context, req *operator.SetStatusInClusterRequest) (*operator.SetStatusInClusterResponse, error) {
 	start := time.Now()
 	resp, outcome := s.setStatus(ctx, req)
@@ -109,7 +110,7 @@ func (s *Status) setStatus(ctx context.Context, req *operator.SetStatusInCluster
 
 		return builder.NoOpResponse(), outcomeError
 	}
-	if st.Healthy() && storedStatus(cluster) == string(raw) {
+	if (st.Healthy() || st.ExporterState == exporterMissing) && storedStatus(cluster) == string(raw) {
 		return builder.NoOpResponse(), outcomeNoop
 	}
 

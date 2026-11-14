@@ -164,13 +164,46 @@ var _ = Describe("Status.SetStatusInCluster", func() {
 		Expect(call(status(), withStored(cluster, string(first)))).To(BeEmpty())
 	})
 
-	It("returns the status while unhealthy even when unchanged", func() {
-		objs = identityObjects(true)
-		first := call(status(), cluster)
-		Expect(decode(first).Healthy()).To(BeFalse())
+	DescribeTable("returns NoOpResponse for an unchanged missing exporter, whatever the identity",
+		func(token bool) {
+			objs = identityObjects(token)
+			first := call(status(), cluster)
+			Expect(decode(first).ExporterState).To(Equal("missing"))
 
-		Expect(call(status(), withStored(cluster, string(first)))).To(Equal(first))
+			Expect(call(status(), withStored(cluster, string(first)))).To(BeEmpty())
+		},
+		Entry("identity ready", true),
+		Entry("identity pending", false),
+	)
+
+	It("returns the status the first time the exporter is missing", func() {
+		first := call(status(), cluster)
+		Expect(decode(first).Healthy()).To(BeTrue())
+		objs = identityObjects(true)
+
+		second := call(status(), withStored(cluster, string(first)))
+		Expect(decode(second).ExporterState).To(Equal("missing"))
 	})
+
+	DescribeTable("returns the status while invalid or pending even when unchanged",
+		func(objects func() []client.Object) {
+			objs = objects()
+			first := call(status(), cluster)
+			Expect(decode(first).Healthy()).To(BeFalse())
+			Expect(decode(first).ExporterState).NotTo(Equal("missing"))
+
+			Expect(call(status(), withStored(cluster, string(first)))).To(Equal(first))
+		},
+		Entry("exporter invalid", func() []client.Object {
+			e := newExporterWithEndpoint()
+			e.Spec.Exporter.Endpoint = "ftp://c"
+
+			return append([]client.Object{e}, identityObjects(true)...)
+		}),
+		Entry("identity pending", func() []client.Object {
+			return append([]client.Object{newExporterWithEndpoint()}, identityObjects(false)...)
+		}),
+	)
 
 	It("returns the new status when it changed", func() {
 		first := call(status(), cluster)

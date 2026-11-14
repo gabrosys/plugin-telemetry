@@ -520,7 +520,10 @@ func describeMode(m mode) {
 			created := time.Now()
 			Expect(c.Create(ctx, exporter)).To(Succeed())
 
+			// CloudNativePG stops polling the status while the exporter is missing; each touch is a reconcile that
+			// asks again, in case the plugin's cache didn't hold the exporter yet.
 			Eventually(func(g Gomega, ctx SpecContext) {
+				touch(ctx, fmt.Sprint("created-invalid-", time.Now().UnixNano()))
 				st := status(g, ctx)
 				g.Expect(st.ExporterState).To(Equal("invalid"))
 				g.Expect(st.Message).To(ContainSubstring("exporter.timeout"))

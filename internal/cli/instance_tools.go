@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"slices"
 	"sort"
 	"strconv"
@@ -37,24 +36,26 @@ const (
 
 // config is a loaded configuration: the settings, the merged sources and their definitions.
 type config struct {
+	read     sources.ReadFile
 	settings settings.Settings
 	result   sources.Result
 	defs     []queries.Definition // in the order of result.Entries
 }
 
 func loadConfig(path string) (*config, error) {
-	s, err := settings.Load(path)
+	cfg := engine.FileConfig(path)
+	s, _, err := cfg.Settings()
 	if err != nil {
 		return nil, fmt.Errorf("load settings: %w", err)
 	}
-	res := sources.NewLoader(s.Sources).Load()
+	res := sources.NewLoader(cfg.ReadFile, s.Sources).Load()
 	opts := queries.Options{MaxLabelsPerSeries: s.Limits.MaxLabelsPerSeries}
 	defs := make([]queries.Definition, 0, len(res.Entries))
 	for _, e := range res.Entries {
 		defs = append(defs, queries.Define(e.Key, e.Query, opts))
 	}
 
-	return &config{settings: s, result: res, defs: defs}, nil
+	return &config{read: cfg.ReadFile, settings: s, result: res, defs: defs}, nil
 }
 
 func (c *config) keys() []string {
@@ -381,7 +382,7 @@ func describe(c *config, gates *featuregate.Registry) (string, error) {
 
 	if f := c.settings.Exporter.HeadersFile; f != "" {
 		b.WriteString("# headers\n")
-		keys, err := headerKeys(f)
+		keys, err := headerKeys(c.read, f)
 		if err != nil {
 			fmt.Fprintf(&b, "unreadable: %v\n", err)
 		}
@@ -408,8 +409,8 @@ func describe(c *config, gates *featuregate.Registry) (string, error) {
 }
 
 // headerKeys returns the sorted keys of the OTEL_EXPORTER_OTLP_HEADERS-format file; values are dropped.
-func headerKeys(file string) ([]string, error) {
-	data, err := os.ReadFile(file) //nolint:gosec // the path comes from the operator's settings
+func headerKeys(read sources.ReadFile, file string) ([]string, error) {
+	data, err := read(file)
 	if err != nil {
 		return nil, fmt.Errorf("read headers file: %w", err)
 	}

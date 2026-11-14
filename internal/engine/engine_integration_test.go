@@ -133,11 +133,11 @@ func (f *fixture) run() {
 	f.done = make(chan error, 1)
 	go func() {
 		f.done <- engine.Run(ctx, engine.Options{
-			ConfigPath: f.config,
-			Gates:      featuregate.NewRegistry(),
-			Clock:      clock.RealClock{},
-			Rand:       rand.New(rand.NewPCG(1, 2)), //nolint:gosec // seeded jitter for the test
-			Getenv:     func(string) string { return "" },
+			Config: engine.FileConfig(f.config),
+			Gates:  featuregate.NewRegistry(),
+			Clock:  clock.RealClock{},
+			Rand:   rand.New(rand.NewPCG(1, 2)), //nolint:gosec // seeded jitter for the test
+			Getenv: func(string) string { return "" },
 		})
 	}()
 	DeferCleanup(func() {

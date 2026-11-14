@@ -66,7 +66,7 @@ func writeFile(dir, name string, data []byte) string {
 
 func newExporter(s settings.Exporter) *export.Exporter {
 	GinkgoHelper()
-	e, err := export.NewExporter(context.Background(), s)
+	e, err := export.NewExporter(context.Background(), s, os.ReadFile)
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(func(ctx SpecContext) { Expect(e.Shutdown(ctx)).To(Succeed()) })
 	return e
@@ -513,7 +513,7 @@ var _ = Describe("Exporter", func() {
 
 	DescribeTable("NewExporter never echoes the credentials of an endpoint it rejects",
 		func(endpoint string) {
-			_, err := export.NewExporter(context.Background(), exporterSettings(settings.ProtocolHTTP, endpoint))
+			_, err := export.NewExporter(context.Background(), exporterSettings(settings.ProtocolHTTP, endpoint), os.ReadFile)
 			Expect(err).To(MatchError(ContainSubstring("endpoint")))
 			Expect(err.Error()).NotTo(ContainSubstring("secret"))
 		},
@@ -527,7 +527,7 @@ var _ = Describe("Exporter", func() {
 			s := exporterSettings(settings.ProtocolHTTP, "https://127.0.0.1:4318/v1/metrics")
 			mutate(&s, dir)
 
-			_, err := export.NewExporter(context.Background(), s)
+			_, err := export.NewExporter(context.Background(), s, os.ReadFile)
 
 			Expect(err).To(MatchError(ContainSubstring(msg)))
 		},

@@ -88,11 +88,11 @@ func newInstanceCommand() *cobra.Command {
 				return err
 			}
 			if err := engine.Run(ctx, engine.Options{
-				ConfigPath: flags.config,
-				Gates:      gates,
-				Clock:      clock.RealClock{},
-				Rand:       rnd,
-				Getenv:     os.Getenv,
+				Config: engine.FileConfig(flags.config),
+				Gates:  gates,
+				Clock:  clock.RealClock{},
+				Rand:   rnd,
+				Getenv: os.Getenv,
 			}); err != nil {
 				return fmt.Errorf("run the engine: %w", err)
 			}

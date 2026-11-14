@@ -27,6 +27,22 @@ func WithReady(fn func()) WatchOption {
 	return func(c *watchConfig) { c.onReady = fn }
 }
 
+// WatchHooks returns the ready and error functions opts set, or no-ops, for Watch implementations outside this package.
+func WatchHooks(opts ...WatchOption) (ready func(), onError func(error)) {
+	var cfg watchConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
+	ready, onError = cfg.onReady, cfg.onError
+	if ready == nil {
+		ready = func() {}
+	}
+	if onError == nil {
+		onError = func(error) {}
+	}
+	return ready, onError
+}
+
 // Watch calls notify, debounced, after any change in the directories holding files. It watches each
 // directory, not the files, because editors and Kubernetes replace files by rename or symlink swap.
 // Callers start Watch, wait for WithReady, then Load, so no change falls between the two.

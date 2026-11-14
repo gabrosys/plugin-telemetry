@@ -60,23 +60,25 @@ const (
 	upDescription = "1 if PostgreSQL is up, 0 otherwise."
 )
 
-// ErrNoConfigPath is returned by Run when Options.ConfigPath is empty.
-var ErrNoConfigPath = errors.New("no configuration file given")
+// ErrNilConfig is returned by Run when Options.Config is nil.
+var ErrNilConfig = errors.New("no configuration given")
 
 // Options configure Run.
 type Options struct {
-	ConfigPath string                // the settings file
-	Gates      *featuregate.Registry // nil means no gate is set
-	Clock      clock.Clock           // nil means the real clock
-	Rand       *rand.Rand            // seeds the jitter of the scheduler and the export loop; nil means a random seed
-	Getenv     func(string) string   // reads the downward-API variables of the resource; nil means os.Getenv
+	Config Config                // where the settings and the files they name are read
+	Gates  *featuregate.Registry // nil means no gate is set
+	Clock  clock.Clock           // nil means the real clock
+	Rand   *rand.Rand            // seeds the jitter of the scheduler and the export loop; nil means a random seed
+	Getenv func(string) string   // reads the downward-API variables of the resource; nil means os.Getenv
 }
 
 // Run blocks until ctx ends. An invalid configuration at start or on reload is logged;
-// at start the engine idles until the file becomes valid, later it keeps the last good one.
+// at start the engine idles until the settings become valid, later it keeps the last good ones.
+// When the Config has nothing to run (ErrNoConfiguration) the engine stops everything and idles
+// until it has.
 func Run(ctx context.Context, o Options) error {
-	if o.ConfigPath == "" {
-		return ErrNoConfigPath
+	if o.Config == nil {
+		return ErrNilConfig
 	}
 	e, err := newEngine(ctx, o)
 	if err != nil {
@@ -124,7 +126,7 @@ type watchRun struct {
 }
 
 type engine struct {
-	path   string
+	cfg    Config
 	gates  *featuregate.Registry
 	clk    clock.Clock
 	rnd    *rand.Rand // control goroutine only
@@ -161,11 +163,12 @@ type engine struct {
 	exporterFiles  []string
 	exporterDigest string
 	loop           *loopRun
+	idleReason     string // the ErrNoConfiguration reason last logged
 }
 
 func newEngine(ctx context.Context, o Options) (*engine, error) {
 	e := &engine{
-		path:    o.ConfigPath,
+		cfg:     o.Config,
 		gates:   o.Gates,
 		clk:     o.Clock,
 		rnd:     o.Rand,
@@ -194,7 +197,7 @@ func newEngine(ctx context.Context, o Options) (*engine, error) {
 	}
 
 	e.sched = scheduler.New(e.clk, e.newRand(), e.runJob, e.skipped)
-	e.plan = newReplanner(o.ConfigPath, e.stats, e.store, &e.errs, e.sched.Update, e)
+	e.plan = newReplanner(o.Config, e.stats, e.store, &e.errs, e.sched.Update, e)
 	return e, nil
 }
 
@@ -240,7 +243,7 @@ func (e *engine) newRand() *rand.Rand {
 // run is the control goroutine: it reacts to file changes, facts rounds and failed runs until ctx ends.
 func (e *engine) run(ctx context.Context) {
 	logger := log.FromContext(ctx)
-	logger.Info("starting the metrics engine", "config", e.path, "version", version.Version)
+	logger.Info("starting the metrics engine", "config", e.cfg.Name(), "version", version.Version)
 	if e.gates != nil {
 		for _, g := range e.gates.List() {
 			logger.Info("feature gate", "id", g.ID, "stage", g.Stage, "enabled", g.Enabled)
@@ -257,7 +260,7 @@ func (e *engine) run(ctx context.Context) {
 	}()
 	defer e.shutdown(ctx, stopSched, schedDone)
 
-	e.watch(ctx, []string{e.path})
+	e.watch(ctx, nil)
 	e.reload(ctx)
 	for {
 		select {
@@ -319,20 +322,29 @@ func (e *engine) shutdown(ctx context.Context, stopSched context.CancelFunc, sch
 func (e *engine) reload(ctx context.Context) {
 	err := e.plan.reload(ctx)
 	if err == nil {
+		e.idleReason = ""
 		return
 	}
 	logger := log.FromContext(ctx)
-	if e.plan.current == nil {
-		logger.Error(err, "invalid configuration, waiting for a valid one", "config", e.path)
+	if errors.Is(err, ErrNoConfiguration) {
+		if reason := err.Error(); reason != e.idleReason {
+			e.idleReason = reason
+			logger.Info("no configuration, waiting for one", "config", e.cfg.Name(), "reason", reason)
+		}
 		return
 	}
-	logger.Error(err, "invalid configuration, keeping the one in force", "config", e.path, "generation", e.plan.generation)
+	e.idleReason = ""
+	if e.plan.current == nil {
+		logger.Error(err, "invalid configuration, waiting for a valid one", "config", e.cfg.Name())
+		return
+	}
+	logger.Error(err, "invalid configuration, keeping the one in force", "config", e.cfg.Name(), "generation", e.plan.generation)
 }
 
 // onChange reloads the exporter's files and the configuration, each only if its files changed.
 func (e *engine) onChange(ctx context.Context) {
 	if e.exp != nil {
-		if d := digestOf(e.exporterFiles); d != e.exporterDigest {
+		if d := digestOf(e.cfg.ReadFile, e.exporterFiles); d != e.exporterDigest {
 			e.exporterDigest = d
 			if err := e.exp.Reload(); err != nil { //nolint:contextcheck // Exporter.Reload takes no context
 				log.FromContext(ctx).Error(err, "reload the exporter files")
@@ -348,6 +360,10 @@ func (e *engine) onChange(ctx context.Context) {
 
 // apply sets up the exporter, the export loop, the pool and the snapshot cap for next.
 func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
+	if next == nil {
+		e.teardown(ctx)
+		return nil
+	}
 	s := next.settings
 	first := prev == nil
 	var old settings.Settings
@@ -361,9 +377,9 @@ func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 	var exp *export.Exporter
 	files, digest := exporterFiles(s.Exporter), e.exporterDigest
 	if resourceChanged || exporterChanged {
-		digest = digestOf(files)
+		digest = digestOf(e.cfg.ReadFile, files)
 		var err error
-		if exp, err = export.NewExporter(ctx, s.Exporter); err != nil {
+		if exp, err = export.NewExporter(ctx, s.Exporter, e.cfg.ReadFile); err != nil {
 			return fmt.Errorf("create the exporter: %w", err)
 		}
 	}
@@ -388,6 +404,40 @@ func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 		e.setFactsTimer(0)
 	}
 	return nil
+}
+
+// teardown stops the export loop, the facts rounds and the pool, and closes the exporter.
+func (e *engine) teardown(ctx context.Context) {
+	stopTimer(&e.factsTimer)
+	stopTimer(&e.earlyTimer)
+	e.stopLoop()
+	e.cluster.Store(nil)
+	e.up.Store(-1)
+	e.server.Store(nil)
+	e.factsFailures = 0
+	e.factsErrs.retain(func(snapshot.Key) bool { return false })
+
+	e.mu.Lock()
+	r := e.runner
+	e.runner = nil
+	e.mu.Unlock()
+	if r != nil {
+		e.retired.Add(1)
+		go func() {
+			defer e.retired.Done()
+			r.pool.inflight.Wait()
+			r.pool.Close()
+		}()
+	}
+
+	if e.exp != nil {
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+		if err := e.exp.Shutdown(sctx); err != nil {
+			log.FromContext(ctx).Error(err, "shut down the exporter")
+		}
+		cancel()
+		e.exp, e.exporterFiles, e.exporterDigest = nil, nil, ""
+	}
 }
 
 // PostgresConfig is the connection configuration the engine builds its pool from.
@@ -418,7 +468,9 @@ func (e *engine) setRunner(ctx context.Context, s settings.Settings, idle time.D
 	if cur != nil && cur.spec == spec {
 		pool = cur.pool
 	} else {
-		pool = &sharedPool{Pool: pg.NewPool(PostgresConfig(s), s.Postgres.MaxConnections, idle, e.clk,
+		pc := PostgresConfig(s)
+		pc.ReadFile = e.cfg.ReadFile
+		pool = &sharedPool{Pool: pg.NewPool(pc, s.Postgres.MaxConnections, idle, e.clk,
 			pg.WithLogger(log.FromContext(ctx).GetLogger()), pg.WithMaxBackoff(spec.maxBackoff))}
 	}
 	next := &runner{spec: spec, limits: s.Limits, pool: pool, exec: executor.New(pool.Pool, s.Limits, e.serverVersion, e.clk)}
@@ -746,7 +798,7 @@ func (e *engine) startWatch(ctx context.Context, files []string) (*watchRun, err
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		result <- sources.Watch(wctx, files, watchDebounce, e.notify,
+		result <- e.cfg.Watch(wctx, files, e.notify,
 			sources.WithReady(func() { close(ready) }),
 			sources.WithErrorHandler(func(err error) {
 				// A watcher error can mean lost events, so look at the files again.

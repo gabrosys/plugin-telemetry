@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"slices"
 	"sort"
 	"sync"
@@ -21,7 +20,16 @@ const (
 	OutcomeOK      = "ok"
 	OutcomeMissing = "missing"
 	OutcomeInvalid = "invalid"
+	// OutcomeDenied marks a source the reader was not allowed to read; like OutcomeInvalid, it keeps the last good version.
+	OutcomeDenied = "denied"
 )
+
+// ErrDenied is what a ReadFile wraps when the source forbids the read, such as an HTTP 403.
+var ErrDenied = errors.New("permission denied")
+
+// ReadFile returns the content of the named file: an error wrapping fs.ErrNotExist when it is missing,
+// one wrapping ErrDenied when the read is forbidden.
+type ReadFile func(name string) ([]byte, error)
 
 // Entry is one query after merging.
 type Entry struct {
@@ -33,9 +41,9 @@ type Entry struct {
 // Status is the outcome of loading one source.
 type Status struct {
 	Source        string
-	Outcome       string // "ok", "missing", "invalid"
+	Outcome       string // "ok", "missing", "invalid", "denied"
 	Err           error
-	UsingPrevious bool     // invalid now, its last good version is in force
+	UsingPrevious bool     // invalid or denied now, its last good version is in force
 	Duplicates    []string // keys this source overwrote from an earlier source, sorted
 }
 
@@ -48,19 +56,21 @@ type Result struct {
 
 // Loader loads the builtin query and the files, remembering each file's last good version.
 type Loader struct {
+	read  ReadFile
 	files []string
 
 	mu       sync.Mutex // guards previous
 	previous map[string]queries.UserQueries
 }
 
-// NewLoader returns a Loader for files, which are read in order after the builtin query.
-func NewLoader(files []string) *Loader {
-	return &Loader{files: slices.Clone(files), previous: map[string]queries.UserQueries{}}
+// NewLoader returns a Loader that reads files with read, in order after the builtin query.
+func NewLoader(read ReadFile, files []string) *Loader {
+	return &Loader{read: read, files: slices.Clone(files), previous: map[string]queries.UserQueries{}}
 }
 
 // Load reads the builtin query, then each file in order. A later source overwrites an earlier key.
-// A missing file, or one that has never parsed, is skipped; one that stops parsing keeps its last good version.
+// A missing file, or one that has never parsed or been readable, is skipped; one that stops parsing or
+// becomes unreadable keeps its last good version.
 func (l *Loader) Load() Result {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -84,11 +94,15 @@ func (l *Loader) Load() Result {
 	for _, file := range l.files {
 		st := Status{Source: file}
 
-		content, err := os.ReadFile(file) //nolint:gosec // path comes from operator settings
+		content, err := l.read(file)
 		if err != nil {
-			st.Outcome = OutcomeMissing
 			st.Err = fmt.Errorf("read %s: %w", file, err)
-			if !errors.Is(err, fs.ErrNotExist) {
+			switch {
+			case errors.Is(err, fs.ErrNotExist):
+				st.Outcome = OutcomeMissing
+			case errors.Is(err, ErrDenied):
+				st.Outcome = OutcomeDenied
+			default:
 				st.Outcome = OutcomeInvalid
 			}
 			merge(file, l.previousFor(&st, file), st)
@@ -119,9 +133,9 @@ func (l *Loader) Load() Result {
 	return Result{Entries: entries, Status: statuses, Hash: hashEntries(entries)}
 }
 
-// previousFor returns the last good queries of an invalid, non-missing file and flags the status.
+// previousFor returns the last good queries of an invalid or denied file and flags the status.
 func (l *Loader) previousFor(st *Status, file string) queries.UserQueries {
-	if st.Outcome != OutcomeInvalid {
+	if st.Outcome != OutcomeInvalid && st.Outcome != OutcomeDenied {
 		return nil
 	}
 

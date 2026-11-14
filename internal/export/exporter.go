@@ -23,6 +23,7 @@ import (
 	"google.golang.org/grpc/encoding/gzip"
 
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
+	"github.com/gabrosys/plugin-telemetry/internal/sources"
 )
 
 const (
@@ -43,6 +44,7 @@ var ErrExporterShutdown = errors.New("exporter is shut down")
 // connection, so no OTEL_EXPORTER_OTLP_* or proxy variable can change where or how it sends.
 type Exporter struct {
 	s         settings.Exporter
+	read      sources.ReadFile
 	component string
 	address   string
 	port      int
@@ -81,8 +83,8 @@ func (b *backend) close(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// NewExporter builds the exporter from s and reads its TLS and header files.
-func NewExporter(ctx context.Context, s settings.Exporter) (*Exporter, error) {
+// NewExporter builds the exporter from s and reads its TLS and header files with read, now and on Reload.
+func NewExporter(ctx context.Context, s settings.Exporter, read sources.ReadFile) (*Exporter, error) {
 	var component string
 	switch s.Protocol {
 	case settings.ProtocolHTTP:
@@ -99,7 +101,7 @@ func NewExporter(ctx context.Context, s settings.Exporter) (*Exporter, error) {
 	if s.Timeout <= 0 || s.Interval*9/10 <= s.Timeout {
 		return nil, fmt.Errorf("exporter timeout %s: must be positive and below 0.9 × interval %s", s.Timeout, s.Interval)
 	}
-	e := &Exporter{s: s, component: component, address: u.Hostname(), secure: u.Scheme == "https"}
+	e := &Exporter{s: s, read: read, component: component, address: u.Hostname(), secure: u.Scheme == "https"}
 	e.port = 80
 	if e.secure {
 		e.port = 443
@@ -110,7 +112,7 @@ func NewExporter(ctx context.Context, s settings.Exporter) (*Exporter, error) {
 		}
 	}
 
-	m, err := loadMaterial(s, e.secure)
+	m, err := loadMaterial(s, e.secure, read)
 	if err != nil {
 		return nil, err
 	}
@@ -239,7 +241,7 @@ func (e *Exporter) Reload() error {
 		return ErrExporterShutdown
 	}
 
-	m, err := loadMaterial(e.s, e.secure)
+	m, err := loadMaterial(e.s, e.secure, e.read)
 	if err != nil {
 		return fmt.Errorf("reload exporter: %w", err)
 	}

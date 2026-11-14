@@ -97,7 +97,7 @@ var _ = Describe("Replanner", func() {
 		store = snapshot.New(0)
 		stats = selfmetrics.NewStats()
 		plans = nil
-		r = engine.NewReplanner(config, stats, store, func(p planner.Plan) { plans = append(plans, p) })
+		r = engine.NewReplanner(engine.FileConfig(config), stats, store, func(p planner.Plan) { plans = append(plans, p) })
 		primary = planner.Facts{Version: *semver.MustParse("18.0.7"), Databases: []string{"app", "postgres"}}
 	})
 

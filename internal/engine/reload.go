@@ -4,10 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"math"
-	"os"
 	"reflect"
 	"slices"
 	"sync"
@@ -36,16 +36,16 @@ type configuration struct {
 
 // components are what a configuration sets up besides the plan.
 type components interface {
-	// watch makes the file watcher cover files; it is called before the sources are read.
+	// watch makes the watcher cover files besides the settings; it is called before the sources are read.
 	watch(ctx context.Context, files []string)
-	// apply sets up next; prev is nil the first time. On error nothing has changed.
+	// apply sets up next; prev is nil the first time. A nil next tears everything down. On error nothing has changed.
 	apply(ctx context.Context, prev, next *configuration) error
 }
 
 // replanner loads the configuration and rebuilds the plan when the configuration or the facts change.
 // whilePlanned may be called from any goroutine; every other method runs on the engine's control goroutine.
 type replanner struct {
-	path   string
+	cfg    Config
 	stats  *selfmetrics.Stats
 	store  *snapshot.Store
 	errs   *errorLog
@@ -57,22 +57,29 @@ type replanner struct {
 	current     *configuration // nil until the first valid configuration
 	facts       *planner.Facts // nil until the first facts round
 	generation  uint64
-	digest      string   // of digestFiles as the last load read them; empty forces the next load
-	digestFiles []string // the settings file, then the sources it names
+	digest      string   // of the settings bytes and digestFiles as the last load read them; empty forces the next load
+	digestFiles []string // the sources the settings name
 
 	mu      sync.RWMutex            // guards planned; whilePlanned holds it while a result is written
 	planned map[snapshot.Key]string // the fingerprint of each planned job
 }
 
 func newReplanner(
-	path string, stats *selfmetrics.Stats, store *snapshot.Store, errs *errorLog, update func(planner.Plan), comps components,
+	cfg Config, stats *selfmetrics.Stats, store *snapshot.Store, errs *errorLog, update func(planner.Plan), comps components,
 ) *replanner {
-	return &replanner{path: path, stats: stats, store: store, errs: errs, update: update, comps: comps}
+	return &replanner{cfg: cfg, stats: stats, store: store, errs: errs, update: update, comps: comps}
 }
 
-// changed reports whether the files the last load read have changed since.
+// changed reports whether the settings or the files the last load read have changed since.
 func (r *replanner) changed() bool {
-	return r.digest == "" || digestOf(r.digestFiles) != r.digest
+	if r.digest == "" {
+		return true
+	}
+	_, data, err := r.cfg.Settings()
+	h := sha256.New()
+	addSettings(h, data, err)
+	addFiles(h, r.cfg.ReadFile, r.digestFiles)
+	return hex.EncodeToString(h.Sum(nil)) != r.digest
 }
 
 // reload loads the settings and the sources and, when they differ from the configuration in force,
@@ -80,24 +87,30 @@ func (r *replanner) changed() bool {
 func (r *replanner) reload(ctx context.Context) error {
 	logger := log.FromContext(ctx)
 
-	// Each file enters the digest before it is read, so a change during the load triggers another one.
+	// The settings and each file enter the digest before they are read, so a change during the load triggers another one.
 	h := sha256.New()
-	addFile(h, r.path)
-	s, err := settings.Load(r.path)
-	r.stats.ConfigLoad(r.path, err == nil, 0)
+	s, data, err := r.cfg.Settings()
+	addSettings(h, data, err)
+	if errors.Is(err, ErrNoConfiguration) {
+		r.digest, r.digestFiles = hex.EncodeToString(h.Sum(nil)), nil
+		r.comps.watch(ctx, nil)
+		if r.current != nil {
+			r.idle(ctx)
+		}
+		return fmt.Errorf("load settings: %w", err)
+	}
+	r.stats.ConfigLoad(r.cfg.Name(), err == nil, 0)
 	if err != nil {
-		r.digest, r.digestFiles = hex.EncodeToString(h.Sum(nil)), []string{r.path}
+		r.digest, r.digestFiles = hex.EncodeToString(h.Sum(nil)), nil
 		return fmt.Errorf("load settings: %w", err)
 	}
 
-	r.comps.watch(ctx, watchedFiles(r.path, s))
-	for _, f := range s.Sources {
-		addFile(h, f)
-	}
-	r.digest, r.digestFiles = hex.EncodeToString(h.Sum(nil)), append([]string{r.path}, s.Sources...)
+	r.comps.watch(ctx, watchedFiles(s))
+	addFiles(h, r.cfg.ReadFile, s.Sources)
+	r.digest, r.digestFiles = hex.EncodeToString(h.Sum(nil)), slices.Clone(s.Sources)
 
 	if r.loader == nil || !slices.Equal(r.loaderFiles, s.Sources) {
-		r.loader, r.loaderFiles = sources.NewLoader(s.Sources), slices.Clone(s.Sources)
+		r.loader, r.loaderFiles = sources.NewLoader(r.cfg.ReadFile, s.Sources), slices.Clone(s.Sources)
 	}
 	res := r.loader.Load()
 	r.recordLoad(logger, res)
@@ -124,6 +137,9 @@ func (r *replanner) recordLoad(logger log.Logger, res sources.Result) {
 			logger.Warning("query source missing", "source", st.Source, "error", fmt.Sprint(st.Err))
 		case sources.OutcomeInvalid:
 			logger.Warning("query source invalid", "source", st.Source, "usingPrevious", st.UsingPrevious,
+				"error", fmt.Sprint(st.Err))
+		case sources.OutcomeDenied:
+			logger.Warning("query source denied", "source", st.Source, "usingPrevious", st.UsingPrevious,
 				"error", fmt.Sprint(st.Err))
 		}
 		if len(st.Duplicates) > 0 {
@@ -178,14 +194,27 @@ func sameFacts(a, b planner.Facts) bool {
 	return a.Version.Equal(&b.Version) && a.InRecovery == b.InRecovery && slices.Equal(a.Databases, b.Databases)
 }
 
-// replan builds the plan, drops the snapshot entries, self-metrics and failures it no longer has,
-// and hands it on. It does nothing before the first configuration and the first facts.
+// replan builds the plan and publishes it. It does nothing before the first configuration and the first facts.
 func (r *replanner) replan(ctx context.Context) {
 	if r.current == nil || r.facts == nil {
 		return
 	}
-	p := planner.Build(r.current.defs, r.current.settings, *r.facts)
+	r.publish(ctx, planner.Build(r.current.defs, r.current.settings, *r.facts))
+}
 
+// idle drops the configuration in force and everything it set up, and hands the scheduler an empty plan.
+func (r *replanner) idle(ctx context.Context) {
+	// Tearing down cannot fail.
+	if err := r.comps.apply(ctx, r.current, nil); err != nil {
+		log.FromContext(ctx).Error(err, "tear down the configuration")
+	}
+	r.current, r.facts, r.loader, r.loaderFiles = nil, nil, nil, nil
+	r.publish(ctx, planner.Plan{})
+}
+
+// publish makes p the plan: it drops the snapshot entries, self-metrics and failures p no longer has
+// and hands p to the scheduler.
+func (r *replanner) publish(ctx context.Context, p planner.Plan) {
 	planned := make(map[snapshot.Key]string, len(p.Jobs))
 	keep := make(map[selfmetrics.QueryDatabase]bool, len(p.Jobs))
 	for _, j := range p.Jobs {
@@ -245,9 +274,9 @@ func idleTimeout(defs []queries.Definition, s settings.Settings) time.Duration {
 	return longest + idleGrace
 }
 
-// watchedFiles lists every file the configuration at path reads.
-func watchedFiles(path string, s settings.Settings) []string {
-	files := append([]string{path}, s.Sources...)
+// watchedFiles lists every file the settings name that the engine reads.
+func watchedFiles(s settings.Settings) []string {
+	files := append([]string{}, s.Sources...)
 	files = append(files, s.Postgres.PasswordFile)
 	return uniqueFiles(append(files, exporterFiles(s.Exporter)...))
 }
@@ -271,18 +300,33 @@ func uniqueFiles(files []string) []string {
 	return out
 }
 
-// digestOf hashes the contents of files in order; an unreadable file contributes its error.
-func digestOf(files []string) string {
+// digestOf hashes the contents of files in order, read with read; an unreadable file contributes its error.
+func digestOf(read sources.ReadFile, files []string) string {
 	h := sha256.New()
-	for _, f := range files {
-		addFile(h, f)
-	}
+	addFiles(h, read, files)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func addFile(h hash.Hash, file string) {
+func addFiles(h hash.Hash, read sources.ReadFile, files []string) {
+	for _, f := range files {
+		addFile(h, read, f)
+	}
+}
+
+// addSettings adds the bytes Config.Settings returned; with none, the error stands for them.
+func addSettings(h hash.Hash, data []byte, err error) {
 	state := []byte{1}
-	data, err := os.ReadFile(file) //nolint:gosec // paths come from the operator's settings
+	if data == nil && err != nil {
+		state, data = []byte{0}, []byte(err.Error())
+	}
+	sum := sha256.Sum256(data)
+	h.Write(state)
+	h.Write(sum[:])
+}
+
+func addFile(h hash.Hash, read sources.ReadFile, file string) {
+	state := []byte{1}
+	data, err := read(file)
 	if err != nil {
 		state, data = []byte{0}, []byte(err.Error())
 	}

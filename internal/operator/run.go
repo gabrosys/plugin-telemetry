@@ -70,6 +70,14 @@ func Run(ctx context.Context, opts Options, images ImageWaiter, deps Deps) error
 	}
 
 	logger.Info("waiting for the caches to sync")
+	if err := registerInformers(ctx, deps.Cache); err != nil {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+			return err
+		}
+	}
 	if !deps.Cache.WaitForCacheSync(ctx) {
 		select {
 		case <-ctx.Done():

@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
 	"os"
@@ -28,6 +29,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
@@ -51,6 +53,28 @@ func (f *fakeWaiter) Wait(ctx context.Context) error {
 type fakeCache struct {
 	cache.Cache
 	synced chan struct{}
+
+	mu         sync.Mutex // guards registered
+	registered []client.Object
+}
+
+func (f *fakeCache) GetInformer(_ context.Context, obj client.Object, _ ...cache.InformerGetOption) (cache.Informer, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.registered = append(f.registered, obj)
+
+	return nil, nil
+}
+
+func (f *fakeCache) kinds() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, o := range f.registered {
+		out = append(out, fmt.Sprintf("%T", o))
+	}
+
+	return out
 }
 
 func (f *fakeCache) WaitForCacheSync(ctx context.Context) bool {
@@ -206,6 +230,16 @@ var _ = Describe("Run", func() {
 		close(waiter.ready)
 		close(caches.synced)
 		Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
+	})
+
+	It("registers an informer for all seven cached kinds before it listens", func() {
+		close(waiter.ready)
+		start()
+		Eventually(caches.kinds, 5*time.Second).Should(ConsistOf(
+			"*v1.Cluster", "*v1alpha1.TelemetryExporter", "*v1alpha1.MetricQuerySet",
+			"*v1.ServiceAccount", "*v1.Role", "*v1.RoleBinding", "*v1.Secret",
+		))
+		Expect(canDial(addr)).To(BeFalse())
 	})
 
 	It("does not listen before the caches have synced", func() {

@@ -71,6 +71,7 @@ var _ = Describe("NewManager", func() {
 		Expect(opts.HealthProbeBindAddress).To(Equal("0"))
 		Expect(opts.PprofBindAddress).To(Equal("0"))
 		Expect(opts.Scheme).To(BeIdenticalTo(scheme))
+		Expect(opts.Cache.ReaderFailOnMissingInformer).To(BeTrue())
 
 		mgr, err := operator.NewManager(&rest.Config{Host: discoveryServer().URL})
 		Expect(err).NotTo(HaveOccurred())

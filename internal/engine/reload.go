@@ -236,21 +236,13 @@ func idleTimeout(defs []queries.Definition, s settings.Settings) time.Duration {
 		if d.Disabled != "" || s.ExcludedQuery(d.Key) {
 			continue
 		}
-		_, interval := s.GroupFor(d.Key)
-		longest = max(longest, interval, cacheInterval(d.CacheSeconds))
+		_, interval := planner.EffectiveInterval(d, s)
+		longest = max(longest, interval)
 	}
 	if longest > math.MaxInt64-idleGrace {
 		return time.Duration(math.MaxInt64)
 	}
 	return longest + idleGrace
-}
-
-// cacheInterval is the planner's conversion of cache_seconds.
-func cacheInterval(seconds uint64) time.Duration {
-	if seconds > math.MaxInt64/uint64(time.Second) {
-		return time.Duration(math.MaxInt64)
-	}
-	return time.Duration(seconds) * time.Second
 }
 
 // watchedFiles lists every file the configuration at path reads.

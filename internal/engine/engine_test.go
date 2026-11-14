@@ -23,6 +23,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
+	"github.com/gabrosys/plugin-telemetry/internal/settings"
 )
 
 var _ = Describe("A run result", func() {
@@ -177,3 +178,20 @@ var _ = DescribeTable("The wait before the next facts round",
 	Entry("after six, capped at the planning cycle", 6, 30*time.Second),
 	Entry("after very many", 1000, 30*time.Second),
 )
+
+var _ = Describe("PostgresConfig", func() {
+	It("maps the connection settings and the timeouts", func() {
+		s := settings.Settings{
+			Postgres: settings.Postgres{Host: "/run", Port: 5433, User: "u", PasswordFile: "/pw"},
+			Limits:   settings.Limits{QueryTimeout: 3 * time.Second, LockTimeout: time.Second},
+		}
+		c := engine.PostgresConfig(s)
+		Expect(c.Host).To(Equal("/run"))
+		Expect(c.Port).To(Equal(uint16(5433)))
+		Expect(c.User).To(Equal("u"))
+		Expect(c.PasswordFile).To(Equal("/pw"))
+		Expect(c.QueryTimeout).To(Equal(3 * time.Second))
+		Expect(c.LockTimeout).To(Equal(time.Second))
+		Expect(c.ConnectTimeout).To(Equal(5 * time.Second))
+	})
+})

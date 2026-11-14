@@ -88,11 +88,11 @@ func planQuery(p *Plan, d *queries.Definition, s settings.Settings, f Facts) {
 		return
 	}
 
-	def, excluded, allExcluded := applyMetricExclusions(d, s)
-	if allExcluded {
+	if AllMetricsExcluded(d, s) {
 		skip("", ReasonAllMetrics)
 		return
 	}
+	def, excluded := applyMetricExclusions(d, s)
 
 	targets := expandTargets(d.TargetDatabases, s.Postgres.Database, f.Databases)
 	if len(targets) == 0 {
@@ -100,8 +100,7 @@ func planQuery(p *Plan, d *queries.Definition, s settings.Settings, f Facts) {
 		return
 	}
 
-	group, interval := s.GroupFor(d.Key)
-	interval = max(interval, cacheInterval(d.CacheSeconds))
+	group, interval := EffectiveInterval(d, s)
 	fingerprint := fingerprintOf(d.Fingerprint, excluded)
 
 	planned := 0
@@ -121,24 +120,41 @@ func planQuery(p *Plan, d *queries.Definition, s settings.Settings, f Facts) {
 	}
 }
 
-// applyMetricExclusions returns a copy of d whose excluded value columns are discarded, the sorted
-// names of those metrics, and whether the query had value columns and all of them are excluded.
-func applyMetricExclusions(d *queries.Definition, s settings.Settings) (def *queries.Definition, excluded []string, all bool) {
-	cp := *d
-	cp.Columns = make(map[string]queries.Column, len(d.Columns))
-	values := 0
-	for name, c := range d.Columns {
+// AllMetricsExcluded reports whether d has value columns and the settings exclude the metrics of all of them.
+func AllMetricsExcluded(d *queries.Definition, s settings.Settings) bool {
+	values, excluded := 0, 0
+	for _, c := range d.Columns {
 		if c.Role == queries.RoleValue && c.Metric != "" {
 			values++
 			if s.ExcludedMetric(c.Metric) {
-				c.Role = queries.RoleDiscard
-				excluded = append(excluded, c.Metric)
+				excluded++
 			}
+		}
+	}
+	return values > 0 && values == excluded
+}
+
+// EffectiveInterval returns the group of d and its interval: the group's or the default interval,
+// raised to cache_seconds.
+func EffectiveInterval(d *queries.Definition, s settings.Settings) (group string, interval time.Duration) {
+	group, interval = s.GroupFor(d.Key)
+	return group, max(interval, cacheInterval(d.CacheSeconds))
+}
+
+// applyMetricExclusions returns a copy of d whose excluded value columns are discarded and the sorted
+// names of those metrics.
+func applyMetricExclusions(d *queries.Definition, s settings.Settings) (def *queries.Definition, excluded []string) {
+	cp := *d
+	cp.Columns = make(map[string]queries.Column, len(d.Columns))
+	for name, c := range d.Columns {
+		if c.Role == queries.RoleValue && c.Metric != "" && s.ExcludedMetric(c.Metric) {
+			c.Role = queries.RoleDiscard
+			excluded = append(excluded, c.Metric)
 		}
 		cp.Columns[name] = c
 	}
 	slices.Sort(excluded)
-	return &cp, excluded, values > 0 && len(excluded) == values
+	return &cp, excluded
 }
 
 func fingerprintOf(base string, excluded []string) string {

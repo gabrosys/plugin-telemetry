@@ -241,3 +241,45 @@ var _ = Describe("Build", func() {
 		Expect(p.Jobs[0].Def.Key).To(Equal("b"))
 	})
 })
+
+var _ = Describe("EffectiveInterval", func() {
+	s := baseSettings()
+	s.Groups = []settings.Group{{Name: "slow", Interval: time.Minute, Queries: []string{"slow_*"}}}
+
+	It("uses the default interval and no group when none matches", func() {
+		d := def("fast")
+		g, i := planner.EffectiveInterval(&d, s)
+		Expect(g).To(BeEmpty())
+		Expect(i).To(Equal(30 * time.Second))
+	})
+
+	It("uses the group's interval", func() {
+		d := def("slow_one")
+		g, i := planner.EffectiveInterval(&d, s)
+		Expect(g).To(Equal("slow"))
+		Expect(i).To(Equal(time.Minute))
+	})
+
+	It("raises the interval to cache_seconds", func() {
+		d := def("cached", func(d *queries.Definition) { d.CacheSeconds = 300 })
+		_, i := planner.EffectiveInterval(&d, s)
+		Expect(i).To(Equal(5 * time.Minute))
+	})
+})
+
+var _ = Describe("AllMetricsExcluded", func() {
+	It("is true only when every value metric is excluded", func() {
+		d := def("probe")
+		s := baseSettings()
+		Expect(planner.AllMetricsExcluded(&d, s)).To(BeFalse())
+		s.Exclude.Metrics = []string{"cnpg_probe_value"}
+		Expect(planner.AllMetricsExcluded(&d, s)).To(BeTrue())
+	})
+
+	It("is false for a query without value columns", func() {
+		d := def("labels", func(d *queries.Definition) { delete(d.Columns, "value") })
+		s := baseSettings()
+		s.Exclude.Metrics = []string{"*"}
+		Expect(planner.AllMetricsExcluded(&d, s)).To(BeFalse())
+	})
+})

@@ -390,7 +390,8 @@ func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 	return nil
 }
 
-func pgConfig(s settings.Settings) pg.Config {
+// PostgresConfig is the connection configuration the engine builds its pool from.
+func PostgresConfig(s settings.Settings) pg.Config {
 	return pg.Config{
 		Host:           s.Postgres.Host,
 		Port:           s.Postgres.Port,
@@ -414,7 +415,7 @@ func (e *engine) setRunner(ctx context.Context, s settings.Settings, idle time.D
 	if cur != nil && cur.spec == spec {
 		pool = cur.pool
 	} else {
-		pool = &sharedPool{Pool: pg.NewPool(pgConfig(s), s.Postgres.MaxConnections, idle, e.clk,
+		pool = &sharedPool{Pool: pg.NewPool(PostgresConfig(s), s.Postgres.MaxConnections, idle, e.clk,
 			pg.WithLogger(log.FromContext(ctx).GetLogger()))}
 	}
 	next := &runner{spec: spec, limits: s.Limits, pool: pool, exec: executor.New(pool.Pool, s.Limits, e.serverVersion, e.clk)}

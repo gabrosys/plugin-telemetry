@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"slices"
 	"sort"
@@ -18,6 +17,7 @@ import (
 	"go.yaml.in/yaml/v4"
 	"k8s.io/utils/clock"
 
+	"github.com/gabrosys/plugin-telemetry/internal/engine"
 	"github.com/gabrosys/plugin-telemetry/internal/executor"
 	"github.com/gabrosys/plugin-telemetry/internal/featuregate"
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
@@ -147,21 +147,9 @@ func validate(w io.Writer, path string) error {
 	return nil
 }
 
-func pgConfig(s settings.Settings) pg.Config {
-	return pg.Config{
-		Host:           s.Postgres.Host,
-		Port:           s.Postgres.Port,
-		User:           s.Postgres.User,
-		PasswordFile:   s.Postgres.PasswordFile,
-		QueryTimeout:   s.Limits.QueryTimeout,
-		LockTimeout:    s.Limits.LockTimeout,
-		ConnectTimeout: connectTimeout,
-	}
-}
-
 // connect opens a pool and gathers the facts from the default database. The caller closes the pool.
 func connect(ctx context.Context, s settings.Settings) (*pg.Pool, planner.Facts, error) {
-	pool := pg.NewPool(pgConfig(s), s.Postgres.MaxConnections, poolIdle, clock.RealClock{},
+	pool := pg.NewPool(engine.PostgresConfig(s), s.Postgres.MaxConnections, poolIdle, clock.RealClock{},
 		pg.WithLogger(log.FromContext(ctx).GetLogger()))
 	ctx, cancel := context.WithTimeout(ctx, connectTimeout+2*s.Limits.QueryTimeout)
 	defer cancel()
@@ -458,39 +446,16 @@ func offlinePlan(c *config) string {
 			reason = planner.ReasonExcludedQuery
 		case d.Disabled != "":
 			reason = planner.ReasonDisabled + d.Disabled
-		case allMetricsExcluded(d, s):
+		case planner.AllMetricsExcluded(d, s):
 			reason = planner.ReasonAllMetrics
 		}
 		if reason != "" {
 			fmt.Fprintf(&b, "skipped %s: %s\n", d.Key, reason)
 			continue
 		}
-		group, interval := s.GroupFor(d.Key)
-		fmt.Fprintf(&b, "unplanned %s group=%s interval=%s\n", d.Key, group, max(interval, cacheDuration(d.CacheSeconds)))
+		group, interval := planner.EffectiveInterval(d, s)
+		fmt.Fprintf(&b, "unplanned %s group=%s interval=%s\n", d.Key, group, interval)
 	}
 
 	return b.String()
-}
-
-// allMetricsExcluded reports whether d has value columns and settings exclude all of their metrics.
-func allMetricsExcluded(d *queries.Definition, s settings.Settings) bool {
-	values, excluded := 0, 0
-	for _, c := range d.Columns {
-		if c.Role == queries.RoleValue && c.Metric != "" {
-			values++
-			if s.ExcludedMetric(c.Metric) {
-				excluded++
-			}
-		}
-	}
-
-	return values > 0 && values == excluded
-}
-
-func cacheDuration(seconds uint64) time.Duration {
-	if seconds > math.MaxInt64/uint64(time.Second) {
-		return time.Duration(math.MaxInt64)
-	}
-
-	return time.Duration(seconds) * time.Second
 }

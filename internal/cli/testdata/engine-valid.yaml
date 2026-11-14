@@ -1,0 +1,8 @@
+cluster: demo
+sources:
+  - queries-warn.yaml
+groups:
+  - name: unused
+    queries: ["no_such_*"]
+exporter:
+  endpoint: http://127.0.0.1:4318/v1/metrics

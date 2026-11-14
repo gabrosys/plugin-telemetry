@@ -226,12 +226,16 @@ func (h rpcHeaders) GetRequestMetadata(context.Context, ...string) (map[string]s
 
 func (h rpcHeaders) RequireTransportSecurity() bool { return h.secure }
 
-// markDeadline adds context.DeadlineExceeded to the error of a call whose own context
-// expired, which grpc-go reports only as a DeadlineExceeded status.
-func markDeadline(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-	err := invoker(ctx, method, req, reply, cc, opts...)
-	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return fmt.Errorf("%w: %w", context.DeadlineExceeded, err)
+// boundAttempt gives each call its own timeout and adds context.DeadlineExceeded to the
+// error of a call whose context expired, which grpc-go reports only as a DeadlineExceeded status.
+func boundAttempt(timeout time.Duration) grpc.UnaryClientInterceptor {
+	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		ctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		err := invoker(ctx, method, req, reply, cc, opts...)
+		if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("%w: %w", context.DeadlineExceeded, err)
+		}
+		return err
 	}
-	return err
 }

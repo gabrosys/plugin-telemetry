@@ -96,8 +96,8 @@ func NewExporter(ctx context.Context, s settings.Exporter) (*Exporter, error) {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 		return nil, fmt.Errorf("exporter endpoint %q: not an http or https URL with a host", s.Endpoint)
 	}
-	if s.Interval*9/10-s.Timeout <= 0 {
-		return nil, fmt.Errorf("exporter timeout %s leaves no time to retry within 0.9 × interval %s", s.Timeout, s.Interval)
+	if s.Timeout <= 0 || s.Interval*9/10 <= s.Timeout {
+		return nil, fmt.Errorf("exporter timeout %s: must be positive and below 0.9 × interval %s", s.Timeout, s.Interval)
 	}
 	e := &Exporter{s: s, component: component, address: u.Hostname(), secure: u.Scheme == "https"}
 	e.port = 80
@@ -136,8 +136,11 @@ func (e *Exporter) store(m material) {
 	e.caPEM = m.caPEM
 }
 
+// exportTimeout bounds one export with its retries.
+func (e *Exporter) exportTimeout() time.Duration { return e.s.Interval * 9 / 10 }
+
 func (e *Exporter) retry() (initial, maxInterval, maxElapsed time.Duration) {
-	return time.Second, 5 * time.Second, e.s.Interval*9/10 - e.s.Timeout
+	return time.Second, 5 * time.Second, e.exportTimeout() - e.s.Timeout
 }
 
 func (e *Exporter) newHTTPBackend(ctx context.Context, m material) (*backend, error) {
@@ -190,7 +193,7 @@ func (e *Exporter) newGRPCBackend(ctx context.Context, m material) (*backend, er
 		grpc.WithPerRPCCredentials(rpcHeaders{live: &e.live, secure: e.secure}),
 		grpc.WithNoProxy(),
 		grpc.WithDisableServiceConfig(),
-		grpc.WithUnaryInterceptor(markDeadline),
+		grpc.WithUnaryInterceptor(boundAttempt(e.s.Timeout)),
 		grpc.WithUserAgent("OTel Go OTLP over gRPC metrics exporter/" + otlpmetricgrpc.Version()),
 	}
 	if e.s.Compression != "none" {
@@ -205,7 +208,7 @@ func (e *Exporter) newGRPCBackend(ctx context.Context, m material) (*backend, er
 	expOpts := []otlpmetricgrpc.Option{
 		otlpmetricgrpc.WithGRPCConn(conn),
 		otlpmetricgrpc.WithHeaders(map[string]string{}),
-		otlpmetricgrpc.WithTimeout(e.s.Timeout),
+		otlpmetricgrpc.WithTimeout(e.exportTimeout()),
 		otlpmetricgrpc.WithRetry(otlpmetricgrpc.RetryConfig{
 			Enabled: true, InitialInterval: initial, MaxInterval: maxInterval, MaxElapsedTime: maxElapsed,
 		}),
@@ -303,7 +306,7 @@ func (e *Exporter) replace(next *backend) error {
 	return nil
 }
 
-// Export sends rm in one request.
+// Export sends rm in one request, retrying for at most 0.9 × interval.
 func (e *Exporter) Export(ctx context.Context, rm *metricdata.ResourceMetrics) error {
 	_, err := e.export(ctx, rm)
 	return err
@@ -321,6 +324,9 @@ func (e *Exporter) export(ctx context.Context, rm *metricdata.ResourceMetrics) (
 	e.mu.Unlock()
 	defer b.inflight.Done()
 
+	// Created before the SDK's own export timeout, so it expires first with context.DeadlineExceeded.
+	ctx, cancel := context.WithTimeout(ctx, e.exportTimeout())
+	defer cancel()
 	a := &attempts{}
 	err := b.exp.Export(withAttempts(ctx, a), rm)
 	last, final := int(a.last.Load()), int(a.final.Load())

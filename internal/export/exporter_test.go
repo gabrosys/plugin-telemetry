@@ -413,7 +413,8 @@ var _ = Describe("Exporter", func() {
 
 		It("redials when Reload finds a new CA file", func(ctx SpecContext) {
 			s.TLS.CAFile = writeFile(dir, "ca.pem", pki.caB.PEM)
-			s.Timeout = 500 * time.Millisecond
+			s.Interval = time.Second
+			s.Timeout = 300 * time.Millisecond
 			e := newExporter(s)
 
 			Expect(e.Export(ctx, batch(1, 1))).NotTo(Succeed())
@@ -423,6 +424,31 @@ var _ = Describe("Exporter", func() {
 			Expect(e.Reload()).To(Succeed())
 			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
 			Expect(srv.Requests()).To(HaveLen(1))
+		}, SpecTimeout(10*time.Second))
+
+		It("times out each attempt after exporter.timeout and retries", func(ctx SpecContext) {
+			srv.Respond(otlptest.Response{Delay: 5 * time.Second}, otlptest.Response{})
+			s.Timeout = 200 * time.Millisecond
+			e := newExporter(s)
+
+			start := time.Now()
+			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
+
+			Expect(time.Since(start)).To(BeNumerically("<", 3*time.Second))
+			Expect(srv.Requests()).To(HaveLen(2))
+		}, SpecTimeout(10*time.Second))
+
+		It("bounds the whole export at 0.9 × interval and classifies it as timeout", func(ctx SpecContext) {
+			srv.Respond(otlptest.Response{Code: codes.Unavailable})
+			s.Interval = 500 * time.Millisecond
+			s.Timeout = 100 * time.Millisecond
+			e := newExporter(s)
+
+			start := time.Now()
+			err := e.Export(ctx, batch(1, 1))
+
+			expectClass(err, "timeout", 0)
+			Expect(time.Since(start)).To(BeNumerically("<", time.Second))
 		}, SpecTimeout(10*time.Second))
 
 		It("retries Unavailable", func(ctx SpecContext) {
@@ -449,6 +475,7 @@ var _ = Describe("Exporter", func() {
 			srv.Respond(otlptest.Response{Code: codes.InvalidArgument}, otlptest.Response{Delay: 5 * time.Second})
 			e := newExporter(s)
 			short := s
+			short.Interval = time.Second
 			short.Timeout = 300 * time.Millisecond
 			slow := newExporter(short)
 
@@ -498,6 +525,7 @@ var _ = Describe("Exporter", func() {
 			func(s *settings.Exporter, _ string) { s.Endpoint = "ftp://127.0.0.1:4318" }, "endpoint"),
 		Entry("a timeout that leaves no time to retry within 0.9 × interval",
 			func(s *settings.Exporter, _ string) { s.Timeout = s.Interval }, "timeout"),
+		Entry("a timeout that is not positive", func(s *settings.Exporter, _ string) { s.Timeout = 0 }, "timeout"),
 		Entry("a missing headers file",
 			func(s *settings.Exporter, dir string) { s.HeadersFile = filepath.Join(dir, "missing") }, "headers"),
 		Entry("a headers entry without =",
@@ -523,6 +551,9 @@ var _ = Describe("Exporter", func() {
 		Entry("a canceled context", fmt.Errorf("x: %w", context.Canceled), "_OTHER", 0),
 		Entry("a wrapped context deadline", fmt.Errorf("x: %w", context.DeadlineExceeded), "timeout", 0),
 		Entry("a wrapped gRPC status", fmt.Errorf("x: %w", status.Error(codes.Unavailable, "down")), "Unavailable", 0),
+		Entry("a gRPC export that ran out of time while retrying (otlpmetricgrpc v1.47.0 retry.go:113-114)",
+			fmt.Errorf("failed to upload metrics: %w", fmt.Errorf("%w: %w", context.DeadlineExceeded, status.Error(codes.Unavailable, "down"))),
+			"timeout", 0),
 		Entry("a partial success wrapped as the SDK wraps it (otlpmetrichttp v1.47.0 exporter.go:81)",
 			fmt.Errorf("failed to upload metrics: %w", errors.New("OTLP partial success: m (7) x (7 metric data points rejected)")),
 			"rejected", 7),

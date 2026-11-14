@@ -19,13 +19,29 @@ const (
 	admissionFile     = "config/admission-policy.yaml"
 )
 
+type rule struct {
+	APIGroups     []string `yaml:"apiGroups"`
+	Resources     []string `yaml:"resources"`
+	ResourceNames []string `yaml:"resourceNames"`
+	Verbs         []string `yaml:"verbs"`
+}
+
 type manifest struct {
 	Kind     string `yaml:"kind"`
 	Metadata struct {
 		Name string `yaml:"name"`
 	} `yaml:"metadata"`
 	Namespace string `yaml:"namespace"`
-	Spec      struct {
+	Rules     []rule `yaml:"rules"`
+	RoleRef   struct {
+		Kind string `yaml:"kind"`
+		Name string `yaml:"name"`
+	} `yaml:"roleRef"`
+	Subjects []struct {
+		Kind string `yaml:"kind"`
+		Name string `yaml:"name"`
+	} `yaml:"subjects"`
+	Spec struct {
 		FailurePolicy     string   `yaml:"failurePolicy"`
 		ValidationActions []string `yaml:"validationActions"`
 		MatchConditions   []struct {

@@ -19,12 +19,15 @@ import (
 
 	"github.com/cloudnative-pg/cnpg-i/pkg/identity"
 	"github.com/cloudnative-pg/cnpg-i/pkg/lifecycle"
+	cnpgoperator "github.com/cloudnative-pg/cnpg-i/pkg/operator"
+	"github.com/cloudnative-pg/cnpg-i/pkg/reconciler"
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
@@ -42,6 +45,20 @@ func (f *fakeWaiter) Wait(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+type fakeCache struct {
+	cache.Cache
+	synced chan struct{}
+}
+
+func (f *fakeCache) WaitForCacheSync(ctx context.Context) bool {
+	select {
+	case <-f.synced:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -131,9 +148,14 @@ var _ = Describe("Run", func() {
 		pki    *testPKI
 		addr   string
 		waiter *fakeWaiter
+		caches *fakeCache
 		cancel context.CancelFunc
 		done   chan error
 	)
+
+	deps := func() operator.Deps {
+		return operator.Deps{Cache: caches, Reconciler: &operator.Reconciler{}, Status: &operator.Status{}}
+	}
 
 	start := func() {
 		var ctx context.Context
@@ -145,7 +167,7 @@ var _ = Describe("Run", func() {
 				ServerCertPath: pki.serverCert,
 				ServerKeyPath:  pki.serverKey,
 				ClientCAPath:   pki.clientCert,
-			}, waiter)
+			}, waiter, deps())
 		}()
 	}
 
@@ -167,6 +189,7 @@ var _ = Describe("Run", func() {
 		pki = newTestPKI()
 		addr = freeAddress()
 		waiter = &fakeWaiter{ready: make(chan struct{})}
+		caches = &fakeCache{synced: make(chan struct{})}
 	})
 
 	AfterEach(func() {
@@ -181,12 +204,22 @@ var _ = Describe("Run", func() {
 		start()
 		Consistently(func() bool { return canDial(addr) }, 500*time.Millisecond, 50*time.Millisecond).Should(BeFalse())
 		close(waiter.ready)
+		close(caches.synced)
+		Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
+	})
+
+	It("does not listen before the caches have synced", func() {
+		close(waiter.ready)
+		start()
+		Consistently(func() bool { return canDial(addr) }, 500*time.Millisecond, 50*time.Millisecond).Should(BeFalse())
+		close(caches.synced)
 		Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
 	})
 
 	Context("once the image is known", func() {
 		BeforeEach(func() {
 			close(waiter.ready)
+			close(caches.synced)
 			start()
 			Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
 		})
@@ -213,6 +246,58 @@ var _ = Describe("Run", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(resp.GetLifecycleCapabilities()).To(HaveLen(1))
 			Expect(resp.GetLifecycleCapabilities()[0].GetKind()).To(Equal("Pod"))
+		})
+
+		It("serves ReconcilerHooks.GetCapabilities with KIND_CLUSTER", func() {
+			conn, err := dial(goodTLS())
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(conn.Close)
+			ctx, c := context.WithTimeout(context.Background(), 5*time.Second)
+			defer c()
+			resp, err := reconciler.NewReconcilerHooksClient(conn).
+				GetCapabilities(ctx, &reconciler.ReconcilerHooksCapabilitiesRequest{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.GetReconcilerCapabilities()).To(HaveLen(1))
+			Expect(resp.GetReconcilerCapabilities()[0].GetKind()).To(Equal(reconciler.ReconcilerHooksCapability_KIND_CLUSTER))
+		})
+
+		It("answers CONTINUE to Pre and Post", func() {
+			conn, err := dial(goodTLS())
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(conn.Close)
+			ctx, c := context.WithTimeout(context.Background(), 5*time.Second)
+			defer c()
+			client := reconciler.NewReconcilerHooksClient(conn)
+			pre, err := client.Pre(ctx, &reconciler.ReconcilerHooksRequest{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pre.GetBehavior()).To(Equal(reconciler.ReconcilerHooksResult_BEHAVIOR_CONTINUE))
+			post, err := client.Post(ctx, &reconciler.ReconcilerHooksRequest{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(post.GetBehavior()).To(Equal(reconciler.ReconcilerHooksResult_BEHAVIOR_CONTINUE))
+		})
+
+		It("serves Operator.GetCapabilities with only RPC_TYPE_SET_STATUS_IN_CLUSTER", func() {
+			conn, err := dial(goodTLS())
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(conn.Close)
+			ctx, c := context.WithTimeout(context.Background(), 5*time.Second)
+			defer c()
+			resp, err := cnpgoperator.NewOperatorClient(conn).GetCapabilities(ctx, &cnpgoperator.OperatorCapabilitiesRequest{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.GetCapabilities()).To(HaveLen(1))
+			Expect(resp.GetCapabilities()[0].GetRpc().GetType()).
+				To(Equal(cnpgoperator.OperatorCapability_RPC_TYPE_SET_STATUS_IN_CLUSTER))
+		})
+
+		It("leaves the cluster status unchanged", func() {
+			conn, err := dial(goodTLS())
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(conn.Close)
+			ctx, c := context.WithTimeout(context.Background(), 5*time.Second)
+			defer c()
+			resp, err := cnpgoperator.NewOperatorClient(conn).SetStatusInCluster(ctx, &cnpgoperator.SetStatusInClusterRequest{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.GetJsonStatus()).To(BeEmpty())
 		})
 
 		It("rejects a client without a certificate", func() {
@@ -256,6 +341,7 @@ var _ = Describe("Run", func() {
 
 	It("stops when the context ends", func() {
 		close(waiter.ready)
+		close(caches.synced)
 		start()
 		Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
 		cancel()
@@ -295,11 +381,12 @@ var _ = Describe("Run", func() {
 				ServerCertPath: pki.serverCert,
 				ServerKeyPath:  pki.serverKey,
 				ClientCAPath:   pki.clientCert,
-			}, waiter)
+			}, waiter, deps())
 		}()
 
 		Eventually(logged, 5*time.Second).Should(Equal([]string{"waiting for the sidecar image"}))
 		close(waiter.ready)
+		close(caches.synced)
 		Eventually(logged, 5*time.Second).Should(ContainElement("sidecar image loaded, serving"))
 	})
 
@@ -309,6 +396,23 @@ var _ = Describe("Run", func() {
 		Eventually(done, 5*time.Second).Should(Receive(BeNil()))
 		done <- nil
 	})
+
+	DescribeTable("refuses to start without its dependencies",
+		func(mutate func(*operator.Deps)) {
+			d := deps()
+			mutate(&d)
+			close(waiter.ready)
+			Expect(operator.Run(context.Background(), operator.Options{
+				ServerAddress:  addr,
+				ServerCertPath: pki.serverCert,
+				ServerKeyPath:  pki.serverKey,
+				ClientCAPath:   pki.clientCert,
+			}, waiter, d)).To(MatchError(operator.ErrInvalidDeps))
+		},
+		Entry("no cache", func(d *operator.Deps) { d.Cache = nil }),
+		Entry("no reconciler", func(d *operator.Deps) { d.Reconciler = nil }),
+		Entry("no status", func(d *operator.Deps) { d.Status = nil }),
+	)
 
 	DescribeTable("refuses to start without TLS material",
 		func(mutate func(*operator.Options)) {
@@ -320,7 +424,7 @@ var _ = Describe("Run", func() {
 			}
 			mutate(&opts)
 			close(waiter.ready)
-			Expect(operator.Run(context.Background(), opts, waiter)).To(MatchError(operator.ErrInvalidOptions))
+			Expect(operator.Run(context.Background(), opts, waiter, deps())).To(MatchError(operator.ErrInvalidOptions))
 			Consistently(func() bool { return canDial(addr) }, 200*time.Millisecond, 50*time.Millisecond).Should(BeFalse())
 		},
 		Entry("empty server address", func(o *operator.Options) { o.ServerAddress = "" }),

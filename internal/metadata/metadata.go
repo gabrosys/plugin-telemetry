@@ -14,6 +14,10 @@ const (
 	SocketDir = "/controller/run"
 	// MetricsExporterRole is the PostgreSQL role the sidecar uses in peer mode.
 	MetricsExporterRole = "cnpg_metrics_exporter"
+	// ManagedByLabel is the label the plugin sets on the objects it creates.
+	ManagedByLabel = "app.kubernetes.io/managed-by"
+	// ManagedByValue is the value of ManagedByLabel.
+	ManagedByValue = "plugin-telemetry"
 	// PeerUID is the OS user the sidecar runs as in peer mode.
 	PeerUID = int64(65534)
 )

@@ -23,7 +23,7 @@ func newOperatorCommand() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "operator",
-		Short: "Serve the CNPG-I Identity and OperatorLifecycle services over mTLS",
+		Short: "Serve the CNPG-I Identity, OperatorLifecycle, ReconcilerHooks and Operator services over mTLS",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if namespace == "" {
@@ -35,6 +35,11 @@ func newOperatorCommand() *cobra.Command {
 				return fmt.Errorf("load in-cluster config: %w", err)
 			}
 
+			mgr, err := operator.NewManager(cfg)
+			if err != nil {
+				return fmt.Errorf("build manager: %w", err)
+			}
+
 			ctx := cmd.Context()
 			store := operator.NewImageStore()
 			g, gctx := errgroup.WithContext(ctx)
@@ -42,7 +47,19 @@ func newOperatorCommand() *cobra.Command {
 				return operator.WatchSidecarImage(gctx, cfg, namespace, configMap, store)
 			})
 			g.Go(func() error {
-				return operator.Run(gctx, opts, store)
+				if err := mgr.Start(gctx); err != nil {
+					return fmt.Errorf("run manager: %w", err)
+				}
+
+				return nil
+			})
+			g.Go(func() error {
+				return operator.Run(gctx, opts, store, operator.Deps{
+					Cache:      mgr.GetCache(),
+					Client:     mgr.GetClient(),
+					Reconciler: &operator.Reconciler{},
+					Status:     &operator.Status{},
+				})
 			})
 
 			return g.Wait()

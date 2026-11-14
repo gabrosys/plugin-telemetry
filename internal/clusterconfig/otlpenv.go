@@ -160,7 +160,7 @@ func (o otlpEnv) endpoint(protocol string) (string, error) {
 			return "", fmt.Errorf("%s: %w", v.key, err)
 		}
 		if protocol == settings.ProtocolHTTP {
-			return signalURL(v.value), nil
+			return SignalURL(v.value), nil
 		}
 		return v.value, nil
 	}
@@ -177,8 +177,8 @@ func (o otlpEnv) headersFile() string {
 	return ""
 }
 
-// signalURL appends the metrics path to a base URL, ensuring a trailing slash first.
-func signalURL(base string) string {
+// SignalURL appends the metrics path to a base URL, ensuring a trailing slash first.
+func SignalURL(base string) string {
 	if !strings.HasSuffix(base, "/") {
 		base += "/"
 	}

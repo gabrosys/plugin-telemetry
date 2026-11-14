@@ -7,6 +7,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	"github.com/cloudnative-pg/cnpg-i-machinery/pkg/pluginhelper/clusterstatus"
@@ -53,6 +54,7 @@ type Status struct {
 	operator.UnimplementedOperatorServer
 	Reader   client.Reader     // cached exporters and query sets
 	Identity *identity.Ensurer // Ready gives the identity state
+	Metrics  *PluginMetrics    // nil records nothing
 }
 
 // GetCapabilities declares only SetStatusInCluster.
@@ -69,6 +71,15 @@ func (*Status) GetCapabilities(context.Context, *operator.OperatorCapabilitiesRe
 // SetStatusInCluster never fails. It returns NoOpResponse when the status is healthy and equal to the
 // stored one, so that CloudNativePG stops requeueing the Cluster every 5 s, and JSONStatusResponse otherwise.
 func (s *Status) SetStatusInCluster(ctx context.Context, req *operator.SetStatusInClusterRequest) (*operator.SetStatusInClusterResponse, error) {
+	start := time.Now()
+	resp, outcome := s.setStatus(ctx, req)
+	s.Metrics.Hook(serviceOperator, operationSetStatus, outcome, time.Since(start)) //nolint:contextcheck // Hook takes no context
+
+	return resp, nil
+}
+
+// setStatus builds the response and the outcome to record: noop, status or error.
+func (s *Status) setStatus(ctx context.Context, req *operator.SetStatusInClusterRequest) (*operator.SetStatusInClusterResponse, string) {
 	builder := clusterstatus.NewSetStatusInClusterResponseBuilder()
 	logger := log.FromContext(ctx)
 
@@ -76,40 +87,40 @@ func (s *Status) SetStatusInCluster(ctx context.Context, req *operator.SetStatus
 	if err != nil {
 		logger.Error(err, "decode set status request")
 
-		return builder.NoOpResponse(), nil
+		return builder.NoOpResponse(), outcomeError
 	}
 	logger = logger.WithValues("namespace", cluster.Namespace, "cluster", cluster.Name)
 
 	plugin, ok := clusterconfig.EnabledPlugin(cluster)
 	if !ok {
-		return builder.NoOpResponse(), nil
+		return builder.NoOpResponse(), outcomeNoop
 	}
 
 	st, err := s.compute(ctx, cluster, plugin)
 	if err != nil {
 		logger.Error(err, statusLogMessage)
 
-		return builder.NoOpResponse(), nil
+		return builder.NoOpResponse(), outcomeError
 	}
 
 	raw, err := json.Marshal(st)
 	if err != nil {
 		logger.Error(fmt.Errorf("marshal status: %w", err), statusLogMessage)
 
-		return builder.NoOpResponse(), nil
+		return builder.NoOpResponse(), outcomeError
 	}
 	if st.Healthy() && storedStatus(cluster) == string(raw) {
-		return builder.NoOpResponse(), nil
+		return builder.NoOpResponse(), outcomeNoop
 	}
 
 	resp, err := builder.JSONStatusResponse(st)
 	if err != nil {
 		logger.Error(err, statusLogMessage)
 
-		return builder.NoOpResponse(), nil
+		return builder.NoOpResponse(), outcomeError
 	}
 
-	return resp, nil
+	return resp, outcomeStatus
 }
 
 // compute builds the status from the cached exporter and identity objects.

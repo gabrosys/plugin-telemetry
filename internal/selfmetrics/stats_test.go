@@ -87,7 +87,7 @@ var _ = Describe("Stats", func() {
 
 		got := collect()
 		optional := []string{"error.type", "http.response.status_code"}
-		for _, m := range selfmetrics.Catalogue() {
+		for _, m := range selfmetrics.ByComponent(selfmetrics.ComponentEngine) {
 			Expect(got).To(HaveKey(m.Name))
 			var sets []attribute.Set
 			switch d := got[m.Name].Data.(type) {

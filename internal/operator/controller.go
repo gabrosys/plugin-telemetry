@@ -33,42 +33,54 @@ var specChanged = predicate.GenerationChangedPredicate{}
 type IdentityController struct {
 	Client   client.Client
 	Identity *identity.Ensurer
+	Metrics  *PluginMetrics // nil records nothing
 }
 
 // Reconcile ensures the identity of a Cluster that enables the plugin and removes it from one that does not.
 // It returns Ensure and Remove errors so the workqueue backs off, and never requeues on its own.
 func (c *IdentityController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	err := c.reconcile(ctx, req)
+	outcome := outcomeOK
+	if err != nil {
+		outcome = outcomeError
+	}
+	c.Metrics.IdentityReconcile(outcome)
+
+	return ctrl.Result{}, err
+}
+
+func (c *IdentityController) reconcile(ctx context.Context, req ctrl.Request) error {
 	var cluster apiv1.Cluster
 	if err := c.Client.Get(ctx, req.NamespacedName, &cluster); err != nil {
 		if apierrors.IsNotFound(err) {
-			return ctrl.Result{}, nil
+			return nil
 		}
 
-		return ctrl.Result{}, fmt.Errorf("get cluster %s: %w", req.NamespacedName, err)
+		return fmt.Errorf("get cluster %s: %w", req.NamespacedName, err)
 	}
 	if !cluster.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, nil
+		return nil
 	}
 
 	logger := log.FromContext(ctx)
 
 	refs, ok, err := referencesFor(ctx, c.Client, &cluster)
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 	if !ok {
-		return ctrl.Result{}, c.remove(ctx, logger, &cluster)
+		return c.remove(ctx, logger, &cluster)
 	}
 
 	res, err := c.Identity.Ensure(ctx, &cluster, refs)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("ensure identity of %s: %w", req.NamespacedName, err)
+		return fmt.Errorf("ensure identity of %s: %w", req.NamespacedName, err)
 	}
 	if len(res.Applied) > 0 {
 		logger.Info("identity controller", "outcome", outcomeApplied, "objects", res.Applied)
 	}
 
-	return ctrl.Result{}, nil
+	return nil
 }
 
 // remove deletes the identity when the cache still holds any of its objects.

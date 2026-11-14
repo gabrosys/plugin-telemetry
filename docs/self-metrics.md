@@ -1,5 +1,7 @@
 # Self-metrics
 
+## Engine
+
 Metrics the engine reports about itself.
 
 | Name | Instrument | Unit | Attributes | Description |
@@ -19,3 +21,13 @@ Metrics the engine reports about itself.
 | `cnpg_otel_last_export_success_timestamp_seconds` | gauge | `s` |  | Unix time of the last successful export. |
 | `otel.sdk.exporter.metric_data_point.exported` | counter | `{data_point}` | `error.type`, `otel.component.type`, `otel.component.name`, `server.address`, `server.port` | Data points an export operation sent; rejected points count as failed with error.type=rejected. error.type is set only on failure. |
 | `otel.sdk.exporter.operation.duration` | histogram | `s` | `error.type`, `http.response.status_code`, `otel.component.type`, `otel.component.name`, `server.address`, `server.port` | Duration of an export operation after the last retry, in a single bucket. error.type is set only on failure, http.response.status_code only for HTTP. |
+
+## Plugin
+
+Metrics the plugin process reports about itself. They are exported only when `operator` gets `--metrics-endpoint`.
+
+| Name | Instrument | Unit | Attributes | Description |
+|---|---|---|---|---|
+| `cnpg_otel_plugin_hook_calls_total` | counter | `{call}` | `service`, `operation`, `outcome` | Hook calls by service (lifecycle, reconciler, operator), operation (create, evaluate, pre, post, set_status) and outcome (patched, unchanged, skipped, applied, error, noop, status). |
+| `cnpg_otel_plugin_hook_duration_seconds` | histogram | `s` | `service`, `operation` | Duration of hook calls, in a single bucket. |
+| `cnpg_otel_plugin_identity_reconciles_total` | counter | `{reconcile}` | `outcome` | Identity controller reconciles by outcome (ok, error). |

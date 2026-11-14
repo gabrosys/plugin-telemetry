@@ -31,4 +31,19 @@ var _ = Describe("operator command", func() {
 		})
 		Expect(cmd.Execute()).To(MatchError(ContainSubstring("namespace")))
 	})
+
+	It("rejects an invalid --metrics-endpoint at start", func() {
+		GinkgoT().Setenv("POD_NAMESPACE", "ns")
+		cmd := cli.NewRootCommand()
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		cmd.SetArgs([]string{
+			"operator",
+			"--server-address=127.0.0.1:0",
+			"--server-cert=a", "--server-key=b", "--client-cert=c",
+			"--sidecar-image-configmap=cm",
+			"--metrics-endpoint=ftp://collector",
+		})
+		Expect(cmd.Execute()).To(MatchError(ContainSubstring("exporter.endpoint: must be an http or https URL with a host")))
+	})
 })

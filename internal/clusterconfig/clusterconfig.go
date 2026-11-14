@@ -71,7 +71,7 @@ func Build(in Inputs) (settings.Settings, []string, error) {
 		s.Exporter.HeadersFile = env.headersFile()
 	}
 	if s.Exporter.Protocol == settings.ProtocolHTTP && spec.Exporter.Endpoint != "" {
-		s.Exporter.Endpoint = signalURL(spec.Exporter.Endpoint)
+		s.Exporter.Endpoint = SignalURL(spec.Exporter.Endpoint)
 	}
 	if s.Exporter.Timeout == 0 {
 		s.Exporter.Timeout = settings.DefaultExporterTimeout(s.Exporter.Interval)

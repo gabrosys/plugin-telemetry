@@ -14,3 +14,6 @@ var (
 	SpecChanged         = specChanged
 	ExportersToClusters = exportersToClusters
 )
+
+// Exposed for metrics_test.go.
+var CollectMetrics = (*PluginMetrics).collect

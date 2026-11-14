@@ -35,6 +35,8 @@ type Reconciler struct {
 	Exporters client.Reader // cached
 	// Timeout bounds the ensure in Pre; DefaultPreTimeout when zero.
 	Timeout time.Duration
+	// Metrics records the hook calls; nil records nothing.
+	Metrics *PluginMetrics
 }
 
 // GetCapabilities declares the hooks run for Clusters.
@@ -51,11 +53,13 @@ func (*Reconciler) GetCapabilities(
 // Pre ensures the Cluster's identity and lets CloudNativePG continue.
 func (r *Reconciler) Pre(ctx context.Context, req *reconciler.ReconcilerHooksRequest) (*reconciler.ReconcilerHooksResult, error) {
 	logger := log.FromContext(ctx)
+	start := time.Now()
 
 	cluster, err := decodeHookCluster(req)
 	if err != nil {
 		logger.Error(err, "decode reconciler hook request")
 		logger.Info("reconciler hook", "operation", "Pre", "outcome", outcomeError)
+		r.Metrics.Hook(serviceReconciler, operationPre, outcomeError, time.Since(start)) //nolint:contextcheck // Hook takes no context
 
 		return continueResult(), nil
 	}
@@ -66,24 +70,28 @@ func (r *Reconciler) Pre(ctx context.Context, req *reconciler.ReconcilerHooksReq
 		logger.Error(err, "ensure identity")
 	}
 	logger.Info("reconciler hook", "operation", "Pre", "outcome", outcome)
+	r.Metrics.Hook(serviceReconciler, operationPre, outcome, time.Since(start)) //nolint:contextcheck // Hook takes no context
 
 	return continueResult(), nil
 }
 
 // Post lets CloudNativePG continue.
-func (*Reconciler) Post(ctx context.Context, req *reconciler.ReconcilerHooksRequest) (*reconciler.ReconcilerHooksResult, error) {
+func (r *Reconciler) Post(ctx context.Context, req *reconciler.ReconcilerHooksRequest) (*reconciler.ReconcilerHooksResult, error) {
 	logger := log.FromContext(ctx)
+	start := time.Now()
 
 	cluster, err := decodeHookCluster(req)
 	if err != nil {
 		logger.Error(err, "decode reconciler hook request")
 		logger.Info("reconciler hook", "operation", "Post", "outcome", outcomeError)
+		r.Metrics.Hook(serviceReconciler, operationPost, outcomeError, time.Since(start)) //nolint:contextcheck // Hook takes no context
 
 		return continueResult(), nil
 	}
 
 	logger.Info("reconciler hook",
 		"operation", "Post", "namespace", cluster.Namespace, "cluster", cluster.Name, "outcome", outcomeSkipped)
+	r.Metrics.Hook(serviceReconciler, operationPost, outcomeSkipped, time.Since(start)) //nolint:contextcheck // Hook takes no context
 
 	return continueResult(), nil
 }

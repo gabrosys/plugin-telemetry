@@ -307,7 +307,7 @@ var _ = Describe("the engine", Ordered, func() {
 
 	It("exports the self-metrics that need no failure", func(ctx SpecContext) {
 		var want []string
-		for _, m := range selfmetrics.Catalogue() {
+		for _, m := range selfmetrics.ByComponent(selfmetrics.ComponentEngine) {
 			if !failureOnly[m.Name] {
 				want = append(want, m.Name)
 			}

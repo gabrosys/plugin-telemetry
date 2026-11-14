@@ -46,6 +46,8 @@ type Deps struct {
 	Client     client.Client
 	Reconciler *Reconciler
 	Status     *Status
+	// Metrics records the lifecycle hook calls; nil records nothing.
+	Metrics *PluginMetrics
 }
 
 // Run waits for the image and the cache, then serves Identity, OperatorLifecycle, ReconcilerHooks and
@@ -93,7 +95,7 @@ func Run(ctx context.Context, opts Options, images ImageWaiter, deps Deps) error
 		IdentityImpl: Identity{},
 		Enrichers: []http.ServerEnricher{
 			func(s *grpc.Server) error {
-				lifecycle.RegisterOperatorLifecycleServer(s, &Lifecycle{Images: images})
+				lifecycle.RegisterOperatorLifecycleServer(s, &Lifecycle{Images: images, Metrics: deps.Metrics})
 				reconciler.RegisterReconcilerHooksServer(s, deps.Reconciler)
 				operator.RegisterOperatorServer(s, deps.Status)
 

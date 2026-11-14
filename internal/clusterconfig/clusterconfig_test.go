@@ -1,6 +1,8 @@
 package clusterconfig_test
 
 import (
+	"errors"
+	"regexp"
 	"time"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
@@ -298,5 +300,99 @@ var _ = Describe("Build", func() {
 		in.Exporter.Spec.Exporter.Timeout = dur(5 * time.Second)
 		_, _, err = clusterconfig.Build(in)
 		Expect(err).To(MatchError(ContainSubstring("exporter.timeout")))
+	})
+})
+
+var _ = Describe("Build messages", func() {
+	DescribeTable("name the TelemetryExporter field, not the settings path",
+		func(edit func(*clusterconfig.Inputs), field, settingsPath string) {
+			in := newInputs()
+			edit(&in)
+
+			_, _, err := clusterconfig.Build(in)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(field))
+			Expect(err.Error()).NotTo(MatchRegexp(`(^|: |\n|\()` + regexp.QuoteMeta(settingsPath)))
+		},
+		Entry("limits.maxConnections", func(in *clusterconfig.Inputs) {
+			in.Exporter.Spec.Metrics.Limits.MaxConnections = ptr.To[int32](0)
+		}, "spec.metrics.limits.maxConnections: must be at least 1", "postgres.maxConnections"),
+		Entry("limits.maxRowsPerQuery", func(in *clusterconfig.Inputs) {
+			in.Exporter.Spec.Metrics.Limits.MaxRowsPerQuery = ptr.To[int32](0)
+		}, "spec.metrics.limits.maxRowsPerQuery: must be at least 1", "limits.maxRowsPerQuery"),
+		Entry("limits.queryTimeout", func(in *clusterconfig.Inputs) {
+			in.Exporter.Spec.Metrics.Limits.QueryTimeout = dur(0)
+		}, "spec.metrics.limits.queryTimeout: must be at least", "limits.queryTimeout"),
+		Entry("planInterval", func(in *clusterconfig.Inputs) {
+			in.Exporter.Spec.Metrics.PlanInterval = dur(0)
+		}, "spec.metrics.planInterval: must be at least 1s", "planInterval"),
+		Entry("defaultInterval", func(in *clusterconfig.Inputs) {
+			in.Exporter.Spec.Metrics.DefaultInterval = dur(0)
+		}, "spec.metrics.defaultInterval: must be at least 1s", "defaultInterval"),
+		Entry("groups[i].name", func(in *clusterconfig.Inputs) {
+			in.Exporter.Spec.Metrics.Groups = []v1alpha1.QueryGroup{{Queries: []string{"q"}}}
+		}, "spec.metrics.groups[0].name: must not be empty", "groups[0]"),
+		Entry("groups[i].queries[j]", func(in *clusterconfig.Inputs) {
+			in.Exporter.Spec.Metrics.Groups = []v1alpha1.QueryGroup{{Name: "g", Queries: []string{"["}}}
+		}, "spec.metrics.groups[0].queries[0]: invalid pattern", "groups[0]"),
+		Entry("exclude.queries", func(in *clusterconfig.Inputs) {
+			in.Exporter.Spec.Metrics.Exclude.Queries = []string{"["}
+		}, "spec.metrics.exclude.queries[0]: invalid pattern", "exclude.queries"),
+		Entry("exclude.metrics", func(in *clusterconfig.Inputs) {
+			in.Exporter.Spec.Metrics.Exclude.Metrics = []string{"["}
+		}, "spec.metrics.exclude.metrics[0]: invalid pattern", "exclude.metrics"),
+		Entry("exclude.databases", func(in *clusterconfig.Inputs) {
+			in.Exporter.Spec.Metrics.Exclude.Databases = []string{"["}
+		}, "spec.metrics.exclude.databases[0]: invalid pattern", "exclude.databases"),
+		Entry("metrics.interval", func(in *clusterconfig.Inputs) {
+			in.Exporter.Spec.Metrics.Interval = dur(0)
+		}, "spec.metrics.interval: must be at least 1s", "exporter.interval"),
+		Entry("metrics.maxPointsPerRequest", func(in *clusterconfig.Inputs) {
+			in.Exporter.Spec.Metrics.MaxPointsPerRequest = ptr.To[int32](0)
+		}, "spec.metrics.maxPointsPerRequest: must be at least 1", "exporter.maxPointsPerRequest"),
+		Entry("exporter.protocol", func(in *clusterconfig.Inputs) {
+			in.Exporter.Spec.Exporter.Protocol = "http/json"
+		}, "spec.exporter.protocol: must be", "exporter.protocol"),
+		Entry("exporter.compression", func(in *clusterconfig.Inputs) {
+			in.Exporter.Spec.Exporter.Compression = "zstd"
+		}, "spec.exporter.compression: must be", "exporter.compression"),
+		Entry("exporter.timeout", func(in *clusterconfig.Inputs) {
+			in.Exporter.Spec.Metrics.Interval = dur(2 * time.Second)
+			in.Exporter.Spec.Exporter.Timeout = dur(5 * time.Second)
+		}, "spec.exporter.timeout: must be above 0", "exporter.timeout"),
+		Entry("exporter.tls.minVersion", func(in *clusterconfig.Inputs) {
+			in.Exporter.Spec.Exporter.Endpoint = "https://c:4318"
+			in.Exporter.Spec.Exporter.TLS = &v1alpha1.OTLPTLS{MinVersion: "1.1"}
+		}, "spec.exporter.tls.minVersion: must be", "exporter.tls.minVersion"),
+		Entry("exporter.tls with http", func(in *clusterconfig.Inputs) {
+			in.Exporter.Spec.Exporter.TLS = &v1alpha1.OTLPTLS{ServerName: "c"}
+		}, "spec.exporter.tls: cannot be set with an http:// endpoint", "exporter.tls"),
+		Entry("exporter.endpoint empty", func(in *clusterconfig.Inputs) {
+			in.Exporter.Spec.Exporter.Endpoint = ""
+		}, "spec.exporter.endpoint: must not be empty", "exporter.endpoint"),
+		Entry("exporter.endpoint with user info, and where headers go", func(in *clusterconfig.Inputs) {
+			in.Exporter.Spec.Exporter.Endpoint = "http://u:p@c:4318"
+		}, "spec.exporter.endpoint: must not have user info, a query or a fragment (headers go in spec.exporter.headers)",
+			"exporter.headersFile"),
+		Entry("an OTEL_* TLS key", func(in *clusterconfig.Inputs) {
+			*in = withEnv(map[string]string{"OTEL_EXPORTER_OTLP_CERTIFICATE": "/ca.pem"}, nil)
+		}, "OTEL_EXPORTER_OTLP_CERTIFICATE: not supported, set spec.exporter.tls instead", "exporter.tls"),
+	)
+
+	It("names spec.resourceLabels in the instance role warning", func() {
+		in := newInputs()
+		in.Exporter.Spec.ResourceLabels = []string{"cnpg.io/instanceRole"}
+
+		_, warnings, err := clusterconfig.Build(in)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(warnings).To(ConsistOf(HavePrefix("spec.resourceLabels: cnpg.io/instanceRole is ignored")))
+	})
+
+	It("keeps the settings error in the chain", func() {
+		in := newInputs()
+		in.Exporter.Spec.Exporter.Endpoint = "ftp://c"
+
+		_, _, err := clusterconfig.Build(in)
+		Expect(errors.Is(err, settings.CheckEndpoint("ftp://c"))).To(BeTrue())
 	})
 })

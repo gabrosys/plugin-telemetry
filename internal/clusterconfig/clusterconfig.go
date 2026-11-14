@@ -82,10 +82,10 @@ func Build(in Inputs) (settings.Settings, []string, error) {
 	warnings = append(warnings, attrWarnings...)
 
 	if len(errs) > 0 {
-		return settings.Settings{}, nil, fmt.Errorf("build settings: %w", errors.Join(errs...))
+		return settings.Settings{}, nil, fmt.Errorf("build settings: %w", withCRDFields(errors.Join(errs...)))
 	}
 	if err := s.Validate(); err != nil {
-		return settings.Settings{}, nil, fmt.Errorf("invalid settings: %w", err)
+		return settings.Settings{}, nil, fmt.Errorf("invalid settings: %w", withCRDFields(err))
 	}
 	return s, warnings, nil
 }
@@ -249,7 +249,7 @@ func resourceAttributes(in Inputs, env otlpEnv) (map[string]string, []string) {
 	}
 	for _, key := range in.Exporter.Spec.ResourceLabels {
 		if key == instanceRoleLabel {
-			warnings = append(warnings, "resourceLabels: "+instanceRoleLabel+" is ignored, it changes at switchover")
+			warnings = append(warnings, "spec.resourceLabels: "+instanceRoleLabel+" is ignored, it changes at switchover")
 			continue
 		}
 		if v, ok := in.Cluster.Labels[key]; ok {

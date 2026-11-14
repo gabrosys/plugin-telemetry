@@ -59,7 +59,7 @@ func (o otlpEnv) unsupported() []error {
 	for _, name := range []string{"CERTIFICATE", "CLIENT_KEY", "CLIENT_CERTIFICATE"} {
 		for _, key := range []string{envPrefix + name, envMetricsPrefix + name} {
 			if _, ok := o.get(key); ok {
-				errs = append(errs, fmt.Errorf("%s: not supported, set exporter.tls instead", key))
+				errs = append(errs, fmt.Errorf("%s: not supported, set spec.exporter.tls instead", key))
 			}
 		}
 	}

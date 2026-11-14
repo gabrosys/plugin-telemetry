@@ -42,8 +42,7 @@ type config struct {
 	defs     []queries.Definition // in the order of result.Entries
 }
 
-func loadConfig(path string) (*config, error) {
-	cfg := engine.FileConfig(path)
+func loadConfig(cfg engine.Config) (*config, error) {
 	s, _, err := cfg.Settings()
 	if err != nil {
 		return nil, fmt.Errorf("load settings: %w", err)
@@ -76,11 +75,12 @@ func newValidateCommand(flags *instanceFlags) *cobra.Command {
 			if _, err := flags.registry(); err != nil {
 				return err
 			}
-			if err := flags.requireConfig(); err != nil {
+			open, err := flags.open()
+			if err != nil {
 				return err
 			}
 
-			return validate(cmd.OutOrStdout(), flags.config)
+			return validate(cmd.Context(), cmd.OutOrStdout(), open)
 		},
 	}
 }
@@ -96,7 +96,7 @@ func finding(w io.Writer, level, source, query, message string) error {
 	return nil
 }
 
-func validate(w io.Writer, path string) error {
+func validate(ctx context.Context, w io.Writer, open func(context.Context) (engine.Config, error)) error {
 	errCount := 0
 	report := func(level, source, query, message string) error {
 		if level == "error" {
@@ -106,7 +106,7 @@ func validate(w io.Writer, path string) error {
 		return finding(w, level, source, query, message)
 	}
 
-	c, err := loadConfig(path)
+	c, err := openConfig(ctx, open)
 	if err != nil {
 		if rerr := report("error", absent, absent, err.Error()); rerr != nil {
 			return rerr
@@ -119,7 +119,11 @@ func validate(w io.Writer, path string) error {
 		if st.Outcome == sources.OutcomeOK {
 			continue
 		}
-		if err := report("error", st.Source, absent, fmt.Sprint(st.Err)); err != nil {
+		level := "error"
+		if st.Outcome == sources.OutcomeMissing {
+			level = "warning"
+		}
+		if err := report(level, st.Source, absent, fmt.Sprint(st.Err)); err != nil {
 			return err
 		}
 	}
@@ -148,9 +152,22 @@ func validate(w io.Writer, path string) error {
 	return nil
 }
 
+// openConfig opens the configuration and loads it.
+func openConfig(ctx context.Context, open func(context.Context) (engine.Config, error)) (*config, error) {
+	cfg, err := open(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return loadConfig(cfg)
+}
+
 // connect opens a pool and gathers the facts from the default database. The caller closes the pool.
-func connect(ctx context.Context, s settings.Settings) (*pg.Pool, planner.Facts, error) {
-	pool := pg.NewPool(engine.PostgresConfig(s), s.Postgres.MaxConnections, poolIdle, clock.RealClock{},
+func connect(ctx context.Context, c *config) (*pg.Pool, planner.Facts, error) {
+	s := c.settings
+	pc := engine.PostgresConfig(s)
+	pc.ReadFile = c.read
+	pool := pg.NewPool(pc, s.Postgres.MaxConnections, poolIdle, clock.RealClock{},
 		pg.WithLogger(log.FromContext(ctx).GetLogger()))
 	ctx, cancel := context.WithTimeout(ctx, connectTimeout+2*s.Limits.QueryTimeout)
 	defer cancel()
@@ -178,22 +195,23 @@ func newTestCommand(flags *instanceFlags) *cobra.Command {
 			if _, err := flags.registry(); err != nil {
 				return err
 			}
-			if err := flags.requireConfig(); err != nil {
+			open, err := flags.open()
+			if err != nil {
 				return err
 			}
 
-			return runTest(cmd.Context(), cmd.OutOrStdout(), flags.config)
+			return runTest(cmd.Context(), cmd.OutOrStdout(), open)
 		},
 	}
 }
 
-func runTest(ctx context.Context, w io.Writer, path string) error {
-	c, err := loadConfig(path)
+func runTest(ctx context.Context, w io.Writer, open func(context.Context) (engine.Config, error)) error {
+	c, err := openConfig(ctx, open)
 	if err != nil {
 		return err
 	}
 	clearEnv(ctx)
-	pool, facts, err := connect(ctx, c.settings)
+	pool, facts, err := connect(ctx, c)
 	if err != nil {
 		return err
 	}
@@ -323,11 +341,12 @@ func newPrintConfigCommand(flags *instanceFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := flags.requireConfig(); err != nil {
+			open, err := flags.open()
+			if err != nil {
 				return err
 			}
 
-			return printConfig(cmd.Context(), cmd.OutOrStdout(), flags.config, gates, offline)
+			return printConfig(cmd.Context(), cmd.OutOrStdout(), open, gates, offline)
 		},
 	}
 	cmd.Flags().BoolVar(&offline, "offline", false, "do not connect: print the queries that need no facts to be skipped")
@@ -335,8 +354,8 @@ func newPrintConfigCommand(flags *instanceFlags) *cobra.Command {
 	return cmd
 }
 
-func printConfig(ctx context.Context, w io.Writer, path string, gates *featuregate.Registry, offline bool) error {
-	c, err := loadConfig(path)
+func printConfig(ctx context.Context, w io.Writer, open func(context.Context) (engine.Config, error), gates *featuregate.Registry, offline bool) error {
+	c, err := openConfig(ctx, open)
 	if err != nil {
 		return err
 	}
@@ -355,7 +374,7 @@ func printConfig(ctx context.Context, w io.Writer, path string, gates *featurega
 		clearEnv(ctx)
 		var pool *pg.Pool
 		var facts planner.Facts
-		if pool, facts, connectErr = connect(ctx, c.settings); connectErr == nil {
+		if pool, facts, connectErr = connect(ctx, c); connectErr == nil {
 			pool.Close()
 			b.WriteString("# plan\n")
 			b.WriteString(livePlan(planner.Build(c.defs, c.settings, facts)))

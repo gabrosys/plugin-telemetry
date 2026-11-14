@@ -63,3 +63,18 @@ func (c fileConfig) Watch(ctx context.Context, files []string, notify func(), op
 	}
 	return nil
 }
+
+// sensitiveConfig is implemented by a Config whose files may hold secret data.
+type sensitiveConfig interface {
+	// Sensitive reports whether the named file holds secret data.
+	Sensitive(name string) bool
+}
+
+// LoaderOptions returns the sources.Loader options that follow from cfg.
+func LoaderOptions(cfg Config) []sources.LoaderOption {
+	if s, ok := cfg.(sensitiveConfig); ok {
+		return []sources.LoaderOption{sources.WithSensitive(s.Sensitive)}
+	}
+
+	return nil
+}

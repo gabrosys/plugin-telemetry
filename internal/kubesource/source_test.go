@@ -375,3 +375,14 @@ var _ = Describe("Source", func() {
 		Eventually(found).Should(Receive(BeTrue()))
 	})
 })
+
+var _ = Describe("Source.Sensitive", func() {
+	It("is true for secret/ names only", func() {
+		src, err := kubesource.New(kubesource.Options{Namespace: "ns", Cluster: "c", APIServer: "https://x", TokenDir: "/t"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(src.Sensitive("secret/s/k")).To(BeTrue())
+		Expect(src.Sensitive("configmap/s/k")).To(BeFalse())
+		Expect(src.Sensitive("metricqueryset/s")).To(BeFalse())
+		Expect(src.Sensitive("/etc/secret/x")).To(BeFalse())
+	})
+})

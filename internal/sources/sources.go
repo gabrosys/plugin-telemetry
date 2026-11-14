@@ -9,7 +9,11 @@ import (
 	"io/fs"
 	"slices"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
+
+	"go.yaml.in/yaml/v4"
 
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
 )
@@ -56,16 +60,31 @@ type Result struct {
 
 // Loader loads the builtin query and the files, remembering each file's last good version.
 type Loader struct {
-	read  ReadFile
-	files []string
+	read      ReadFile
+	files     []string
+	sensitive func(name string) bool // nil: no source is sensitive
 
 	mu       sync.Mutex // guards previous
 	previous map[string]queries.UserQueries
 }
 
+// LoaderOption configures a Loader.
+type LoaderOption func(*Loader)
+
+// WithSensitive marks the sources for which isSensitive returns true as holding secret data: a parse
+// error of such a source names the source and the line, and quotes none of its content.
+func WithSensitive(isSensitive func(name string) bool) LoaderOption {
+	return func(l *Loader) { l.sensitive = isSensitive }
+}
+
 // NewLoader returns a Loader that reads files with read, in order after the builtin query.
-func NewLoader(read ReadFile, files []string) *Loader {
-	return &Loader{read: read, files: slices.Clone(files), previous: map[string]queries.UserQueries{}}
+func NewLoader(read ReadFile, files []string, opts ...LoaderOption) *Loader {
+	l := &Loader{read: read, files: slices.Clone(files), previous: map[string]queries.UserQueries{}}
+	for _, o := range opts {
+		o(l)
+	}
+
+	return l
 }
 
 // Load reads the builtin query, then each file in order. A later source overwrites an earlier key.
@@ -113,6 +132,9 @@ func (l *Loader) Load() Result {
 		parsed, err := queries.Parse(content)
 		if err != nil {
 			st.Outcome = OutcomeInvalid
+			if l.sensitive != nil && l.sensitive(file) {
+				err = redactedParseError(err)
+			}
 			st.Err = fmt.Errorf("load %s: %w", file, err)
 			merge(file, l.previousFor(&st, file), st)
 
@@ -153,4 +175,30 @@ func hashEntries(entries []Entry) string {
 	sum := sha256.Sum256(fmt.Appendf(nil, "%#v", entries))
 
 	return hex.EncodeToString(sum[:])
+}
+
+// redactedParseError describes a YAML error by its line numbers only: the library's messages quote the
+// content they failed on.
+func redactedParseError(err error) error {
+	var lines []string
+	add := func(l int) {
+		if l > 0 {
+			lines = append(lines, strconv.Itoa(l))
+		}
+	}
+	var many *yaml.LoadErrors
+	var one *yaml.LoadError
+	switch {
+	case errors.As(err, &many):
+		for _, e := range many.Errors {
+			add(e.Mark.Line)
+		}
+	case errors.As(err, &one):
+		add(one.Mark.Line)
+	}
+	if len(lines) == 0 {
+		return errors.New("parse user queries: invalid YAML")
+	}
+
+	return fmt.Errorf("parse user queries: invalid YAML at line %s", strings.Join(lines, ", "))
 }

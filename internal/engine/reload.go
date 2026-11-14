@@ -110,7 +110,7 @@ func (r *replanner) reload(ctx context.Context) error {
 	r.digest, r.digestFiles = hex.EncodeToString(h.Sum(nil)), slices.Clone(s.Sources)
 
 	if r.loader == nil || !slices.Equal(r.loaderFiles, s.Sources) {
-		r.loader, r.loaderFiles = sources.NewLoader(r.cfg.ReadFile, s.Sources), slices.Clone(s.Sources)
+		r.loader, r.loaderFiles = sources.NewLoader(r.cfg.ReadFile, s.Sources, LoaderOptions(r.cfg)...), slices.Clone(s.Sources)
 	}
 	res := r.loader.Load()
 	r.recordLoad(logger, res)

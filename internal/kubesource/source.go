@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -508,6 +509,9 @@ func (s *Source) ReadFile(name string) ([]byte, error) {
 
 	return content(k, dataKey, obj)
 }
+
+// Sensitive reports whether the virtual file holds Secret data.
+func (*Source) Sensitive(name string) bool { return strings.HasPrefix(name, "secret/") }
 
 // Settings builds the settings from the watched Cluster, exporter and the objects they name.
 func (s *Source) Settings() (settings.Settings, []byte, error) {

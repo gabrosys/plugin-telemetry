@@ -177,3 +177,25 @@ var _ = Describe("Loader", func() {
 		Expect(keys(r)).To(Equal([]string{"a", "collector"}))
 	})
 })
+
+var _ = Describe("Loader parse errors of sensitive sources", func() {
+	const sentinel = "SENTINELVALUE-do-not-leak"
+	content := func(string) ([]byte, error) { return []byte("a:\n  query: SELECT 1\nb: " + sentinel + "\n"), nil }
+
+	It("names the source and the line and never quotes the content", func() {
+		r := sources.NewLoader(content, []string{"secret/q/queries.yaml"},
+			sources.WithSensitive(func(name string) bool { return name == "secret/q/queries.yaml" })).Load()
+
+		st := r.Status[1]
+		Expect(st.Outcome).To(Equal(sources.OutcomeInvalid))
+		Expect(st.Err).To(MatchError(And(ContainSubstring("secret/q/queries.yaml"), MatchRegexp(`line \d+`))))
+		Expect(st.Err.Error()).NotTo(ContainSubstring("SENTINE"))
+	})
+
+	It("keeps the message of a source that is not sensitive", func() {
+		r := sources.NewLoader(content, []string{"configmap/q/queries.yaml"},
+			sources.WithSensitive(func(name string) bool { return name == "secret/q/queries.yaml" })).Load()
+
+		Expect(r.Status[1].Err.Error()).To(ContainSubstring("SENTINE"))
+	})
+})

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +34,18 @@ type fakeKube struct {
 func newFakeKube(config string, files map[string][]byte, mutate func(*settings.Settings)) *fakeKube {
 	return &fakeKube{base: engine.FileConfig(testdata(config)), files: files, mutate: mutate}
 }
+
+// sensitive makes the names with the prefix sensitive, as the real source does for Secrets.
+func (f *fakeKube) sensitive(prefix string) engine.Config {
+	return &sensitiveKube{fakeKube: f, prefix: prefix}
+}
+
+type sensitiveKube struct {
+	*fakeKube
+	prefix string
+}
+
+func (s *sensitiveKube) Sensitive(name string) bool { return strings.HasPrefix(name, s.prefix) }
 
 func (f *fakeKube) Name() string { return "kubernetes" }
 
@@ -204,8 +217,10 @@ var _ = Describe("instance tools in Kubernetes mode", func() {
 		src        *fakeKube
 	)
 
-	useSnapshot := func(s *fakeKube) {
-		src = s
+	useSnapshot := func(s engine.Config) {
+		if fk, ok := s.(*fakeKube); ok {
+			src = fk
+		}
 		DeferCleanup(cli.SetKubeSources(
 			func(kubesource.Options) (cli.KubeSource, error) { return nil, errors.New("unexpected run") },
 			func(_ context.Context, o kubesource.Options) (engine.Config, error) {
@@ -274,5 +289,24 @@ var _ = Describe("instance tools in Kubernetes mode", func() {
 			Expect(err).To(MatchError(ContainSubstring("CLUSTER_NAME")), sub)
 		}
 		Expect(gotOptions).To(BeEmpty())
+	})
+
+	It("never prints the content of a malformed Secret-backed source", func() {
+		files := virtualFiles()
+		files["secret/queries/q.yaml"] = []byte("a:\n  query: SELECT 1\nb: SENTINELVALUE-do-not-leak\n")
+		useSnapshot(newFakeKube("engine-valid.yaml", files, func(s *settings.Settings) {
+			virtual(s)
+			s.Sources = append(s.Sources, "secret/queries/q.yaml")
+		}).sensitive("secret/"))
+
+		out, err := execute(context.Background(), "instance", "validate")
+		Expect(err).To(HaveOccurred())
+		Expect(out).To(ContainSubstring("error secret/queries/q.yaml -: "))
+		Expect(out + err.Error()).NotTo(ContainSubstring("SENTINE"))
+
+		out, err = execute(context.Background(), "instance", "print-config", "--offline")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out).To(ContainSubstring("invalid secret/queries/q.yaml: "))
+		Expect(out).NotTo(ContainSubstring("SENTINE"))
 	})
 })

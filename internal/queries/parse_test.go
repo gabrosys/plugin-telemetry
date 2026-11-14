@@ -131,6 +131,38 @@ q:
 		Entry("the postgres_exporter example", "cnpg-pg-exporter.yaml", false),
 	)
 
+	DescribeTable("decodes edge cases as yaml/v3 does, or fails where it fails",
+		func(content string, fails bool) {
+			var v3 queries.UserQueries
+			v3Err := yamlv3.Unmarshal([]byte(content), &v3)
+			got, err := queries.Parse([]byte(content))
+			if fails {
+				Expect(v3Err).To(HaveOccurred())
+				Expect(err).To(HaveOccurred())
+				return
+			}
+			Expect(v3Err).ToNot(HaveOccurred())
+			Expect(err).ToNot(HaveOccurred())
+			Expect(got).To(Equal(v3))
+			Expect(got).ToNot(BeEmpty())
+		},
+		Entry("primary: yes", "q:\n  query: SELECT 1\n  primary: yes\n", false),
+		Entry("master: on", "q:\n  query: SELECT 1\n  master: on\n", false),
+		Entry("an anchor with a << merge",
+			"base: &base\n  query: SELECT 1 AS v\n  metrics:\n    - v: {usage: GAUGE, description: V.}\n"+
+				"derived:\n  <<: *base\n  primary: true\n", false),
+		Entry("a duplicate outer key", "q:\n  query: SELECT 1\nq:\n  query: SELECT 2\n", true),
+		Entry("a duplicate inner key", "q:\n  query: SELECT 1\n  query: SELECT 2\n", true),
+		Entry("a quoted cache_seconds", "q:\n  query: SELECT 1\n  cache_seconds: \"30\"\n", true),
+		Entry("a scalar target_databases", "q:\n  query: SELECT 1\n  target_databases: app\n", true),
+		Entry("a byte order mark", "\ufeffq:\n  query: SELECT 1\n", false),
+		Entry("a second document", "q:\n  query: SELECT 1\n---\nr:\n  query: SELECT 2\n", false),
+		Entry("a !!binary query", "q:\n  query: !!binary U0VMRUNUIDE=\n", false),
+		Entry("a tab as indentation", "q:\n\tquery: SELECT 1\n", true),
+		Entry("a tab inside a value", "q:\n  query: SELECT\t1\n", false),
+		Entry("a lowercase usage", "q:\n  query: SELECT 1 AS v\n  metrics:\n    - v:\n        usage: gauge\n", false),
+	)
+
 	It("fails to decode what is not a mapping of queries", func() {
 		_, err := queries.Parse([]byte("- a\n- b\n"))
 		Expect(err).To(HaveOccurred())

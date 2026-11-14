@@ -275,6 +275,10 @@ var _ = Describe("Validate", func() {
 		Entry("a password with another scheme", "ftp://user:secret@x"),
 		Entry("a password without a host", "http://user:secret@"),
 		Entry("a password in a URL that does not parse", "http://user:secret@[::1"),
+		Entry("a password without a scheme", "user:secret@collector:4318"),
+		Entry("a password after a scheme without slashes", "http:user:secret@collector:4318"),
+		Entry("a password after a single slash", "https:/user:secret@collector:4318"),
+		Entry("a password after three slashes", "http:///user:secret@collector:4318"),
 	)
 
 	It("reports every problem at once", func() {

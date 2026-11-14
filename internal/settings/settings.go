@@ -255,11 +255,15 @@ func (s Settings) validateExporter() []error {
 }
 
 // RedactEndpoint returns endpoint for messages: the URL's Redacted form with the user, the query and
-// the fragment also replaced by xxxxx, or "(not a URL)" when it does not parse.
+// the fragment also replaced by xxxxx, "(not a URL)" when it does not parse, or "(no host)" when it
+// has no host, because user info then parses as a scheme, an opaque part or a path.
 func RedactEndpoint(endpoint string) string {
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return "(not a URL)"
+	}
+	if u.Host == "" {
+		return "(no host)"
 	}
 	if u.User != nil {
 		u.User = url.UserPassword("xxxxx", "xxxxx")

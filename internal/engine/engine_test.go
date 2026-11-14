@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	"github.com/jackc/pgx/v5/pgconn"
 	. "github.com/onsi/ginkgo/v2"
@@ -163,6 +164,46 @@ var _ = Describe("The watcher", func() {
 		notified, err := engine.WatchSwapNotifies(ctx, []string{a}, []string{a, b})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(notified).To(BeTrue())
+	})
+})
+
+// gaps returns the time between consecutive entries of times.
+func gaps(times []time.Duration) []time.Duration {
+	out := make([]time.Duration, 0, len(times))
+	for i := 1; i < len(times); i++ {
+		out = append(out, times[i]-times[i-1])
+	}
+	return out
+}
+
+var _ = Describe("Facts rounds during an outage", func() {
+	var rounds *engine.FactsRounds
+
+	BeforeEach(func(ctx SpecContext) {
+		var err error
+		rounds, err = engine.NewFactsRounds(ctrllog.IntoContext(ctx, logr.Discard()), 30*time.Second)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(rounds.Close)
+	})
+
+	It("back off 1s, 2s, 4s ... on the timer whatever the early rounds in between", func(ctx SpecContext) {
+		timed, early := rounds.Run(ctrllog.IntoContext(ctx, logr.Discard()), 40*time.Second, true)
+		Expect(early).To(BeNumerically(">", 20))
+		Expect(timed).NotTo(BeEmpty())
+		Expect(timed[0]).To(BeZero())
+		Expect(gaps(timed)).To(Equal([]time.Duration{
+			time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second,
+		}))
+	})
+
+	It("start the failure count over when the pool is replaced", func(ctx SpecContext) {
+		quiet := ctrllog.IntoContext(ctx, logr.Discard())
+		timed, _ := rounds.Run(quiet, 8*time.Second, false)
+		Expect(timed).To(Equal([]time.Duration{0, time.Second, 3 * time.Second, 7 * time.Second}))
+
+		Expect(rounds.ReplacePool(quiet)).To(BeTrue())
+		timed, _ = rounds.Run(quiet, 4*time.Second, false)
+		Expect(timed).To(Equal([]time.Duration{0, time.Second, 3 * time.Second}))
 	})
 })
 

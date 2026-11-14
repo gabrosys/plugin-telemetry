@@ -8,6 +8,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/gabrosys/plugin-telemetry/internal/executor"
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
@@ -193,4 +194,77 @@ func WatchSwapNotifies(ctx context.Context, first, second []string) (bool, error
 // FactsWait is the wait before the next facts round after failures consecutive failed ones.
 func FactsWait(failures int, planInterval time.Duration) time.Duration {
 	return factsWait(failures, planInterval)
+}
+
+// factsStep is the step by which FactsRounds moves its fake clock.
+const factsStep = 100 * time.Millisecond
+
+// FactsRounds drives the facts rounds of an engine whose PostgreSQL never answers, on a fake clock,
+// as the control goroutine does.
+type FactsRounds struct {
+	e   *engine
+	clk *clocktesting.FakeClock
+}
+
+// NewFactsRounds returns FactsRounds after a first configuration with the planning cycle planInterval.
+func NewFactsRounds(ctx context.Context, planInterval time.Duration) (*FactsRounds, error) {
+	clk := clocktesting.NewFakeClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
+	e, err := newEngine(ctx, Options{ConfigPath: "engine.yaml", Clock: clk})
+	if err != nil {
+		return nil, err
+	}
+	s := unreachable()
+	s.PlanInterval = planInterval
+	e.plan.current = &configuration{settings: s}
+	e.setRunner(ctx, s, time.Minute)
+	e.setFactsTimer(0)
+	return &FactsRounds{e: e, clk: clk}, nil
+}
+
+// Run moves the fake clock forward by d in steps of factsStep. At each step it runs the round the facts
+// timer is due for or, when early is set and earlyFactsGap has passed since the last round, the early
+// round a run that lost its connection asks for. It returns the times from the start of the rounds the
+// timer drove, and the number of early rounds.
+func (f *FactsRounds) Run(ctx context.Context, d time.Duration, early bool) ([]time.Duration, int) {
+	start := f.clk.Now()
+	var timed []time.Duration
+	var earlyRounds int
+	for elapsed := time.Duration(0); elapsed <= d; elapsed += factsStep {
+		f.clk.SetTime(start.Add(elapsed))
+		select {
+		case <-timerC(f.e.factsTimer):
+			timed = append(timed, elapsed)
+			f.e.factsRound(ctx, true)
+		default:
+			if early && f.clk.Since(f.e.lastFacts) >= earlyFactsGap {
+				f.e.requestFacts()
+				<-f.e.early
+				f.e.onEarlyFacts(ctx)
+				earlyRounds++
+			}
+		}
+	}
+	return timed, earlyRounds
+}
+
+// ReplacePool applies the configuration in force with another unreachable port, as a reload does,
+// and reports whether that replaced the pool.
+func (f *FactsRounds) ReplacePool(ctx context.Context) (bool, error) {
+	prev, before := f.e.plan.current, f.e.runner.pool
+	s := prev.settings
+	s.Postgres.Port++
+	next := &configuration{settings: s}
+	if err := f.e.apply(ctx, prev, next); err != nil {
+		return false, err
+	}
+	f.e.plan.current = next
+	return f.e.runner.pool != before, nil
+}
+
+// Close closes the pools and shuts the meter provider down.
+func (f *FactsRounds) Close(ctx context.Context) error {
+	stopTimer(&f.e.factsTimer)
+	f.e.retired.Wait()
+	f.e.runner.pool.Close()
+	return f.e.mp.Shutdown(ctx)
 }

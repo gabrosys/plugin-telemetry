@@ -155,7 +155,7 @@ type engine struct {
 	factsTimer     clock.Timer
 	earlyTimer     clock.Timer
 	lastFacts      time.Time
-	factsFailures  int      // consecutive failed facts rounds
+	factsFailures  int      // consecutive failed facts rounds the timer drove
 	factsErrs      errorLog // the facts errors logged, keyed by the default database
 	exp            *export.Exporter
 	exporterFiles  []string
@@ -266,11 +266,11 @@ func (e *engine) run(ctx context.Context) {
 		case <-e.changed:
 			e.onChange(ctx)
 		case <-timerC(e.factsTimer):
-			e.factsRound(ctx)
+			e.factsRound(ctx, true)
 		case <-e.early:
 			e.onEarlyFacts(ctx)
 		case <-timerC(e.earlyTimer):
-			e.factsRound(ctx)
+			e.factsRound(ctx, false)
 		case <-timerC(e.retryTimer):
 			e.retryWatch(ctx)
 		}
@@ -384,6 +384,7 @@ func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 	}
 	// A planInterval change replaces the pool too, as the pool's backoff is capped at it.
 	if first || poolReplaced {
+		e.factsFailures = 0
 		e.setFactsTimer(0)
 	}
 	return nil
@@ -589,15 +590,16 @@ func (e *engine) onEarlyFacts(ctx context.Context) {
 	}
 	wait := e.lastFacts.Add(earlyFactsGap).Sub(e.clk.Now())
 	if wait <= 0 {
-		e.factsRound(ctx)
+		e.factsRound(ctx, false)
 		return
 	}
 	e.earlyTimer = e.clk.NewTimer(wait)
 }
 
 // factsRound gathers the facts, sets upMetric, closes idle connections, replans when the facts changed
-// and schedules the next round: a planning cycle after a success, sooner with backoff after a failure.
-func (e *engine) factsRound(ctx context.Context) {
+// and schedules the next round: a planning cycle after a success, sooner with backoff after a failure
+// of a round the timer drove (timed). A failed early round leaves the timer as it is.
+func (e *engine) factsRound(ctx context.Context, timed bool) {
 	stopTimer(&e.earlyTimer)
 	cur := e.plan.current
 	if cur == nil || e.runner == nil {
@@ -611,8 +613,10 @@ func (e *engine) factsRound(ctx context.Context) {
 	logger := log.FromContext(ctx)
 	key := snapshot.Key{Database: s.Postgres.Database}
 	if err != nil {
-		e.factsFailures++
-		e.setFactsTimer(factsWait(e.factsFailures, s.PlanInterval))
+		if timed {
+			e.factsFailures++
+			e.setFactsTimer(factsWait(e.factsFailures, s.PlanInterval))
+		}
 		e.setUp(false)
 		if ctx.Err() == nil && e.factsErrs.note(key, err.Error()) {
 			logger.Error(err, "gather facts", "database", s.Postgres.Database)

@@ -1,0 +1,287 @@
+package clusterconfig_test
+
+import (
+	"time"
+
+	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
+
+	"github.com/gabrosys/plugin-telemetry/api/v1alpha1"
+	"github.com/gabrosys/plugin-telemetry/internal/clusterconfig"
+	"github.com/gabrosys/plugin-telemetry/internal/podpatch"
+	"github.com/gabrosys/plugin-telemetry/internal/settings"
+)
+
+func mustBuild(in clusterconfig.Inputs) settings.Settings {
+	GinkgoHelper()
+	s, _, err := clusterconfig.Build(in)
+	Expect(err).NotTo(HaveOccurred())
+	return s
+}
+
+func dur(d time.Duration) *metav1.Duration { return &metav1.Duration{Duration: d} }
+
+var _ = Describe("virtual file names", func() {
+	It("builds them", func() {
+		Expect(clusterconfig.ConfigMapFile("n", "k")).To(Equal("configmap/n/k"))
+		Expect(clusterconfig.SecretFile("n", "k")).To(Equal("secret/n/k"))
+		Expect(clusterconfig.QuerySetFile("n")).To(Equal("metricqueryset/n"))
+	})
+})
+
+var _ = Describe("Build", func() {
+	It("maps a minimal exporter onto settings.Defaults with the Cluster name, namespace and app database", func() {
+		in := newInputs()
+		in.Cluster.Spec.Bootstrap = &apiv1.BootstrapConfiguration{InitDB: &apiv1.BootstrapInitDB{Database: "app"}}
+
+		s, warnings, err := clusterconfig.Build(in)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(warnings).To(BeEmpty())
+
+		want := settings.Defaults()
+		want.Cluster, want.Namespace = "pg", "ns"
+		want.Postgres.Database = "app"
+		want.Exporter.Endpoint = "http://c:4318/v1/metrics"
+		want.Exporter.Timeout = 10 * time.Second
+		Expect(s).To(Equal(want))
+	})
+
+	DescribeTable("picks the application database like CloudNativePG",
+		func(b *apiv1.BootstrapConfiguration, want string) {
+			in := newInputs()
+			in.Cluster.Spec.Bootstrap = b
+			Expect(mustBuild(in).Postgres.Database).To(Equal(want))
+		},
+		Entry("no bootstrap", nil, "postgres"),
+		Entry("no database anywhere", &apiv1.BootstrapConfiguration{InitDB: &apiv1.BootstrapInitDB{}}, "postgres"),
+		Entry("initdb", &apiv1.BootstrapConfiguration{InitDB: &apiv1.BootstrapInitDB{Database: "i"}}, "i"),
+		Entry("pg_basebackup over initdb", &apiv1.BootstrapConfiguration{
+			InitDB:       &apiv1.BootstrapInitDB{Database: "i"},
+			PgBaseBackup: &apiv1.BootstrapPgBaseBackup{Database: "b"},
+		}, "b"),
+		Entry("recovery over the others", &apiv1.BootstrapConfiguration{
+			InitDB:       &apiv1.BootstrapInitDB{Database: "i"},
+			PgBaseBackup: &apiv1.BootstrapPgBaseBackup{Database: "b"},
+			Recovery:     &apiv1.BootstrapRecovery{Database: "r"},
+		}, "r"),
+	)
+
+	It("uses the default target database postgres when the Cluster has no application database", func() {
+		Expect(mustBuild(newInputs()).Postgres.Database).To(Equal("postgres"))
+	})
+
+	It("connects peer mode to /controller/run as cnpg_metrics_exporter with no password", func() {
+		s := mustBuild(newInputs())
+		Expect(s.Postgres.Host).To(Equal("/controller/run"))
+		Expect(s.Postgres.Port).To(Equal(uint16(5432)))
+		Expect(s.Postgres.User).To(Equal("cnpg_metrics_exporter"))
+		Expect(s.Postgres.PasswordFile).To(BeEmpty())
+	})
+
+	It("connects password mode to 127.0.0.1:5432 as the Secret's username with PasswordFile secret/<name>/password", func() {
+		in := newInputs()
+		in.Params = podpatch.Params{Exporter: "default", Auth: podpatch.AuthPassword, PasswordSecret: "pw"}
+		in.PasswordUsername = "metrics_user"
+		s := mustBuild(in)
+		Expect(s.Postgres.Host).To(Equal("127.0.0.1"))
+		Expect(s.Postgres.Port).To(Equal(uint16(5432)))
+		Expect(s.Postgres.User).To(Equal("metrics_user"))
+		Expect(s.Postgres.PasswordFile).To(Equal("secret/pw/password"))
+	})
+
+	It("fails in password mode when the username is empty, naming the Secret and the key", func() {
+		in := newInputs()
+		in.Params = podpatch.Params{Exporter: "default", Auth: podpatch.AuthPassword, PasswordSecret: "pw"}
+		_, _, err := clusterconfig.Build(in)
+		Expect(err).To(MatchError(And(ContainSubstring(`"pw"`), ContainSubstring(`"username"`))))
+	})
+
+	It("fails in password mode without a passwordSecret parameter", func() {
+		in := newInputs()
+		in.Params = podpatch.Params{Exporter: "default", Auth: podpatch.AuthPassword}
+		in.PasswordUsername = "u"
+		_, _, err := clusterconfig.Build(in)
+		Expect(err).To(MatchError(ContainSubstring("passwordSecret")))
+	})
+
+	It("fails without a Cluster or an exporter", func() {
+		in := newInputs()
+		in.Exporter = nil
+		_, _, err := clusterconfig.Build(in)
+		Expect(err).To(HaveOccurred())
+		in = newInputs()
+		in.Cluster = nil
+		_, _, err = clusterconfig.Build(in)
+		Expect(err).To(HaveOccurred())
+	})
+
+	It("takes metrics.defaultInterval, else spec.monitoring.metricsQueriesTTL, else 30s", func() {
+		Expect(mustBuild(newInputs()).DefaultInterval).To(Equal(30 * time.Second))
+
+		in := newInputs()
+		in.Cluster.Spec.Monitoring = &apiv1.MonitoringConfiguration{MetricsQueriesTTL: dur(45 * time.Second)}
+		Expect(mustBuild(in).DefaultInterval).To(Equal(45 * time.Second))
+
+		in.Exporter.Spec.Metrics.DefaultInterval = dur(20 * time.Second)
+		Expect(mustBuild(in).DefaultInterval).To(Equal(20 * time.Second))
+	})
+
+	It("orders sources as CNPG does: ConfigMaps, then Secrets, then querySets, all after the builtin query", func() {
+		in := newInputs()
+		in.Cluster = monitored()
+		in.Exporter.Spec.Metrics.QuerySets = []string{"qs"}
+		Expect(mustBuild(in).Sources).To(Equal([]string{
+			"configmap/cnpg-default-monitoring/queries",
+			"configmap/mine/q.yaml",
+			"secret/sq/q.yaml",
+			"metricqueryset/qs",
+		}))
+	})
+
+	It("leaves out spec.monitoring sources when useClusterMonitoring is false", func() {
+		in := newInputs()
+		in.Cluster = monitored()
+		in.Exporter.Spec.Metrics.UseClusterMonitoring = ptr.To(false)
+		in.Exporter.Spec.Metrics.QuerySets = []string{"qs"}
+		Expect(mustBuild(in).Sources).To(Equal([]string{"metricqueryset/qs"}))
+	})
+
+	It("maps groups, limits, exclude and planInterval, keeping Go defaults for unset fields", func() {
+		in := newInputs()
+		m := &in.Exporter.Spec.Metrics
+		m.Interval = dur(time.Minute)
+		m.MaxPointsPerRequest = ptr.To(int32(500))
+		m.PlanInterval = dur(time.Minute)
+		m.DefaultInterval = dur(15 * time.Second)
+		m.Groups = []v1alpha1.QueryGroup{
+			{Name: "fast", Interval: dur(5 * time.Second), Queries: []string{"pg_stat_*"}},
+			{Name: "inherit", Queries: []string{"x"}},
+		}
+		m.Limits = v1alpha1.Limits{
+			MaxConnections:      ptr.To(int32(2)),
+			MaxRowsPerQuery:     ptr.To(int32(11)),
+			MaxSeriesPerQuery:   ptr.To(int32(12)),
+			MaxSeriesTotal:      ptr.To(int32(13)),
+			MaxDatabases:        ptr.To(int32(14)),
+			MaxLabelValueLength: ptr.To(int32(15)),
+			MaxLabelsPerSeries:  ptr.To(int32(16)),
+			QueryTimeout:        dur(3 * time.Second),
+			LockTimeout:         dur(2 * time.Second),
+		}
+		m.Exclude = v1alpha1.Exclude{Queries: []string{"q"}, Metrics: []string{"m*"}, Databases: []string{"template*"}}
+
+		s := mustBuild(in)
+		Expect(s.Exporter.Interval).To(Equal(time.Minute))
+		Expect(s.Exporter.MaxPointsPerRequest).To(Equal(500))
+		Expect(s.PlanInterval).To(Equal(time.Minute))
+		Expect(s.DefaultInterval).To(Equal(15 * time.Second))
+		Expect(s.Groups).To(Equal([]settings.Group{
+			{Name: "fast", Interval: 5 * time.Second, Queries: []string{"pg_stat_*"}},
+			{Name: "inherit", Interval: 15 * time.Second, Queries: []string{"x"}},
+		}))
+		Expect(s.Postgres.MaxConnections).To(Equal(2))
+		Expect(s.Limits).To(Equal(settings.Limits{
+			QueryTimeout: 3 * time.Second, LockTimeout: 2 * time.Second,
+			MaxRowsPerQuery: 11, MaxSeriesPerQuery: 12, MaxSeriesTotal: 13, MaxDatabases: 14,
+			MaxLabelValueLength: 15, MaxLabelsPerSeries: 16,
+		}))
+		Expect(s.Exclude).To(Equal(settings.Exclude{Queries: []string{"q"}, Metrics: []string{"m*"}, Databases: []string{"template*"}}))
+
+		def := settings.Defaults()
+		Expect(mustBuild(newInputs()).Limits).To(Equal(def.Limits))
+		Expect(mustBuild(newInputs()).Postgres.MaxConnections).To(Equal(def.Postgres.MaxConnections))
+	})
+
+	It("maps the exporter fields", func() {
+		in := newInputs()
+		in.Exporter.Spec.Exporter = v1alpha1.OTLPExporter{
+			Protocol:    "grpc",
+			Endpoint:    "https://c:4317",
+			Compression: "none",
+			Timeout:     dur(4 * time.Second),
+			Headers:     &v1alpha1.KeySelector{Name: "hdr", Key: "h"},
+			TLS: &v1alpha1.OTLPTLS{
+				CA:                &v1alpha1.KeyReference{Secret: &v1alpha1.KeySelector{Name: "ca", Key: "ca.crt"}},
+				ClientCertificate: &v1alpha1.LocalObjectReference{Name: "client"},
+				ServerName:        "collector",
+				MinVersion:        "1.3",
+			},
+		}
+		e := mustBuild(in).Exporter
+		Expect(e.Protocol).To(Equal("grpc"))
+		Expect(e.Endpoint).To(Equal("https://c:4317"))
+		Expect(e.Compression).To(Equal("none"))
+		Expect(e.Timeout).To(Equal(4 * time.Second))
+		Expect(e.HeadersFile).To(Equal("secret/hdr/h"))
+		Expect(e.TLS).To(Equal(settings.TLS{
+			CAFile: "secret/ca/ca.crt", CertFile: "secret/client/tls.crt", KeyFile: "secret/client/tls.key",
+			ServerName: "collector", MinVersion: "1.3",
+		}))
+
+		in.Exporter.Spec.Exporter.TLS.CA = &v1alpha1.KeyReference{ConfigMap: &v1alpha1.KeySelector{Name: "cacm", Key: "bundle"}}
+		Expect(mustBuild(in).Exporter.TLS.CAFile).To(Equal("configmap/cacm/bundle"))
+	})
+
+	It("defaults exporter.timeout to min(10s, interval/2) when unset", func() {
+		in := newInputs()
+		in.Exporter.Spec.Metrics.Interval = dur(10 * time.Second)
+		Expect(mustBuild(in).Exporter.Timeout).To(Equal(5 * time.Second))
+		in.Exporter.Spec.Metrics.Interval = dur(time.Minute)
+		Expect(mustBuild(in).Exporter.Timeout).To(Equal(10 * time.Second))
+	})
+
+	It("adds allowlisted Cluster labels as cnpg.cluster.label.<key>; missing labels add nothing", func() {
+		in := newInputs()
+		in.Cluster.Labels = map[string]string{"app.kubernetes.io/part-of": "shop", "other": "x"}
+		in.Exporter.Spec.ResourceLabels = []string{"app.kubernetes.io/part-of", "absent"}
+		Expect(mustBuild(in).ResourceAttributes).To(Equal(map[string]string{"cnpg.cluster.label.app.kubernetes.io/part-of": "shop"}))
+
+		in.Cluster.Labels = nil
+		Expect(mustBuild(in).ResourceAttributes).To(BeEmpty())
+	})
+
+	It("never copies the instance role label", func() {
+		in := newInputs()
+		in.Cluster.Labels = map[string]string{"cnpg.io/instanceRole": "primary"}
+		in.Exporter.Spec.ResourceLabels = []string{"cnpg.io/instanceRole"}
+		Expect(mustBuild(in).ResourceAttributes).To(BeEmpty())
+	})
+
+	It("lets fixed attributes win over resourceAttributes, and resourceAttributes over OTEL_RESOURCE_ATTRIBUTES", func() {
+		in := withEnv(
+			map[string]string{"OTEL_RESOURCE_ATTRIBUTES": "env=cm,a=cm,cnpg.cluster.label.l=cm"},
+			map[string]string{"OTEL_RESOURCE_ATTRIBUTES": "env=secret,a=secret,s=1"},
+		)
+		in.Cluster.Labels = map[string]string{"l": "fromlabel"}
+		in.Exporter.Spec.ResourceLabels = []string{"l"}
+		in.Exporter.Spec.ResourceAttributes = map[string]string{"a": "spec", "cnpg.cluster.label.l": "spec"}
+		Expect(mustBuild(in).ResourceAttributes).To(Equal(map[string]string{
+			"env": "secret", "a": "spec", "s": "1", "cnpg.cluster.label.l": "fromlabel",
+		}))
+	})
+
+	It("warns and drops an invalid OTEL_RESOURCE_ATTRIBUTES without echoing it", func() {
+		in := withEnv(nil, map[string]string{"OTEL_RESOURCE_ATTRIBUTES": "a=1,secret-value-xyz"})
+		s, warnings, err := clusterconfig.Build(in)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(s.ResourceAttributes).To(BeEmpty())
+		Expect(warnings).To(ConsistOf(ContainSubstring("OTEL_RESOURCE_ATTRIBUTES")))
+		Expect(warnings[0]).NotTo(ContainSubstring("secret-value-xyz"))
+	})
+
+	It("fails with a message naming the field when settings.Validate fails, e.g. no endpoint anywhere", func() {
+		in := newInputs()
+		in.Exporter.Spec.Exporter.Endpoint = ""
+		_, _, err := clusterconfig.Build(in)
+		Expect(err).To(MatchError(ContainSubstring("exporter.endpoint")))
+
+		in = newInputs()
+		in.Exporter.Spec.Metrics.Interval = dur(2 * time.Second)
+		in.Exporter.Spec.Exporter.Timeout = dur(5 * time.Second)
+		_, _, err = clusterconfig.Build(in)
+		Expect(err).To(MatchError(ContainSubstring("exporter.timeout")))
+	})
+})

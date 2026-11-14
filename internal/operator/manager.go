@@ -21,8 +21,8 @@ import (
 )
 
 // NewManager builds the plugin's manager: no leader election and no metrics, probe or pprof listeners.
-// Its cache holds Clusters, TelemetryExporters and MetricQuerySets from every namespace, and only the
-// ServiceAccounts, Roles, RoleBindings and Secrets the plugin created.
+// Its cache holds Clusters and TelemetryExporters from every namespace, and only the ServiceAccounts,
+// Roles, RoleBindings and Secrets the plugin created, all without managedFields.
 func NewManager(cfg *rest.Config) (manager.Manager, error) {
 	scheme, err := newScheme()
 	if err != nil {
@@ -60,7 +60,7 @@ func managedObjects() []client.Object {
 
 // cachedObjects are all the kinds the plugin reads from the cache.
 func cachedObjects() []client.Object {
-	return append([]client.Object{&apiv1.Cluster{}, &v1alpha1.TelemetryExporter{}, &v1alpha1.MetricQuerySet{}}, managedObjects()...)
+	return append([]client.Object{&apiv1.Cluster{}, &v1alpha1.TelemetryExporter{}}, managedObjects()...)
 }
 
 func managerOptions(scheme *runtime.Scheme) manager.Options {
@@ -78,6 +78,7 @@ func managerOptions(scheme *runtime.Scheme) manager.Options {
 		PprofBindAddress:       "0",
 		Cache: cache.Options{
 			ByObject:                    byObject,
+			DefaultTransform:            cache.TransformStripManagedFields(),
 			ReaderFailOnMissingInformer: true,
 		},
 	}

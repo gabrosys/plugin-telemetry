@@ -232,11 +232,11 @@ var _ = Describe("Run", func() {
 		Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
 	})
 
-	It("registers an informer for all seven cached kinds before it listens", func() {
+	It("registers an informer for all six cached kinds before it listens", func() {
 		close(waiter.ready)
 		start()
 		Eventually(caches.kinds, 5*time.Second).Should(ConsistOf(
-			"*v1.Cluster", "*v1alpha1.TelemetryExporter", "*v1alpha1.MetricQuerySet",
+			"*v1.Cluster", "*v1alpha1.TelemetryExporter",
 			"*v1.ServiceAccount", "*v1.Role", "*v1.RoleBinding", "*v1.Secret",
 		))
 		Expect(canDial(addr)).To(BeFalse())

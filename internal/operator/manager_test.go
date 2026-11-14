@@ -115,4 +115,22 @@ var _ = Describe("NewManager", func() {
 		Expect(opts.Cache.DefaultNamespaces).To(BeEmpty())
 		Expect(opts.Cache.DefaultLabelSelector).To(BeNil())
 	})
+
+	It("strips managedFields from every cached object", func() {
+		scheme, err := operator.NewScheme()
+		Expect(err).NotTo(HaveOccurred())
+		opts := operator.ManagerOptions(scheme)
+		Expect(opts.Cache.DefaultTransform).NotTo(BeNil())
+
+		cluster := &apiv1.Cluster{ObjectMeta: metav1.ObjectMeta{
+			Name:          "pg",
+			ManagedFields: []metav1.ManagedFieldsEntry{{Manager: "cloudnative-pg", Operation: metav1.ManagedFieldsOperationUpdate}},
+		}}
+		out, err := opts.Cache.DefaultTransform(cluster)
+		Expect(err).NotTo(HaveOccurred())
+		stripped, ok := out.(*apiv1.Cluster)
+		Expect(ok).To(BeTrue())
+		Expect(stripped.ManagedFields).To(BeNil())
+		Expect(stripped.Name).To(Equal("pg"))
+	})
 })

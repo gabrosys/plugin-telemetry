@@ -52,7 +52,7 @@ func (s ClusterStatus) Healthy() bool {
 // Status serves the Operator service, which reports the plugin's status in the Cluster.
 type Status struct {
 	operator.UnimplementedOperatorServer
-	Reader   client.Reader     // cached exporters and query sets
+	Reader   client.Reader     // cached exporters
 	Identity *identity.Ensurer // Ready gives the identity state
 	Metrics  *PluginMetrics    // nil records nothing
 }

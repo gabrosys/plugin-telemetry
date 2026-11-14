@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	placeholderEndpoint = "http://placeholder.invalid:4318"
+	placeholderEndpoint = "https://placeholder.invalid:4318"
 	placeholderUser     = "placeholder"
 	endpointKey         = envPrefix + "ENDPOINT"
 	monitorRole         = "pg_monitor"

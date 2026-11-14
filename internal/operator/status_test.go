@@ -146,6 +146,17 @@ var _ = Describe("Status.SetStatusInCluster", func() {
 		Expect(st.ExporterState).To(Equal("ok"))
 	})
 
+	It("reports all parameter problems with an invalid auth", func() {
+		cluster = newCluster("ns", "pg", ours(map[string]string{"auth": "kerberos", "zzz": "1", "sidecarCPU": "x"}))
+
+		st := decode(call(status(), cluster))
+
+		Expect(st.Problems).To(HaveLen(3))
+		Expect(st.Problems).To(ContainElement(`auth "kerberos" is invalid: no sidecar is injected`))
+		Expect(st.Problems).To(ContainElement(`unknown plugin parameter "zzz" is ignored`))
+		Expect(st.Problems).To(ContainElement(ContainSubstring("sidecarCPU")))
+	})
+
 	It("returns NoOpResponse when healthy and equal to the stored status", func() {
 		first := call(status(), cluster)
 		Expect(first).NotTo(BeEmpty())
@@ -166,6 +177,22 @@ var _ = Describe("Status.SetStatusInCluster", func() {
 		objs = identityObjects(true)
 
 		Expect(call(status(), withStored(cluster, string(first)))).NotTo(Equal(first))
+	})
+
+	It("returns a changed healthy status, then nothing once it is stored", func() {
+		first := call(status(), cluster)
+		Expect(decode(first).Healthy()).To(BeTrue())
+
+		changed := newCluster("ns", "pg", ours(map[string]string{"zzz": "1"}))
+		changed.Spec.PostgresConfiguration.PgIdent = []string{goodIdent}
+		changed.Status.PluginStatus = []apiv1.PluginStatus{{Name: metadata.PluginName, Status: string(first)}}
+		second := call(status(), changed)
+		Expect(second).NotTo(BeEmpty())
+		Expect(second).NotTo(Equal(first))
+		Expect(decode(second).Healthy()).To(BeTrue())
+
+		changed.Status.PluginStatus[0].Status = string(second)
+		Expect(call(status(), changed)).To(BeEmpty())
 	})
 
 	It("ignores the stored status of another plugin", func() {

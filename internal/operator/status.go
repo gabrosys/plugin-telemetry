@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -114,17 +115,19 @@ func (s *Status) SetStatusInCluster(ctx context.Context, req *operator.SetStatus
 // compute builds the status from the cached exporter and identity objects.
 func (s *Status) compute(ctx context.Context, c *apiv1.Cluster, plugin apiv1.PluginConfiguration) (ClusterStatus, error) {
 	parsed, authErr := podpatch.ParseParams(plugin.Parameters)
-	params := parsed.Params
 	var problems []string
 	if authErr != nil {
-		params = podpatch.Params{Exporter: podpatch.DefaultExporter, Auth: podpatch.AuthPeer}
-		if v := plugin.Parameters["exporter"]; v != "" {
-			params.Exporter = v
+		rest := maps.Clone(plugin.Parameters)
+		delete(rest, "auth")
+		var err error
+		if parsed, err = podpatch.ParseParams(rest); err != nil {
+			return ClusterStatus{}, fmt.Errorf("parse plugin parameters: %w", err)
 		}
 		problems = append(problems, fmt.Sprintf("auth %q is invalid: no sidecar is injected", plugin.Parameters["auth"]))
 	} else {
-		problems = append(problems, clusterconfig.SpecProblems(c, params)...)
+		problems = append(problems, clusterconfig.SpecProblems(c, parsed.Params)...)
 	}
+	params := parsed.Params
 	for _, err := range parsed.Defaulted {
 		problems = append(problems, err.Error())
 	}

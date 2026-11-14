@@ -121,6 +121,19 @@ var _ = Describe("Check", func() {
 		Expect(clusterconfig.Check(newCluster(), peer, e)).To(HaveOccurred())
 	})
 
+	It("accepts an envFrom endpoint together with tls options", func() {
+		e := newExporter()
+		e.Spec.Exporter.Endpoint = ""
+		e.Spec.EnvFrom = &v1alpha1.EnvFromSource{ConfigMap: &v1alpha1.LocalObjectReference{Name: "otel"}}
+		e.Spec.Exporter.TLS = &v1alpha1.OTLPTLS{
+			CA:                &v1alpha1.KeyReference{Secret: &v1alpha1.KeySelector{Name: "ca", Key: "ca.crt"}},
+			ClientCertificate: &v1alpha1.LocalObjectReference{Name: "client"},
+			ServerName:        "collector",
+		}
+
+		Expect(clusterconfig.Check(newCluster(), peer, e)).To(Succeed())
+	})
+
 	It("accepts a complete exporter", func() {
 		Expect(clusterconfig.Check(newCluster(), peer, newExporter())).To(Succeed())
 	})

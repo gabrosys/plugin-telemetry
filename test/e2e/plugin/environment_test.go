@@ -33,9 +33,10 @@ const (
 
 var _ = Describe("the plugin environment", Ordered, func() {
 	var (
-		c   client.Client
-		cfg *rest.Config
-		ns  string
+		c     client.Client
+		cfg   *rest.Config
+		ns    string
+		start time.Time
 	)
 
 	BeforeAll(func(ctx SpecContext) {
@@ -55,6 +56,7 @@ var _ = Describe("the plugin environment", Ordered, func() {
 		})
 		ns = namespace.Name
 
+		start = time.Now()
 		Expect(c.Create(ctx, framework.ExporterFor(ns, podpatch.DefaultExporter))).To(Succeed())
 		Expect(c.Create(ctx, framework.PeerCluster(ns, clusterName, env.PostgresImage))).To(Succeed())
 	})
@@ -80,7 +82,7 @@ var _ = Describe("the plugin environment", Ordered, func() {
 
 	It("the plugin's self-metrics reach the collector with the plugin resource", func(ctx SpecContext) {
 		Eventually(func(g Gomega, ctx SpecContext) {
-			lines, err := framework.CollectorLines(ctx, cfg, collectorTailLines)
+			lines, err := framework.CollectorLinesSince(ctx, cfg, collectorTailLines, start)
 			g.Expect(err).NotTo(HaveOccurred())
 
 			var plugin []map[string]string

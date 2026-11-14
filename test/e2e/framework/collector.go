@@ -54,16 +54,35 @@ func CollectorReady(ctx context.Context, c client.Client) error {
 
 // CollectorLines reads the last n lines of the collector's file through the reader container.
 func CollectorLines(ctx context.Context, cfg *rest.Config, n int) ([]otlp.Line, error) {
+	out, err := tailCollector(ctx, cfg, n)
+	if err != nil {
+		return nil, err
+	}
+
+	return ParseLines(out)
+}
+
+// CollectorLinesSince reads the last n lines of the collector's file and keeps those whose Time is at or after since.
+func CollectorLinesSince(ctx context.Context, cfg *rest.Config, n int, since time.Time) ([]otlp.Line, error) {
+	out, err := tailCollector(ctx, cfg, n)
+	if err != nil {
+		return nil, err
+	}
+
+	return ParseLinesSince(out, since)
+}
+
+func tailCollector(ctx context.Context, cfg *rest.Config, n int) (string, error) {
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("create clientset: %w", err)
+		return "", fmt.Errorf("create clientset: %w", err)
 	}
 
 	pods, err := cs.CoreV1().Pods(collectorNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: "app.kubernetes.io/name=" + collectorName,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list collector pods: %w", err)
+		return "", fmt.Errorf("list collector pods: %w", err)
 	}
 
 	for _, pod := range pods.Items {
@@ -74,13 +93,23 @@ func CollectorLines(ctx context.Context, cfg *rest.Config, n int) ([]otlp.Line, 
 		out, _, err := Exec(ctx, cfg, types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}, collectorReader,
 			[]string{"tail", "-n", strconv.Itoa(n), collectorFile})
 		if err != nil {
-			return nil, fmt.Errorf("read the collector file: %w", err)
+			return "", fmt.Errorf("read the collector file: %w", err)
 		}
 
-		return ParseLines(out)
+		return out, nil
 	}
 
-	return nil, fmt.Errorf("%w in %s", ErrNoCollectorPod, collectorNamespace)
+	return "", fmt.Errorf("%w in %s", ErrNoCollectorPod, collectorNamespace)
+}
+
+// ParseLinesSince is ParseLines keeping the lines whose Time is at or after since.
+func ParseLinesSince(out string, since time.Time) ([]otlp.Line, error) {
+	lines, err := ParseLines(out)
+	if err != nil {
+		return nil, err
+	}
+
+	return otlp.Since(lines, since), nil
 }
 
 // ParseLines decodes the output of tail on the collector's file. A last line without a newline is skipped.

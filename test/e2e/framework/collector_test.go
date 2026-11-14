@@ -1,6 +1,8 @@
 package framework_test
 
 import (
+	"time"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -31,5 +33,20 @@ var _ = Describe("ParseLines", func() {
 	It("fails on a complete line that is not OTLP/JSON", func() {
 		_, err := framework.ParseLines("garbage\n")
 		Expect(err).To(HaveOccurred())
+	})
+})
+
+var _ = Describe("ParseLinesSince", func() {
+	It("excludes the lines before since", func() {
+		lines, err := framework.ParseLinesSince(tailLine1+"\n"+tailLine2+"\n", time.Unix(2, 0))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lines).To(HaveLen(1))
+		Expect(lines[0].Time.Unix()).To(Equal(int64(2)))
+	})
+
+	It("returns no lines when all are older", func() {
+		lines, err := framework.ParseLinesSince(tailLine1+"\n", time.Unix(5, 0))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lines).To(BeEmpty())
 	})
 })

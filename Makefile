@@ -89,7 +89,7 @@ dev-down: $(KIND) ## Delete the kind environment
 .PHONY: kind-load
 kind-load: $(KIND) ## Load the plugin image into kind, pull the collector image on its nodes and record the plugin digest reference in bin/image-ref
 	$(KIND) load docker-image $(IMG) --name $(KIND_CLUSTER)
-	for node in $$($(KIND) get nodes --name $(KIND_CLUSTER)); do docker exec $$node crictl pull $(COLLECTOR_IMAGE); done
+	for node in $$($(KIND) get nodes --name $(KIND_CLUSTER)); do docker exec $$node crictl pull $(COLLECTOR_IMAGE) || exit 1; done
 	KIND=$(KIND) hack/kind-image-ref.sh $(KIND_CLUSTER) $(IMG) > $(BIN)/image-ref
 
 .PHONY: deploy

@@ -35,11 +35,12 @@ var _ = Describe("Ensurer", func() {
 		ensurer *identity.Ensurer
 		order   []string
 		opts    []client.ApplyOption
+		secret  map[string]any
 	)
 
 	BeforeEach(func() {
 		ctx = context.Background()
-		order, opts = nil, nil
+		order, opts, secret = nil, nil, nil
 
 		c = fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).WithInterceptorFuncs(interceptor.Funcs{
 			Apply: func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, o ...client.ApplyOption) error {
@@ -48,6 +49,11 @@ var _ = Describe("Ensurer", func() {
 					return err
 				}
 				order = append(order, raw.Kind+"/"+raw.Metadata.Name)
+				if raw.Kind == "Secret" {
+					if secret, err = payload(obj); err != nil {
+						return err
+					}
+				}
 				opts = o
 
 				return c.Apply(ctx, obj, o...)
@@ -136,14 +142,42 @@ var _ = Describe("Ensurer", func() {
 		Expect(res.Ready).To(BeTrue())
 	})
 
-	It("does not apply data over a populated token Secret", func() {
+	It("sends the token Secret apply with only type, name annotation, labels and owner reference", func() {
+		_, err := ensurer.Ensure(ctx, newCluster(), refs())
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(secret).To(HaveLen(4))
+		Expect(secret).To(HaveKey("apiVersion"))
+		Expect(secret).To(HaveKey("kind"))
+		Expect(secret).To(HaveKeyWithValue("type", "kubernetes.io/service-account-token"))
+		Expect(secret).To(HaveKey("metadata"))
+		meta, ok := secret["metadata"].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(meta).To(HaveLen(5))
+		Expect(meta).To(HaveKeyWithValue("name", "pg-telemetry-token"))
+		Expect(meta).To(HaveKeyWithValue("namespace", "ns"))
+		Expect(meta).To(HaveKey("labels"))
+		Expect(meta).To(HaveKey("ownerReferences"))
+		Expect(meta).To(HaveKeyWithValue("annotations", map[string]any{"kubernetes.io/service-account.name": "pg-telemetry"}))
+	})
+
+	It("keeps data.token when it re-applies the token Secret", func() {
 		_, err := ensurer.Ensure(ctx, newCluster(), refs())
 		Expect(err).NotTo(HaveOccurred())
 		setToken("t")
 
 		var s corev1.Secret
 		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry-token"}, &s)).To(Succeed())
+		delete(s.Labels, "telemetry.gabrosys.github.io/cluster")
+		Expect(c.Update(ctx, &s)).To(Succeed())
+
+		res, err := ensurer.Ensure(ctx, newCluster(), refs())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.Applied).To(ContainElement("Secret/pg-telemetry-token"))
+
+		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry-token"}, &s)).To(Succeed())
 		Expect(string(s.Data["token"])).To(Equal("t"))
+		Expect(s.Labels).To(HaveKey("telemetry.gabrosys.github.io/cluster"))
 	})
 
 	It("fails Ensure for a Cluster without a UID before applying anything", func() {
@@ -189,6 +223,19 @@ func runtimeJSON(obj runtime.ApplyConfiguration) (appliedConfig, error) {
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return out, fmt.Errorf("unmarshal apply configuration: %w", err)
+	}
+
+	return out, nil
+}
+
+func payload(obj runtime.ApplyConfiguration) (map[string]any, error) {
+	raw, err := json.Marshal(obj)
+	if err != nil {
+		return nil, fmt.Errorf("marshal apply configuration: %w", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("unmarshal apply configuration: %w", err)
 	}
 
 	return out, nil

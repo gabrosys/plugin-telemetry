@@ -53,6 +53,20 @@ var _ = Describe("Desired", func() {
 		Expect(resources).To(ConsistOf("clusters", "telemetryexporters", "secrets"))
 	})
 
+	It("drops empty names for every kind", func() {
+		r := clusterconfig.Refs{Secrets: []string{""}, ConfigMaps: []string{"", "a"}, QuerySets: []string{""}}
+		objs, err := identity.Desired(newCluster(), r)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(objs.Role.Rules).To(HaveLen(1))
+		Expect(objs.Role.Rules[0].Resources).To(Equal([]string{"configmaps"}))
+		Expect(objs.Role.Rules[0].ResourceNames).To(Equal([]string{"a"}))
+		for _, rule := range objs.Role.Rules {
+			Expect(rule.ResourceNames).NotTo(BeEmpty())
+			Expect(rule.ResourceNames).NotTo(ContainElement(""))
+		}
+	})
+
 	It("sets the owner reference from the live UID with controller true and blockOwnerDeletion false", func() {
 		objs, err := identity.Desired(newCluster(), refs())
 		Expect(err).NotTo(HaveOccurred())

@@ -5,6 +5,7 @@ package identity
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -79,10 +80,11 @@ func Desired(c *apiv1.Cluster, refs clusterconfig.Refs) (Objects, error) {
 	}, nil
 }
 
-// rules has one read rule per kind that has names; an empty resourceNames would grant every name.
+// rules has one read rule per kind that has names; an empty resourceNames, or an empty name, would grant every name.
 func rules(refs clusterconfig.Refs) []rbacv1.PolicyRule {
 	var out []rbacv1.PolicyRule
 	add := func(group, resource string, names ...string) {
+		names = slices.DeleteFunc(slices.Clone(names), func(n string) bool { return n == "" })
 		if len(names) == 0 {
 			return
 		}
@@ -94,19 +96,11 @@ func rules(refs clusterconfig.Refs) []rbacv1.PolicyRule {
 		})
 	}
 
-	add(cnpgGroup, "clusters", nonEmpty(refs.Cluster)...)
-	add(metadata.PluginName, "telemetryexporters", nonEmpty(refs.Exporter)...)
+	add(cnpgGroup, "clusters", refs.Cluster)
+	add(metadata.PluginName, "telemetryexporters", refs.Exporter)
 	add(metadata.PluginName, "metricquerysets", refs.QuerySets...)
 	add("", "configmaps", refs.ConfigMaps...)
 	add("", "secrets", refs.Secrets...)
 
 	return out
-}
-
-func nonEmpty(name string) []string {
-	if name == "" {
-		return nil
-	}
-
-	return []string{name}
 }

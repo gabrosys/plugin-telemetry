@@ -101,6 +101,15 @@ var _ = Describe("AC1: the CRDs", Ordered, func() {
 		}(),
 	)
 
+	It("reports a rejected endpoint at spec.exporter.endpoint without its value", func(ctx SpecContext) {
+		raw, err := fs.ReadFile(os.DirFS(fixturesDir), "invalid/exporter-endpoint-user-info.yaml")
+		Expect(err).NotTo(HaveOccurred())
+
+		_, err = dryRun(ctx, ns, raw)
+		Expect(err).To(MatchError(ContainSubstring("spec.exporter.endpoint: ")))
+		Expect(err.Error()).NotTo(ContainSubstring("secret"))
+	}, SpecTimeout(time.Minute))
+
 	It("keeps metric_mapping: {} in a MetricQuerySet", func(ctx SpecContext) {
 		obj, err := dryRun(ctx, ns, readTestdata("metricqueryset-empty-mapping.yaml"))
 		Expect(err).NotTo(HaveOccurred())

@@ -29,7 +29,7 @@ spec:
         description: |-
           TelemetryExporter says where and how the plugin sidecar exports telemetry for the Clusters in its
           namespace. One TelemetryExporter can serve every Cluster in the namespace; a Cluster picks it with the
-          plugin parameter "exporter".
+          plugin parameter "exporter", and uses the one named default when the parameter is not set.
         properties:
           apiVersion:
             description: |-
@@ -49,7 +49,9 @@ spec:
           metadata:
             type: object
           spec:
-            description: Spec holds the exporter settings.
+            description: |-
+              Spec holds the exporter settings. It sets exporter.endpoint, or envFrom with an
+              OTEL_EXPORTER_OTLP_ENDPOINT key.
             properties:
               envFrom:
                 description: |-
@@ -95,10 +97,6 @@ spec:
                       appended for http/protobuf. It has a host, and no user info, query or fragment.
                     maxLength: 2048
                     type: string
-                    x-kubernetes-validations:
-                    - message: endpoint must be a base http(s) URL with a host, and
-                        no user info, query or fragment
-                      rule: self.matches(r'^https?://[^@/?#\s]+(/[^?#\s]*)?$')
                   headers:
                     description: Headers is a Secret key holding request headers in
                       the OTEL_EXPORTER_OTLP_HEADERS format.
@@ -123,8 +121,9 @@ spec:
                     - grpc
                     type: string
                   timeout:
-                    description: Timeout is the time one export attempt may take,
-                      such as 10s. At least 1s.
+                    description: |-
+                      Timeout is the time one export attempt may take, such as 10s. At least 1s, and at most half of
+                      spec.metrics.interval, which is 30s when not set.
                     maxLength: 32
                     type: string
                     x-kubernetes-validations:
@@ -197,6 +196,10 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-validations:
+                - fieldPath: .endpoint
+                  message: endpoint must be a base http(s) URL with a host, and no
+                    user info, query or fragment
+                  rule: '!has(self.endpoint) || self.endpoint.matches(r''^https?://[^@/?#\s]+(/[^?#\s]*)?$'')'
                 - message: tls requires an https:// endpoint
                   rule: '!has(self.tls) || !has(self.endpoint) || self.endpoint.startsWith(''https://'')'
               metrics:
@@ -216,7 +219,7 @@ spec:
                     properties:
                       databases:
                         description: Databases lists database names to skip. A name
-                          may end in *.
+                          may be a Go path.Match pattern.
                         items:
                           type: string
                         maxItems: 64
@@ -224,7 +227,7 @@ spec:
                         x-kubernetes-list-type: set
                       metrics:
                         description: Metrics lists metric names to drop. A name may
-                          end in *.
+                          be a Go path.Match pattern.
                         items:
                           type: string
                         maxItems: 64
@@ -232,7 +235,7 @@ spec:
                         x-kubernetes-list-type: set
                       queries:
                         description: Queries lists query names never planned, so their
-                          SQL never runs. A name may end in *.
+                          SQL never runs. A name may be a Go path.Match pattern.
                         items:
                           type: string
                         maxItems: 64
@@ -254,10 +257,11 @@ spec:
                             rule: duration(self) >= duration('1s')
                         name:
                           description: Name identifies the group.
+                          minLength: 1
                           type: string
                         queries:
-                          description: Queries lists query names. A name may end in
-                            * to match a prefix.
+                          description: Queries lists query names or Go path.Match
+                            patterns, such as pg_stat_*.
                           items:
                             type: string
                           maxItems: 64
@@ -397,6 +401,9 @@ spec:
                   rule: '!self.exists(l, l == ''cnpg.io/instanceRole'')'
             type: object
             x-kubernetes-validations:
+            - message: set exporter.endpoint or envFrom
+              rule: (has(self.envFrom) && (has(self.envFrom.configMap) || has(self.envFrom.secret)))
+                || (has(self.exporter) && has(self.exporter.endpoint))
             - message: exporter.timeout times 2 must not exceed metrics.interval
               rule: '!has(self.exporter) || !has(self.exporter.timeout) || !has(self.metrics)
                 || !has(self.metrics.interval) || duration(self.exporter.timeout).getMilliseconds()

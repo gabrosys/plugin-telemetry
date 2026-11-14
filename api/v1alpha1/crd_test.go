@@ -206,6 +206,13 @@ var _ = Describe("the generated CRDs", func() {
 		}(),
 	)
 
+	It("reports a rejected endpoint at spec.exporter.endpoint without its value", func() {
+		problems := loadCRD(exporterCRD).create(readFile("testdata/invalid", "exporter-endpoint-user-info.yaml"))
+
+		Expect(problems).To(ContainElement(HavePrefix("spec.exporter.endpoint: ")))
+		Expect(strings.Join(problems, "\n")).NotTo(ContainSubstring("secret"))
+	})
+
 	DescribeTable("accepts CNPG's default queries wrapped as a MetricQuerySet",
 		func(version string) {
 			var configMap struct {

@@ -4,7 +4,7 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 // TelemetryExporter says where and how the plugin sidecar exports telemetry for the Clusters in its
 // namespace. One TelemetryExporter can serve every Cluster in the namespace; a Cluster picks it with the
-// plugin parameter "exporter".
+// plugin parameter "exporter", and uses the one named default when the parameter is not set.
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=texp
@@ -14,7 +14,8 @@ type TelemetryExporter struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// Spec holds the exporter settings.
+	// Spec holds the exporter settings. It sets exporter.endpoint, or envFrom with an
+	// OTEL_EXPORTER_OTLP_ENDPOINT key.
 	Spec TelemetryExporterSpec `json:"spec"`
 }
 
@@ -29,6 +30,7 @@ type TelemetryExporterList struct {
 
 // TelemetryExporterSpec holds what every signal shares, then one section per signal.
 //
+// +kubebuilder:validation:XValidation:rule="(has(self.envFrom) && (has(self.envFrom.configMap) || has(self.envFrom.secret))) || (has(self.exporter) && has(self.exporter.endpoint))",message="set exporter.endpoint or envFrom"
 // +kubebuilder:validation:XValidation:rule="!has(self.exporter) || !has(self.exporter.timeout) || !has(self.metrics) || !has(self.metrics.interval) || duration(self.exporter.timeout).getMilliseconds() * 2 <= duration(self.metrics.interval).getMilliseconds()",message="exporter.timeout times 2 must not exceed metrics.interval"
 type TelemetryExporterSpec struct {
 	// Exporter is the OTLP connection every signal shares.
@@ -67,6 +69,7 @@ type TelemetryExporterSpec struct {
 
 // OTLPExporter is the OTLP connection every signal shares.
 //
+// +kubebuilder:validation:XValidation:rule=`!has(self.endpoint) || self.endpoint.matches(r'^https?://[^@/?#\s]+(/[^?#\s]*)?$')`,fieldPath=".endpoint",message="endpoint must be a base http(s) URL with a host, and no user info, query or fragment"
 // +kubebuilder:validation:XValidation:rule="!has(self.tls) || !has(self.endpoint) || self.endpoint.startsWith('https://')",message="tls requires an https:// endpoint"
 type OTLPExporter struct {
 	// Protocol is the OTLP transport: http/protobuf or grpc.
@@ -79,7 +82,6 @@ type OTLPExporter struct {
 	// appended for http/protobuf. It has a host, and no user info, query or fragment.
 	//
 	// +kubebuilder:validation:MaxLength=2048
-	// +kubebuilder:validation:XValidation:rule=`self.matches(r'^https?://[^@/?#\s]+(/[^?#\s]*)?$')`,message="endpoint must be a base http(s) URL with a host, and no user info, query or fragment"
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
 
@@ -89,7 +91,8 @@ type OTLPExporter struct {
 	// +optional
 	Compression string `json:"compression,omitempty"`
 
-	// Timeout is the time one export attempt may take, such as 10s. At least 1s.
+	// Timeout is the time one export attempt may take, such as 10s. At least 1s, and at most half of
+	// spec.metrics.interval, which is 30s when not set.
 	//
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MaxLength=32
@@ -253,6 +256,8 @@ type EnvFromSource struct {
 // QueryGroup runs a set of queries at its own interval.
 type QueryGroup struct {
 	// Name identifies the group.
+	//
+	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
 	// Interval is how often the group's queries run. At least 1s. The default is spec.metrics.defaultInterval.
@@ -263,7 +268,7 @@ type QueryGroup struct {
 	// +optional
 	Interval *metav1.Duration `json:"interval,omitempty"`
 
-	// Queries lists query names. A name may end in * to match a prefix.
+	// Queries lists query names or Go path.Match patterns, such as pg_stat_*.
 	//
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=64
@@ -333,21 +338,21 @@ type Limits struct {
 
 // Exclude removes queries, metrics and databases from collection.
 type Exclude struct {
-	// Queries lists query names never planned, so their SQL never runs. A name may end in *.
+	// Queries lists query names never planned, so their SQL never runs. A name may be a Go path.Match pattern.
 	//
 	// +kubebuilder:validation:MaxItems=64
 	// +listType=set
 	// +optional
 	Queries []string `json:"queries,omitempty"`
 
-	// Metrics lists metric names to drop. A name may end in *.
+	// Metrics lists metric names to drop. A name may be a Go path.Match pattern.
 	//
 	// +kubebuilder:validation:MaxItems=64
 	// +listType=set
 	// +optional
 	Metrics []string `json:"metrics,omitempty"`
 
-	// Databases lists database names to skip. A name may end in *.
+	// Databases lists database names to skip. A name may be a Go path.Match pattern.
 	//
 	// +kubebuilder:validation:MaxItems=64
 	// +listType=set

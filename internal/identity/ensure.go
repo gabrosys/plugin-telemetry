@@ -87,16 +87,23 @@ func (e *Ensurer) matches(ctx context.Context, s step) (bool, error) {
 	return s.same(), nil
 }
 
+// Members returns the cluster's four identity objects, keyed by namespace and name: the token Secret,
+// the RoleBinding, the Role and the ServiceAccount.
+func Members(namespace, cluster string) []client.Object {
+	account := metadata.ServiceAccountName(cluster)
+	meta := func(name string) metav1.ObjectMeta { return metav1.ObjectMeta{Namespace: namespace, Name: name} }
+
+	return []client.Object{
+		&corev1.Secret{ObjectMeta: meta(metadata.TokenSecretName(cluster))},
+		&rbacv1.RoleBinding{ObjectMeta: meta(account)},
+		&rbacv1.Role{ObjectMeta: meta(account)},
+		&corev1.ServiceAccount{ObjectMeta: meta(account)},
+	}
+}
+
 // Remove deletes the four objects; NotFound counts as done.
 func (e *Ensurer) Remove(ctx context.Context, namespace, cluster string) error {
-	account := metadata.ServiceAccountName(cluster)
-	token := metadata.TokenSecretName(cluster)
-	for _, obj := range []client.Object{
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: token}},
-		&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: account}},
-		&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: account}},
-		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: account}},
-	} {
+	for _, obj := range Members(namespace, cluster) {
 		if err := e.Writer.Delete(ctx, obj); client.IgnoreNotFound(err) != nil {
 			return fmt.Errorf("delete %T %s/%s: %w", obj, namespace, obj.GetName(), err)
 		}
@@ -105,23 +112,32 @@ func (e *Ensurer) Remove(ctx context.Context, namespace, cluster string) error {
 	return nil
 }
 
-// Ready reports from the cache whether the four objects exist and the token Secret has data.token.
-func (e *Ensurer) Ready(ctx context.Context, namespace, cluster string) (bool, error) {
-	account := metadata.ServiceAccountName(cluster)
-	for _, obj := range []client.Object{&corev1.ServiceAccount{}, &rbacv1.Role{}, &rbacv1.RoleBinding{}} {
-		found, err := e.exists(ctx, client.ObjectKey{Namespace: namespace, Name: account}, obj)
-		if err != nil || !found {
-			return false, err
+// Present reports from the cache whether any of the four objects exists.
+func (e *Ensurer) Present(ctx context.Context, namespace, cluster string) (bool, error) {
+	for _, obj := range Members(namespace, cluster) {
+		found, err := e.exists(ctx, client.ObjectKeyFromObject(obj), obj)
+		if err != nil || found {
+			return found, err
 		}
 	}
 
-	var token corev1.Secret
-	found, err := e.exists(ctx, client.ObjectKey{Namespace: namespace, Name: metadata.TokenSecretName(cluster)}, &token)
-	if err != nil || !found {
-		return false, err
+	return false, nil
+}
+
+// Ready reports from the cache whether the four objects exist and the token Secret has data.token.
+func (e *Ensurer) Ready(ctx context.Context, namespace, cluster string) (bool, error) {
+	var token *corev1.Secret
+	for _, obj := range Members(namespace, cluster) {
+		found, err := e.exists(ctx, client.ObjectKeyFromObject(obj), obj)
+		if err != nil || !found {
+			return false, err
+		}
+		if secret, ok := obj.(*corev1.Secret); ok {
+			token = secret
+		}
 	}
 
-	return len(token.Data[corev1.ServiceAccountTokenKey]) > 0, nil
+	return token != nil && len(token.Data[corev1.ServiceAccountTokenKey]) > 0, nil
 }
 
 func (e *Ensurer) exists(ctx context.Context, key client.ObjectKey, obj client.Object) (bool, error) {

@@ -20,7 +20,6 @@ import (
 	"github.com/gabrosys/plugin-telemetry/api/v1alpha1"
 	"github.com/gabrosys/plugin-telemetry/internal/clusterconfig"
 	"github.com/gabrosys/plugin-telemetry/internal/identity"
-	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/podpatch"
 )
 
@@ -74,9 +73,12 @@ func (c *IdentityController) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 // remove deletes the identity when the cache still holds any of its objects.
 func (c *IdentityController) remove(ctx context.Context, logger log.Logger, cluster *apiv1.Cluster) error {
-	present, err := c.hasIdentity(ctx, cluster)
-	if err != nil || !present {
-		return err
+	present, err := c.Identity.Present(ctx, cluster.Namespace, cluster.Name)
+	if err != nil {
+		return fmt.Errorf("check identity of %s/%s: %w", cluster.Namespace, cluster.Name, err)
+	}
+	if !present {
+		return nil
 	}
 
 	if err := c.Identity.Remove(ctx, cluster.Namespace, cluster.Name); err != nil {
@@ -85,29 +87,6 @@ func (c *IdentityController) remove(ctx context.Context, logger log.Logger, clus
 	logger.Info("identity controller", "outcome", "removed")
 
 	return nil
-}
-
-func (c *IdentityController) hasIdentity(ctx context.Context, cluster *apiv1.Cluster) (bool, error) {
-	account, token := metadata.ServiceAccountName(cluster.Name), metadata.TokenSecretName(cluster.Name)
-	for _, probe := range []struct {
-		name string
-		obj  client.Object
-	}{
-		{account, &corev1.ServiceAccount{}},
-		{account, &rbacv1.Role{}},
-		{account, &rbacv1.RoleBinding{}},
-		{token, &corev1.Secret{}},
-	} {
-		err := c.Identity.Reader.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: probe.name}, probe.obj)
-		if err == nil {
-			return true, nil
-		}
-		if !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("get %T %s/%s: %w", probe.obj, cluster.Namespace, probe.name, err)
-		}
-	}
-
-	return false, nil
 }
 
 // SetupWithManager registers the controller with mgr.

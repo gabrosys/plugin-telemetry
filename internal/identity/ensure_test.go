@@ -142,6 +142,29 @@ var _ = Describe("Ensurer", func() {
 		Expect(res.Ready).To(BeTrue())
 	})
 
+	It("reports Present when none, some or all of the four objects are cached", func() {
+		present := func() bool {
+			GinkgoHelper()
+			got, err := ensurer.Present(ctx, "ns", "pg")
+			Expect(err).NotTo(HaveOccurred())
+
+			return got
+		}
+		Expect(present()).To(BeFalse())
+
+		_, err := ensurer.Ensure(ctx, newCluster(), refs())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(present()).To(BeTrue())
+
+		for _, obj := range identity.Members("ns", "pg")[:3] {
+			Expect(c.Delete(ctx, obj)).To(Succeed())
+		}
+		Expect(present()).To(BeTrue())
+
+		Expect(c.Delete(ctx, identity.Members("ns", "pg")[3])).To(Succeed())
+		Expect(present()).To(BeFalse())
+	})
+
 	It("sends the token Secret apply with only type, name annotation, labels and owner reference", func() {
 		_, err := ensurer.Ensure(ctx, newCluster(), refs())
 		Expect(err).NotTo(HaveOccurred())

@@ -10,7 +10,6 @@ import (
 	"github.com/cloudnative-pg/cnpg-i/pkg/reconciler"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,7 +22,6 @@ import (
 
 	"github.com/gabrosys/plugin-telemetry/api/v1alpha1"
 	"github.com/gabrosys/plugin-telemetry/internal/identity"
-	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
 )
 
@@ -73,16 +71,9 @@ func hookRequest(c *apiv1.Cluster) *reconciler.ReconcilerHooksRequest {
 func identityExists(ctx context.Context, c client.Reader, cluster string) [4]bool {
 	GinkgoHelper()
 
-	key := func(name string) client.ObjectKey { return client.ObjectKey{Namespace: "ns", Name: name} }
-	account, token := metadata.ServiceAccountName(cluster), metadata.TokenSecretName(cluster)
 	var found [4]bool
-	for i, probe := range []struct {
-		name string
-		obj  client.Object
-	}{
-		{account, &corev1.ServiceAccount{}}, {account, &rbacv1.Role{}}, {account, &rbacv1.RoleBinding{}}, {token, &corev1.Secret{}},
-	} {
-		err := c.Get(ctx, key(probe.name), probe.obj)
+	for i, obj := range identity.Members("ns", cluster) {
+		err := c.Get(ctx, client.ObjectKeyFromObject(obj), obj)
 		if err != nil {
 			Expect(apierrors.IsNotFound(err)).To(BeTrue(), err.Error())
 		}

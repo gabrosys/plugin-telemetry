@@ -83,6 +83,17 @@ func PasswordCluster(namespace, name, image, role, passwordSecret string) *apiv1
 	return cluster
 }
 
+// WithExporter sets the plugin's exporter parameter, the TelemetryExporter the Cluster uses.
+func WithExporter(cluster *apiv1.Cluster, exporter string) *apiv1.Cluster {
+	plugin := &cluster.Spec.Plugins[0]
+	if plugin.Parameters == nil {
+		plugin.Parameters = map[string]string{}
+	}
+	plugin.Parameters["exporter"] = exporter
+
+	return cluster
+}
+
 // SidecarImage returns the image held by the telemetry-sidecar-image ConfigMap.
 func SidecarImage(ctx context.Context, c client.Client) (string, error) {
 	var cm corev1.ConfigMap

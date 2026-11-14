@@ -1,0 +1,13 @@
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: MetricQuerySet
+metadata:
+  name: empty-mapping
+spec:
+  queries:
+    e2e_mapped:
+      query: SELECT 'a' AS state
+      metrics:
+      - state:
+          usage: MAPPEDMETRIC
+          description: A state
+          metric_mapping: {}

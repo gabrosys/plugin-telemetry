@@ -1,0 +1,12 @@
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: MetricQuerySet
+metadata:
+  name: extra-queries
+spec:
+  queries:
+    e2e_set:
+      query: SELECT 5 AS five
+      metrics:
+      - five:
+          usage: GAUGE
+          description: Always 5

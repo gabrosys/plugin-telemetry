@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-queries
+data:
+  queries: |
+    e2e_base:
+      query: "SELECT 1 AS one"
+      metrics:
+        - one:
+            usage: GAUGE
+            description: Always 1
+    e2e_primary:
+      query: "SELECT 1 AS one"
+      primary: true
+      metrics:
+        - one:
+            usage: GAUGE
+            description: Always 1, on the primary only
+    e2e_edited:
+      query: "SELECT 2 AS two"
+      metrics:
+        - two:
+            usage: GAUGE
+            description: Always 2

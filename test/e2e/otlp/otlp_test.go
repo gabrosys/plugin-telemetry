@@ -63,6 +63,27 @@ var _ = Describe("readers", func() {
 		Expect(otlp.Since(lines, time.Unix(3, 0))).To(HaveLen(1))
 	})
 
+	It("returns the points of a metric with the resource they came in", func() {
+		Expect(otlp.ResourcePoints(lines, "calls_total")).To(Equal([]otlp.ResourcePoint{{
+			Resource: map[string]string{"service.name": "plugin-telemetry"},
+			Point: otlp.Point{
+				Time: time.Unix(2, 0), Attrs: map[string]string{"hook": "EVALUATE"}, Value: 3,
+			},
+		}}))
+		Expect(otlp.ResourcePoints(lines, "missing")).To(BeEmpty())
+	})
+
+	It("returns one export per resource with its series, named by metric and attributes", func() {
+		Expect(otlp.Exports(lines)).To(Equal([]otlp.Export{
+			{
+				Resource: map[string]string{"service.name": "plugin-telemetry"},
+				Time:     time.Unix(2, 0),
+				Series:   []string{`calls_total{hook="EVALUATE"}`},
+			},
+			{Resource: map[string]string{}, Time: time.Unix(3, 0), Series: []string{"up{}"}},
+		}))
+	})
+
 	It("returns resources, scopes and shapes", func() {
 		Expect(otlp.Resources(lines)).To(Equal([]map[string]string{{"service.name": "plugin-telemetry"}, {}}))
 		Expect(otlp.Scopes(lines)).To(Equal([]otlp.Scope{{Name: "scope-a", Version: "1"}, {Name: "scope-b"}}))

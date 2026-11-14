@@ -9,6 +9,7 @@ import (
 	"maps"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -102,6 +103,94 @@ func Points(lines []Line, name string) []Point {
 			out = append(out, Point{Time: unixNano(dp.GetTimeUnixNano()), Attrs: Attributes(dp.GetAttributes()), Value: value(dp)})
 		}
 	})
+	return out
+}
+
+// ResourcePoint is a Point and the attributes of the resource that reported it.
+type ResourcePoint struct {
+	Resource map[string]string
+	Point
+}
+
+// ResourcePoints returns the number data points of the metric called name with their resource, in file order.
+func ResourcePoints(lines []Line, name string) []ResourcePoint {
+	var out []ResourcePoint
+	for _, l := range lines {
+		for _, rm := range l.Request.GetResourceMetrics() {
+			resource := Attributes(rm.GetResource().GetAttributes())
+			for _, sm := range rm.GetScopeMetrics() {
+				for _, m := range sm.GetMetrics() {
+					if m.GetName() != name {
+						continue
+					}
+					dps := append(slices.Clone(m.GetGauge().GetDataPoints()), m.GetSum().GetDataPoints()...)
+					for _, dp := range dps {
+						out = append(out, ResourcePoint{
+							Resource: resource,
+							Point:    Point{Time: unixNano(dp.GetTimeUnixNano()), Attrs: Attributes(dp.GetAttributes()), Value: value(dp)},
+						})
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// Export is the part of a request that one resource sent: its resource, the time of the request, and
+// its series as `name{key="value",...}`, attributes sorted by key, in file order.
+type Export struct {
+	Resource map[string]string
+	Time     time.Time
+	Series   []string
+}
+
+// Exports returns one Export per ResourceMetrics of every line, in file order.
+func Exports(lines []Line) []Export {
+	var out []Export
+	for _, l := range lines {
+		for _, rm := range l.Request.GetResourceMetrics() {
+			e := Export{Resource: Attributes(rm.GetResource().GetAttributes()), Time: l.Time}
+			for _, sm := range rm.GetScopeMetrics() {
+				for _, m := range sm.GetMetrics() {
+					for _, attrs := range pointAttributes(m) {
+						e.Series = append(e.Series, seriesKey(m.GetName(), attrs))
+					}
+				}
+			}
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func seriesKey(name string, attrs map[string]string) string {
+	keys := slices.Sorted(maps.Keys(attrs))
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+strconv.Quote(attrs[k]))
+	}
+	return name + "{" + strings.Join(parts, ",") + "}"
+}
+
+func pointAttributes(m *metricpb.Metric) []map[string]string {
+	var out []map[string]string
+	add := func(kvs []*commonpb.KeyValue) { out = append(out, Attributes(kvs)) }
+	for _, dp := range m.GetGauge().GetDataPoints() {
+		add(dp.GetAttributes())
+	}
+	for _, dp := range m.GetSum().GetDataPoints() {
+		add(dp.GetAttributes())
+	}
+	for _, dp := range m.GetHistogram().GetDataPoints() {
+		add(dp.GetAttributes())
+	}
+	for _, dp := range m.GetExponentialHistogram().GetDataPoints() {
+		add(dp.GetAttributes())
+	}
+	for _, dp := range m.GetSummary().GetDataPoints() {
+		add(dp.GetAttributes())
+	}
 	return out
 }
 

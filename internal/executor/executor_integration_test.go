@@ -11,11 +11,14 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/go-logr/logr/funcr"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"go.yaml.in/yaml/v4"
 	clocktesting "k8s.io/utils/clock/testing"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/gabrosys/plugin-telemetry/internal/executor"
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
@@ -276,6 +279,33 @@ var _ = Describe("Executor", func() {
 			again := capExec.Run(ctx, pid)
 			Expect(again.Err).NotTo(HaveOccurred())
 			Expect(again.Samples).To(HaveLen(1))
+			Expect(again.Samples[0].Value).To(Equal(first.Samples[0].Value), "the connection is kept")
+		})
+
+		It("logs a failed cancel request and replaces the connection", func(ctx SpecContext) {
+			var out []string
+			logger := funcr.New(func(_, args string) { out = append(out, args) }, funcr.Options{Verbosity: 1})
+			logCtx := ctrllog.IntoContext(ctx, logger)
+
+			l.MaxRowsPerQuery = 3
+			capExec := newExecutor(pool, l)
+			capExec.SetCancel(func(ctx context.Context, conn *pgx.Conn) error {
+				done, cancel := context.WithCancel(ctx)
+				cancel()
+				return conn.PgConn().CancelRequest(done)
+			})
+			pid := jobFor("SELECT 'a' AS datname, pg_backend_pid() AS value")
+			first := capExec.Run(logCtx, pid)
+			Expect(first.Err).NotTo(HaveOccurred())
+
+			res := capExec.Run(logCtx, jobFor("SELECT 'x' || g AS datname, 1 AS value FROM generate_series(1, 10) g"))
+			Expect(res.Err).NotTo(HaveOccurred())
+			Expect(res.Outcome).To(Equal(selfmetrics.OutcomeCapped))
+			Expect(out).To(ContainElement(And(ContainSubstring("cancel"), ContainSubstring(`"query"="probe"`), ContainSubstring(`"database"="postgres"`))))
+
+			again := capExec.Run(logCtx, pid)
+			Expect(again.Err).NotTo(HaveOccurred())
+			Expect(again.Samples[0].Value).NotTo(Equal(first.Samples[0].Value), "the connection was replaced")
 		})
 
 		It("keeps a run at the caps", func(ctx SpecContext) {

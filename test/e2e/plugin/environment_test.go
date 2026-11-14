@@ -101,6 +101,12 @@ var _ = Describe("the plugin environment", Ordered, func() {
 				}
 			}
 			g.Expect(plugin).NotTo(BeEmpty(), "no resource with service.name=%s", pluginServiceName)
+			pods, err := framework.PluginPods(ctx, c)
+			g.Expect(err).NotTo(HaveOccurred())
+			for _, r := range plugin {
+				g.Expect(r).To(HaveKeyWithValue("k8s.pod.name", Not(BeEmpty())))
+			}
+			g.Expect(plugin).To(ContainElement(HaveKeyWithValue("k8s.pod.name", BeElementOf(pods))))
 			g.Expect(otlp.Points(lines, hookCallsMetric)).NotTo(BeEmpty())
 		}).WithContext(ctx).WithTimeout(environmentTimeout).WithPolling(environmentPollInterval).Should(Succeed())
 	})

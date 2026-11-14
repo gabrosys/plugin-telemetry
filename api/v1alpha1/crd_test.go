@@ -249,6 +249,25 @@ var _ = Describe("the generated CRDs", func() {
 		Expect(specOf(marshalled)).To(Equal(specOf(original)))
 	})
 
+	It("round-trips a query set that spells the mapping metrics_mapping", func() {
+		var object struct {
+			Spec struct {
+				Queries map[string]any `json:"queries"`
+			} `json:"spec"`
+		}
+		Expect(yaml.Unmarshal(readFile("testdata", "valid/query-set-metrics-mapping.yaml"), &object)).To(Succeed())
+		original, err := yaml.Marshal(object.Spec.Queries)
+		Expect(err).NotTo(HaveOccurred())
+
+		var typed map[string]v1alpha1.Query
+		Expect(yaml.UnmarshalStrict(original, &typed)).To(Succeed())
+		roundTripped, err := json.Marshal(typed)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(definitions(roundTripped)).To(Equal(definitions(original)))
+		Expect(definitions(original)[0].Columns["state"].Mapping).NotTo(BeEmpty())
+	})
+
 	It("registers its kinds in a scheme", func() {
 		scheme := runtime.NewScheme()
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())

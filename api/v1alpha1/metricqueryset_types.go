@@ -117,6 +117,13 @@ type ColumnSpec struct {
 	// +optional
 	MetricMapping map[string]float64 `json:"metric_mapping,omitempty"`
 
+	// MetricsMapping is MetricMapping under the other spelling, the one CloudNativePG's documentation
+	// uses. MetricMapping wins when both are set.
+	//
+	// +kubebuilder:validation:MaxProperties=256
+	// +optional
+	MetricsMapping map[string]float64 `json:"metrics_mapping,omitempty"`
+
 	// Name replaces the column name in the metric name.
 	//
 	// +optional

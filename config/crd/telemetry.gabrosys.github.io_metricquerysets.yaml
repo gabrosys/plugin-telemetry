@@ -82,6 +82,14 @@ spec:
                                 MAPPEDMETRIC column to numbers.
                               maxProperties: 256
                               type: object
+                            metrics_mapping:
+                              additionalProperties:
+                                type: number
+                              description: |-
+                                MetricsMapping is MetricMapping under the other spelling, the one CloudNativePG's documentation
+                                uses. MetricMapping wins when both are set.
+                              maxProperties: 256
+                              type: object
                             name:
                               description: Name replaces the column name in the metric
                                 name.

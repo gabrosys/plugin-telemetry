@@ -16,7 +16,7 @@ var (
 )
 
 // histogramFrom builds a histogram as CNPG's histogram.NewFromRawData does (pkg/management/postgres/metrics/histogram/histogram.go:46-105
-// at v1.30.1). The arrays arrive as text and are parsed with pgtype in place of pq.Array.
+// at v1.30.1). The arrays arrive as text and are parsed with pgtype.
 func histogramFrom(name string, byName map[string]any) (*Histogram, error) {
 	rawBounds, ok := byName[name]
 	if !ok {
@@ -64,7 +64,7 @@ func histogramFrom(name string, byName map[string]any) (*Histogram, error) {
 		return nil, fmt.Errorf("%s_bucket: %w", name, errHistogramPart)
 	}
 
-	// A bound without a count is ignored; a repeated bound keeps the last count, as CNPG's map does.
+	// A bound without a count is ignored; a repeated bound keeps the last count.
 	buckets := make(map[float64]uint64, len(bounds))
 	for i, bound := range bounds {
 		if i >= len(counts) {

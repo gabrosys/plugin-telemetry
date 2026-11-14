@@ -100,7 +100,7 @@ func ConnConfig(c Config, database string) (*pgx.ConnConfig, error) {
 	return cc, nil
 }
 
-// dsn builds a keyword/value connection string. Empty values are written as ” so that
+// dsn builds a keyword/value connection string. Empty values are written as a quoted empty string so that
 // they cannot swallow the next pair and so that no default from $HOME applies.
 func dsn(c Config, database, password string) string {
 	timeout := c.ConnectTimeout

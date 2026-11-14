@@ -12,6 +12,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	metav1ac "k8s.io/client-go/applyconfigurations/meta/v1"
 	rbacv1ac "k8s.io/client-go/applyconfigurations/rbac/v1"
@@ -24,6 +25,7 @@ import (
 // Ensurer applies and removes the identity objects.
 type Ensurer struct {
 	Reader client.Reader // the label-limited cache
+	Live   client.Reader // the API server, for the checks that must see objects the cache doesn't hold
 	Writer client.Client
 }
 
@@ -31,6 +33,8 @@ type Ensurer struct {
 type Result struct {
 	// Applied lists the objects applied, as Kind/name.
 	Applied []string
+	// Refused lists, as Kind/name, the objects that exist and are not the plugin's; nothing is applied then.
+	Refused []string
 	// Ready is true when all four objects are cached and the token has data.token.
 	Ready bool
 }
@@ -44,22 +48,40 @@ type step struct {
 }
 
 // Ensure applies, in order ServiceAccount, Role, RoleBinding and token Secret, each object that differs
-// from the cache, by server-side apply with FieldOwner and ForceOwnership.
+// from the cache, by server-side apply with FieldOwner and ForceOwnership. It first reads each of them
+// from the API server and applies nothing when one exists and is not the plugin's.
 func (e *Ensurer) Ensure(ctx context.Context, c *apiv1.Cluster, refs clusterconfig.Refs) (Result, error) {
 	want, err := Desired(c, refs)
 	if err != nil {
 		return Result{}, err
 	}
 
-	var res Result
+	var pending []step
 	for _, s := range steps(want) {
 		current, err := e.matches(ctx, s)
 		if err != nil {
-			return res, err
+			return Result{}, err
 		}
-		if current {
-			continue
+		if !current {
+			pending = append(pending, s)
 		}
+	}
+
+	var res Result
+	for _, s := range pending {
+		foreign, err := e.foreign(ctx, s.live, c.Name)
+		if err != nil {
+			return Result{}, err
+		}
+		if foreign {
+			res.Refused = append(res.Refused, s.label)
+		}
+	}
+	if len(res.Refused) > 0 {
+		return res, nil
+	}
+
+	for _, s := range pending {
 		if err := e.Writer.Apply(ctx, s.apply, client.FieldOwner(FieldOwner), client.ForceOwnership); err != nil {
 			return res, fmt.Errorf("apply %s in %s: %w", s.label, c.Namespace, err)
 		}
@@ -101,21 +123,242 @@ func Members(namespace, cluster string) []client.Object {
 	}
 }
 
-// Remove deletes the four objects; NotFound counts as done.
+// Remove deletes those of the four objects the cache holds and the plugin manages; NotFound counts as done.
 func (e *Ensurer) Remove(ctx context.Context, namespace, cluster string) error {
 	for _, obj := range Members(namespace, cluster) {
-		if err := e.Writer.Delete(ctx, obj); client.IgnoreNotFound(err) != nil {
-			return fmt.Errorf("delete %T %s/%s: %w", obj, namespace, obj.GetName(), err)
+		found, err := get(ctx, e.Reader, obj)
+		if err != nil {
+			return err
+		}
+		if !found || !managed(obj, cluster) {
+			continue
+		}
+		if err := e.deleteExact(ctx, obj); err != nil {
+			return err
 		}
 	}
 
 	return nil
 }
 
+// Foreign lists, as Kind/name, the four objects that exist in the API server and are not the plugin's.
+func (e *Ensurer) Foreign(ctx context.Context, c *apiv1.Cluster) ([]string, error) {
+	var out []string
+	for _, obj := range Members(c.Namespace, c.Name) {
+		foreign, err := e.foreign(ctx, obj, c.Name)
+		if err != nil {
+			return nil, err
+		}
+		if foreign {
+			out = append(out, label(obj))
+		}
+	}
+
+	return out, nil
+}
+
+// BackOff gives up c's identity to colliding, whose own objects CloudNativePG gives the same names. It
+// deletes the token Secret. Of the ServiceAccount, Role and RoleBinding, it removes c's owner reference
+// from those CloudNativePG uses for colliding, and the plugin's labels from the ServiceAccount, and deletes
+// the others. It writes nothing to an object the plugin doesn't manage beyond removing c's owner reference,
+// and returns what it changed, as Kind/name.
+func (e *Ensurer) BackOff(ctx context.Context, c, colliding *apiv1.Cluster) ([]string, error) {
+	pending, err := e.backOffPending(ctx, c)
+	if err != nil || !pending {
+		return nil, err
+	}
+
+	account := metadata.ServiceAccountName(c.Name)
+	// CloudNativePG v1.30.1 api/v1/cluster_funcs.go:1631-1636: the account is spec.serviceAccountName, else the Cluster's name.
+	sharesAccount := colliding.Spec.ServiceAccountName == "" || colliding.Spec.ServiceAccountName == account
+
+	var changed []string
+	for _, obj := range Members(c.Namespace, c.Name) {
+		found, err := get(ctx, e.Live, obj)
+		if err != nil {
+			return changed, err
+		}
+		if !found {
+			continue
+		}
+
+		var done bool
+		switch obj.(type) {
+		case *corev1.Secret:
+			done, err = e.deleteIfManaged(ctx, obj, c.Name)
+		case *rbacv1.Role:
+			done, err = e.disown(ctx, obj, c.Name, false)
+		case *rbacv1.RoleBinding, *corev1.ServiceAccount:
+			if sharesAccount {
+				_, isAccount := obj.(*corev1.ServiceAccount)
+				done, err = e.disown(ctx, obj, c.Name, isAccount)
+			} else {
+				done, err = e.deleteIfManaged(ctx, obj, c.Name)
+			}
+		}
+		if err != nil {
+			return changed, err
+		}
+		if done {
+			changed = append(changed, label(obj))
+		}
+	}
+
+	return changed, nil
+}
+
+// backOffPending reports from the cache whether the token Secret, or an object owned by c, remains.
+func (e *Ensurer) backOffPending(ctx context.Context, c *apiv1.Cluster) (bool, error) {
+	for _, obj := range Members(c.Namespace, c.Name) {
+		found, err := get(ctx, e.Reader, obj)
+		if err != nil {
+			return false, err
+		}
+		if !found {
+			continue
+		}
+		if _, token := obj.(*corev1.Secret); token || slices.ContainsFunc(obj.GetOwnerReferences(), ownedBy(c.Name)) {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+// deleteIfManaged deletes obj, as read, when the plugin manages it.
+func (e *Ensurer) deleteIfManaged(ctx context.Context, obj client.Object, cluster string) (bool, error) {
+	if !managed(obj, cluster) {
+		return false, nil
+	}
+
+	return true, e.deleteExact(ctx, obj)
+}
+
+// disown removes, from obj as read, the owner references to the Cluster and, when labels is true, the
+// plugin's labels. A Role or RoleBinding keeps the labels: once it holds rules the plugin lacks, the RBAC
+// escalation check refuses any update that is not to ownerReferences or finalizers.
+func (e *Ensurer) disown(ctx context.Context, obj client.Object, cluster string, labels bool) (bool, error) {
+	orig, ok := obj.DeepCopyObject().(client.Object)
+	if !ok {
+		return false, fmt.Errorf("copy %s: %w", label(obj), errNotObject)
+	}
+
+	refs := slices.DeleteFunc(slices.Clone(obj.GetOwnerReferences()), ownedBy(cluster))
+	changed := len(refs) != len(obj.GetOwnerReferences())
+	obj.SetOwnerReferences(refs)
+	if labels {
+		l := obj.GetLabels()
+		if l[ManagedByLabel] == ManagedBy {
+			delete(l, ManagedByLabel)
+			changed = true
+		}
+		if l[ClusterLabel] == cluster {
+			delete(l, ClusterLabel)
+			changed = true
+		}
+		obj.SetLabels(l)
+	}
+	if !changed {
+		return false, nil
+	}
+
+	patch := client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{})
+	if err := e.Writer.Patch(ctx, obj, patch, client.FieldOwner(FieldOwner)); err != nil {
+		return false, fmt.Errorf("disown %s in %s: %w", label(obj), obj.GetNamespace(), err)
+	}
+
+	return true, nil
+}
+
+// deleteExact deletes obj only while it has the UID and resourceVersion it was read with.
+func (e *Ensurer) deleteExact(ctx context.Context, obj client.Object) error {
+	uid, version := obj.GetUID(), obj.GetResourceVersion()
+	err := e.Writer.Delete(ctx, obj, client.Preconditions{UID: &uid, ResourceVersion: &version})
+	if client.IgnoreNotFound(err) != nil {
+		return fmt.Errorf("delete %s in %s: %w", label(obj), obj.GetNamespace(), err)
+	}
+
+	return nil
+}
+
+// foreign reads key's object from the API server and reports whether it exists and is not the plugin's.
+func (e *Ensurer) foreign(ctx context.Context, key client.Object, cluster string) (bool, error) {
+	obj := blank(key)
+	found, err := get(ctx, e.Live, obj)
+	if err != nil || !found {
+		return false, err
+	}
+
+	return !managed(obj, cluster), nil
+}
+
+// blank returns an empty object of key's kind with key's namespace and name, so that a read leaves no
+// field of an earlier one.
+func blank(key client.Object) client.Object {
+	meta := metav1.ObjectMeta{Namespace: key.GetNamespace(), Name: key.GetName()}
+	switch key.(type) {
+	case *corev1.ServiceAccount:
+		return &corev1.ServiceAccount{ObjectMeta: meta}
+	case *rbacv1.Role:
+		return &rbacv1.Role{ObjectMeta: meta}
+	case *rbacv1.RoleBinding:
+		return &rbacv1.RoleBinding{ObjectMeta: meta}
+	default:
+		return &corev1.Secret{ObjectMeta: meta}
+	}
+}
+
+// managed reports whether obj carries the managed-by label and no controller other than the Cluster.
+// An earlier Cluster of the same name counts as the Cluster.
+func managed(obj client.Object, cluster string) bool {
+	if obj.GetLabels()[ManagedByLabel] != ManagedBy {
+		return false
+	}
+	ref := metav1.GetControllerOfNoCopy(obj)
+
+	return ref == nil || ownedBy(cluster)(*ref)
+}
+
+// ownedBy matches the owner references to the Cluster called cluster.
+func ownedBy(cluster string) func(metav1.OwnerReference) bool {
+	return func(ref metav1.OwnerReference) bool {
+		gv, err := schema.ParseGroupVersion(ref.APIVersion)
+
+		return err == nil && gv.Group == cnpgGroup && ref.Kind == apiv1.ClusterKind && ref.Name == cluster
+	}
+}
+
+func get(ctx context.Context, r client.Reader, obj client.Object) (bool, error) {
+	err := r.Get(ctx, client.ObjectKeyFromObject(obj), obj)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get %s in %s: %w", label(obj), obj.GetNamespace(), err)
+	}
+
+	return true, nil
+}
+
+// label returns Kind/name for one of the four identity objects.
+func label(obj client.Object) string {
+	kind := "Secret"
+	switch obj.(type) {
+	case *corev1.ServiceAccount:
+		kind = "ServiceAccount"
+	case *rbacv1.Role:
+		kind = "Role"
+	case *rbacv1.RoleBinding:
+		kind = "RoleBinding"
+	}
+
+	return kind + "/" + obj.GetName()
+}
+
 // Present reports from the cache whether any of the four objects exists.
 func (e *Ensurer) Present(ctx context.Context, namespace, cluster string) (bool, error) {
 	for _, obj := range Members(namespace, cluster) {
-		found, err := e.exists(ctx, client.ObjectKeyFromObject(obj), obj)
+		found, err := get(ctx, e.Reader, obj)
 		if err != nil || found {
 			return found, err
 		}
@@ -128,7 +371,7 @@ func (e *Ensurer) Present(ctx context.Context, namespace, cluster string) (bool,
 func (e *Ensurer) Ready(ctx context.Context, namespace, cluster string) (bool, error) {
 	var token *corev1.Secret
 	for _, obj := range Members(namespace, cluster) {
-		found, err := e.exists(ctx, client.ObjectKeyFromObject(obj), obj)
+		found, err := get(ctx, e.Reader, obj)
 		if err != nil || !found {
 			return false, err
 		}
@@ -138,18 +381,6 @@ func (e *Ensurer) Ready(ctx context.Context, namespace, cluster string) (bool, e
 	}
 
 	return token != nil && len(token.Data[corev1.ServiceAccountTokenKey]) > 0, nil
-}
-
-func (e *Ensurer) exists(ctx context.Context, key client.ObjectKey, obj client.Object) (bool, error) {
-	err := e.Reader.Get(ctx, key, obj)
-	if apierrors.IsNotFound(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("get %T %s: %w", obj, key, err)
-	}
-
-	return true, nil
 }
 
 func steps(w Objects) []step {

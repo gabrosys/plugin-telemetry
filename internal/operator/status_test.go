@@ -10,10 +10,13 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/gabrosys/plugin-telemetry/api/v1alpha1"
+	"github.com/gabrosys/plugin-telemetry/internal/clusterconfig"
 	"github.com/gabrosys/plugin-telemetry/internal/identity"
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
@@ -38,22 +41,22 @@ var _ = Describe("Status.SetStatusInCluster", func() {
 		cluster *apiv1.Cluster
 	)
 
-	// identityObjects returns the four identity objects, the token Secret with or without data.
+	// identityObjects returns the four identity objects as the plugin applies them, the token Secret with or
+	// without data.
 	identityObjects := func(token bool) []client.Object {
-		members := identity.Members("ns", "pg")
+		want, err := identity.Desired(newCluster("ns", "pg"), clusterconfig.Refs{Cluster: "pg"})
+		Expect(err).NotTo(HaveOccurred())
 		if token {
-			secret, ok := members[0].(*corev1.Secret)
-			Expect(ok).To(BeTrue())
-			secret.Data = map[string][]byte{corev1.ServiceAccountTokenKey: []byte("t")}
+			want.Token.Data = map[string][]byte{corev1.ServiceAccountTokenKey: []byte("t")}
 		}
 
-		return members
+		return []client.Object{want.Token, want.RoleBinding, want.Role, want.ServiceAccount}
 	}
 
 	status := func() *operator.Status {
 		c := newClient(objs, funcs)
 
-		return &operator.Status{Reader: c, Identity: &identity.Ensurer{Reader: c, Writer: c}}
+		return &operator.Status{Reader: c, Identity: &identity.Ensurer{Reader: c, Live: c, Writer: c}}
 	}
 
 	call := func(s *operator.Status, c *apiv1.Cluster) []byte {
@@ -124,6 +127,31 @@ var _ = Describe("Status.SetStatusInCluster", func() {
 
 		objs = []client.Object{newExporterWithEndpoint()}
 		Expect(decode(call(status(), cluster)).Identity).To(Equal("pending"))
+	})
+
+	It("reports identity pending with the Cluster that has the identity's name", func() {
+		objs = append(objs, newCluster("ns", "pg-telemetry"))
+
+		st := decode(call(status(), cluster))
+
+		Expect(st.Identity).To(Equal("pending"))
+		Expect(st.Problems).To(ConsistOf(`Cluster "pg-telemetry" has the name of this Cluster's identity objects: the plugin manages none`))
+	})
+
+	It("reports identity pending with each identity object the plugin doesn't manage", func() {
+		objs = []client.Object{
+			newExporterWithEndpoint(),
+			&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg-telemetry"}},
+			&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg-telemetry"}},
+		}
+
+		st := decode(call(status(), cluster))
+
+		Expect(st.Identity).To(Equal("pending"))
+		Expect(st.Problems).To(ConsistOf(
+			"Role/pg-telemetry exists and is not managed by the plugin: no identity is applied",
+			"ServiceAccount/pg-telemetry exists and is not managed by the plugin: no identity is applied",
+		))
 	})
 
 	It("lists the spec problems and parameter problems, sorted", func() {

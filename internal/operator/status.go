@@ -52,7 +52,7 @@ func (s ClusterStatus) Healthy() bool {
 // Status serves the Operator service, which reports the plugin's status in the Cluster.
 type Status struct {
 	operator.UnimplementedOperatorServer
-	Reader   client.Reader     // cached exporters
+	Reader   client.Reader     // cached Clusters and exporters
 	Identity *identity.Ensurer // Ready gives the identity state
 	Metrics  *PluginMetrics    // nil records nothing
 }
@@ -146,9 +146,7 @@ func (s *Status) compute(ctx context.Context, c *apiv1.Cluster, plugin apiv1.Plu
 	for _, k := range parsed.Ignored {
 		problems = append(problems, fmt.Sprintf("unknown plugin parameter %q is ignored", k))
 	}
-	slices.Sort(problems)
-
-	st := ClusterStatus{Exporter: params.Exporter, Problems: problems}
+	st := ClusterStatus{Exporter: params.Exporter}
 
 	exporter := &v1alpha1.TelemetryExporter{}
 	err := s.Reader.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: params.Exporter}, exporter)
@@ -166,7 +164,7 @@ func (s *Status) compute(ctx context.Context, c *apiv1.Cluster, plugin apiv1.Plu
 		}
 	}
 
-	ready, err := s.Identity.Ready(ctx, c.Namespace, c.Name)
+	ready, identityProblems, err := s.identity(ctx, c)
 	if err != nil {
 		return ClusterStatus{}, fmt.Errorf("check identity of %s/%s: %w", c.Namespace, c.Name, err)
 	}
@@ -174,8 +172,41 @@ func (s *Status) compute(ctx context.Context, c *apiv1.Cluster, plugin apiv1.Plu
 	if ready {
 		st.Identity = identityReady
 	}
+	problems = append(problems, identityProblems...)
+	slices.Sort(problems)
+	st.Problems = problems
 
 	return st, nil
+}
+
+// identity reports whether the identity is ready and, when it is not, why the plugin applies none.
+func (s *Status) identity(ctx context.Context, c *apiv1.Cluster) (bool, []string, error) {
+	colliding, found, err := collidingCluster(ctx, s.Reader, c)
+	if err != nil {
+		return false, nil, err
+	}
+	if found {
+		return false, []string{fmt.Sprintf("Cluster %q has the name of this Cluster's identity objects: the plugin manages none",
+			colliding.Name)}, nil
+	}
+
+	ready, err := s.Identity.Ready(ctx, c.Namespace, c.Name)
+	if err != nil {
+		return false, nil, fmt.Errorf("read identity: %w", err)
+	}
+	if ready {
+		return true, nil, nil
+	}
+	foreign, err := s.Identity.Foreign(ctx, c)
+	if err != nil {
+		return false, nil, fmt.Errorf("look for foreign identity objects: %w", err)
+	}
+	problems := make([]string, 0, len(foreign))
+	for _, obj := range foreign {
+		problems = append(problems, obj+" exists and is not managed by the plugin: no identity is applied")
+	}
+
+	return false, problems, nil
 }
 
 // storedStatus returns the status CloudNativePG holds for this plugin.

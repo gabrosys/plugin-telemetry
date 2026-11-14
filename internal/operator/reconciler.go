@@ -19,10 +19,12 @@ import (
 // DefaultPreTimeout bounds the identity ensure in Pre.
 const DefaultPreTimeout = 5 * time.Second
 
-// Outcomes of a reconciler hook call, as logged.
+// Outcomes of a reconciler hook call or an identity reconcile, as logged.
 const (
-	outcomeApplied = "applied"
-	outcomeError   = "error"
+	outcomeApplied   = "applied"
+	outcomeError     = "error"
+	outcomeRefused   = "refused"
+	outcomeBackedOff = "backed off"
 )
 
 var errNotCluster = errors.New("object is not a Cluster")
@@ -31,8 +33,8 @@ var errNotCluster = errors.New("object is not a Cluster")
 // both hooks answer CONTINUE whatever happens.
 type Reconciler struct {
 	reconciler.UnimplementedReconcilerHooksServer
-	Identity  *identity.Ensurer
-	Exporters client.Reader // cached
+	Identity *identity.Ensurer
+	Cache    client.Reader // cached Clusters and exporters
 	// Timeout bounds the ensure in Pre; DefaultPreTimeout when zero.
 	Timeout time.Duration
 	// Metrics records the hook calls; nil records nothing.
@@ -96,16 +98,9 @@ func (r *Reconciler) Post(ctx context.Context, req *reconciler.ReconcilerHooksRe
 	return continueResult(), nil
 }
 
-// ensure applies the Cluster's identity and returns the outcome to log.
+// ensure applies the Cluster's identity, or backs off from a Cluster that has its name, and returns the
+// outcome to log.
 func (r *Reconciler) ensure(ctx context.Context, cluster *apiv1.Cluster) (string, error) {
-	refs, ok, err := referencesFor(ctx, r.Exporters, cluster)
-	if err != nil {
-		return outcomeError, err
-	}
-	if !ok {
-		return outcomeSkipped, nil
-	}
-
 	timeout := r.Timeout
 	if timeout <= 0 {
 		timeout = DefaultPreTimeout
@@ -113,11 +108,38 @@ func (r *Reconciler) ensure(ctx context.Context, cluster *apiv1.Cluster) (string
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	res, err := r.Identity.Ensure(ctx, cluster, refs)
+	colliding, found, err := collidingCluster(ctx, r.Cache, cluster)
 	if err != nil {
-		return outcomeError, fmt.Errorf("ensure identity of %s/%s: %w", cluster.Namespace, cluster.Name, err)
+		return outcomeError, err
 	}
-	if len(res.Applied) == 0 {
+	if found {
+		changed, err := r.Identity.BackOff(ctx, cluster, colliding)
+		if err != nil {
+			return outcomeError, fmt.Errorf("back off from cluster %s/%s: %w", colliding.Namespace, colliding.Name, err)
+		}
+		if len(changed) > 0 {
+			log.FromContext(ctx).Info("identity", "outcome", outcomeBackedOff, "objects", changed,
+				"namespace", cluster.Namespace, "cluster", cluster.Name, "collidingCluster", colliding.Name)
+		}
+
+		return outcomeSkipped, nil
+	}
+
+	refs, ok, err := referencesFor(ctx, r.Cache, cluster)
+	if err != nil {
+		return outcomeError, err
+	}
+	if !ok {
+		return outcomeSkipped, nil
+	}
+
+	res, err := r.Identity.Ensure(ctx, cluster, refs)
+	switch {
+	case err != nil:
+		return outcomeError, fmt.Errorf("ensure identity of %s/%s: %w", cluster.Namespace, cluster.Name, err)
+	case len(res.Refused) > 0:
+		return outcomeSkipped, nil
+	case len(res.Applied) == 0:
 		return outcomeUnchanged, nil
 	}
 

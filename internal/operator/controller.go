@@ -12,6 +12,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -20,16 +21,20 @@ import (
 	"github.com/gabrosys/plugin-telemetry/api/v1alpha1"
 	"github.com/gabrosys/plugin-telemetry/internal/clusterconfig"
 	"github.com/gabrosys/plugin-telemetry/internal/identity"
+	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/podpatch"
 )
 
 // specChanged passes creates, deletes and updates that change metadata.generation.
 var specChanged = predicate.GenerationChangedPredicate{}
 
+// createdOrDeleted passes creates and deletes, the events that start or end a name collision.
+var createdOrDeleted = predicate.Funcs{UpdateFunc: func(event.UpdateEvent) bool { return false }}
+
 // IdentityController keeps identities current between CNPG reconciles: For(Cluster) with
-// GenerationChangedPredicate, Watches(TelemetryExporter, GenerationChangedPredicate) mapped to the
-// Clusters in its namespace whose exporter parameter names it, Owns(ServiceAccount, Role,
-// RoleBinding, Secret).
+// GenerationChangedPredicate, Watches(Cluster) created or deleted mapped to the Cluster whose identity
+// has its name, Watches(TelemetryExporter, GenerationChangedPredicate) mapped to the Clusters in its
+// namespace whose exporter parameter names it, Owns(ServiceAccount, Role, RoleBinding, Secret).
 type IdentityController struct {
 	Client   client.Client
 	Identity *identity.Ensurer
@@ -64,6 +69,22 @@ func (c *IdentityController) reconcile(ctx context.Context, req ctrl.Request) er
 
 	logger := log.FromContext(ctx)
 
+	colliding, found, err := collidingCluster(ctx, c.Client, &cluster)
+	if err != nil {
+		return err
+	}
+	if found {
+		changed, err := c.Identity.BackOff(ctx, &cluster, colliding)
+		if err != nil {
+			return fmt.Errorf("back off from cluster %s/%s: %w", colliding.Namespace, colliding.Name, err)
+		}
+		if len(changed) > 0 {
+			logger.Info("identity controller", "outcome", outcomeBackedOff, "objects", changed, "collidingCluster", colliding.Name)
+		}
+
+		return nil
+	}
+
 	refs, ok, err := referencesFor(ctx, c.Client, &cluster)
 	if err != nil {
 		return err
@@ -75,6 +96,9 @@ func (c *IdentityController) reconcile(ctx context.Context, req ctrl.Request) er
 	res, err := c.Identity.Ensure(ctx, &cluster, refs)
 	if err != nil {
 		return fmt.Errorf("ensure identity of %s: %w", req.NamespacedName, err)
+	}
+	if len(res.Refused) > 0 {
+		logger.Info("identity controller", "outcome", outcomeRefused, "objects", res.Refused)
 	}
 	if len(res.Applied) > 0 {
 		logger.Info("identity controller", "outcome", outcomeApplied, "objects", res.Applied)
@@ -106,6 +130,8 @@ func (c *IdentityController) SetupWithManager(mgr manager.Manager) error {
 	err := ctrl.NewControllerManagedBy(mgr).
 		Named("identity").
 		For(&apiv1.Cluster{}, builder.WithPredicates(specChanged)).
+		Watches(&apiv1.Cluster{}, handler.EnqueueRequestsFromMapFunc(identityNameToCluster),
+			builder.WithPredicates(createdOrDeleted)).
 		Watches(&v1alpha1.TelemetryExporter{}, handler.EnqueueRequestsFromMapFunc(exportersToClusters(c.Client)),
 			builder.WithPredicates(specChanged)).
 		Owns(&corev1.ServiceAccount{}).
@@ -118,6 +144,32 @@ func (c *IdentityController) SetupWithManager(mgr manager.Manager) error {
 	}
 
 	return nil
+}
+
+// identityNameToCluster maps a Cluster to the Cluster whose identity objects have its name.
+func identityNameToCluster(_ context.Context, obj client.Object) []reconcile.Request {
+	owner, ok := metadata.IdentityOwner(obj.GetName())
+	if !ok {
+		return nil
+	}
+
+	return []reconcile.Request{{NamespacedName: client.ObjectKey{Namespace: obj.GetNamespace(), Name: owner}}}
+}
+
+// collidingCluster returns the cached Cluster in c's namespace that has the name of c's identity objects,
+// which CloudNativePG gives that Cluster's own ServiceAccount, Role and RoleBinding.
+func collidingCluster(ctx context.Context, r client.Reader, c *apiv1.Cluster) (*apiv1.Cluster, bool, error) {
+	var other apiv1.Cluster
+	key := client.ObjectKey{Namespace: c.Namespace, Name: metadata.ServiceAccountName(c.Name)}
+	err := r.Get(ctx, key, &other)
+	switch {
+	case apierrors.IsNotFound(err):
+		return nil, false, nil
+	case err != nil:
+		return nil, false, fmt.Errorf("get cluster %s: %w", key, err)
+	}
+
+	return &other, true, nil
 }
 
 // exportersToClusters maps a TelemetryExporter to the Clusters in its namespace whose enabled plugin

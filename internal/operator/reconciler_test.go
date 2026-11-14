@@ -94,9 +94,9 @@ var _ = Describe("Reconciler", func() {
 	build := func(funcs interceptor.Funcs, objs ...client.Object) {
 		c = newClient(objs, funcs)
 		srv = &operator.Reconciler{
-			Identity:  &identity.Ensurer{Reader: c, Writer: c},
-			Exporters: c,
-			Timeout:   time.Second,
+			Identity: &identity.Ensurer{Reader: c, Live: c, Writer: c},
+			Cache:    c,
+			Timeout:  time.Second,
 		}
 	}
 
@@ -228,6 +228,34 @@ var _ = Describe("Reconciler", func() {
 			Expect(identityExists(ctx, c, "pg")).To(Equal([4]bool{}), name)
 			Expect(hookLine(all(), "Pre")).To(HaveKeyWithValue("outcome", "skipped"), name)
 		}
+	})
+
+	It("Pre applies nothing and returns CONTINUE when a Cluster has the identity's name", func(ctx context.Context) {
+		var applies int
+		build(interceptor.Funcs{Apply: func(ctx context.Context, cl client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+			applies++
+
+			return cl.Apply(ctx, obj, opts...)
+		}}, newCluster("ns", "pg-telemetry"))
+		ctx, all := captureAll(ctx)
+
+		res, err := srv.Pre(ctx, hookRequest(newCluster("ns", "pg", ours(nil))))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.GetBehavior()).To(Equal(reconciler.ReconcilerHooksResult_BEHAVIOR_CONTINUE))
+		Expect(applies).To(BeZero())
+		Expect(identityExists(ctx, c, "pg")).To(Equal([4]bool{}))
+		Expect(hookLine(all(), "Pre")).To(HaveKeyWithValue("outcome", "skipped"))
+	})
+
+	It("Pre applies nothing and returns CONTINUE when an identity object isn't the plugin's", func(ctx context.Context) {
+		build(interceptor.Funcs{}, &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg-telemetry"}})
+		ctx, all := captureAll(ctx)
+
+		res, err := srv.Pre(ctx, hookRequest(newCluster("ns", "pg", ours(nil))))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.GetBehavior()).To(Equal(reconciler.ReconcilerHooksResult_BEHAVIOR_CONTINUE))
+		Expect(identityExists(ctx, c, "pg")).To(Equal([4]bool{false, false, true, false}))
+		Expect(hookLine(all(), "Pre")).To(HaveKeyWithValue("outcome", "skipped"))
 	})
 
 	It("Pre returns CONTINUE and logs an error when Ensure fails", func(ctx context.Context) {

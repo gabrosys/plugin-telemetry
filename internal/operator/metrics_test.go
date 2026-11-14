@@ -251,7 +251,7 @@ var _ = Describe("hooks recording metrics", func() {
 
 	It("records the reconciler hooks", func(ctx context.Context) {
 		c := newClient(nil, interceptor.Funcs{})
-		r := &operator.Reconciler{Identity: &identity.Ensurer{Reader: c, Writer: c}, Exporters: c, Metrics: m}
+		r := &operator.Reconciler{Identity: &identity.Ensurer{Reader: c, Live: c, Writer: c}, Cache: c, Metrics: m}
 		cluster := newCluster("ns", "pg", ours(nil))
 
 		_, err := r.Pre(ctx, hookRequest(cluster))
@@ -273,7 +273,7 @@ var _ = Describe("hooks recording metrics", func() {
 
 	It("records SetStatusInCluster as status, noop or error", func(ctx context.Context) {
 		c := newClient(nil, interceptor.Funcs{})
-		s := &operator.Status{Reader: c, Identity: &identity.Ensurer{Reader: c, Writer: c}, Metrics: m}
+		s := &operator.Status{Reader: c, Identity: &identity.Ensurer{Reader: c, Live: c, Writer: c}, Metrics: m}
 
 		_, err := s.SetStatusInCluster(ctx, hookStatusRequest(newCluster("ns", "pg", ours(nil))))
 		Expect(err).NotTo(HaveOccurred())
@@ -291,7 +291,7 @@ var _ = Describe("hooks recording metrics", func() {
 
 	It("records identity reconciles as ok or error", func(ctx context.Context) {
 		c := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{})
-		ctrl := &operator.IdentityController{Client: c, Identity: &identity.Ensurer{Reader: c, Writer: c}, Metrics: m}
+		ctrl := &operator.IdentityController{Client: c, Identity: &identity.Ensurer{Reader: c, Live: c, Writer: c}, Metrics: m}
 		_, err := ctrl.Reconcile(ctx, requestFor("ns", "pg"))
 		Expect(err).NotTo(HaveOccurred())
 		_, err = ctrl.Reconcile(ctx, requestFor("ns", "gone"))
@@ -302,7 +302,7 @@ var _ = Describe("hooks recording metrics", func() {
 				return errApply
 			},
 		})
-		ctrl = &operator.IdentityController{Client: failing, Identity: &identity.Ensurer{Reader: failing, Writer: failing}, Metrics: m}
+		ctrl = &operator.IdentityController{Client: failing, Identity: &identity.Ensurer{Reader: failing, Live: failing, Writer: failing}, Metrics: m}
 		_, err = ctrl.Reconcile(ctx, requestFor("ns", "pg"))
 		Expect(err).To(HaveOccurred())
 

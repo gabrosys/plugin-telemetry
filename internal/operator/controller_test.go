@@ -30,18 +30,31 @@ var _ = Describe("IdentityController", func() {
 		c       client.Client
 		ctrl    *operator.IdentityController
 		deletes atomic.Int32
+		writes  atomic.Int32
 	)
 
 	build := func(objs ...client.Object) {
 		deletes.Store(0)
+		writes.Store(0)
 		c = newClient(objs, interceptor.Funcs{
 			Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
 				deletes.Add(1)
+				writes.Add(1)
 
 				return cl.Delete(ctx, obj, opts...)
 			},
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				writes.Add(1)
+
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+			Apply: func(ctx context.Context, cl client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+				writes.Add(1)
+
+				return cl.Apply(ctx, obj, opts...)
+			},
 		})
-		ctrl = &operator.IdentityController{Client: c, Identity: &identity.Ensurer{Reader: c, Writer: c}}
+		ctrl = &operator.IdentityController{Client: c, Identity: &identity.Ensurer{Reader: c, Live: c, Writer: c}}
 	}
 
 	reconcileOnce := func(ctx context.Context, namespace, name string) {
@@ -171,6 +184,52 @@ var _ = Describe("IdentityController", func() {
 		Expect(deletes.Load()).To(BeZero())
 	})
 
+	It("backs off from a Cluster that has the identity's name, then writes nothing", func(ctx context.Context) {
+		build(newCluster("ns", "pg", ours(nil)))
+		reconcileOnce(ctx, "ns", "pg")
+		Expect(identityExists(ctx, c, "pg")).To(Equal(allFour))
+
+		Expect(c.Create(ctx, newCluster("ns", "pg-telemetry"))).To(Succeed())
+		writes.Store(0)
+		reconcileOnce(ctx, "ns", "pg")
+
+		Expect(identityExists(ctx, c, "pg")).To(Equal([4]bool{false, true, true, true}), "only the token Secret is deleted")
+		Expect(writes.Load()).To(BeNumerically(">", 0))
+		for _, obj := range identity.Members("ns", "pg")[1:] {
+			Expect(c.Get(ctx, client.ObjectKeyFromObject(obj), obj)).To(Succeed())
+			Expect(obj.GetOwnerReferences()).To(BeEmpty(), "%T", obj)
+		}
+
+		writes.Store(0)
+		reconcileOnce(ctx, "ns", "pg")
+		Expect(writes.Load()).To(BeZero())
+	})
+
+	It("ensures nothing for a Cluster whose identity name another Cluster has", func(ctx context.Context) {
+		build(newCluster("ns", "pg", ours(nil)), newCluster("ns", "pg-telemetry"))
+		reconcileOnce(ctx, "ns", "pg")
+
+		Expect(identityExists(ctx, c, "pg")).To(Equal([4]bool{}))
+		Expect(writes.Load()).To(BeZero())
+	})
+
+	It("maps a Cluster with an identity's name to the Cluster that identity belongs to", func(ctx context.Context) {
+		mapper := operator.IdentityNameToCluster
+
+		Expect(mapper(ctx, newCluster("ns", "pg-telemetry"))).To(ConsistOf(requestFor("ns", "pg")))
+		Expect(mapper(ctx, newCluster("ns", "pg-telemetry-telemetry"))).To(ConsistOf(requestFor("ns", "pg-telemetry")))
+		Expect(mapper(ctx, newCluster("ns", "pg"))).To(BeEmpty())
+		Expect(mapper(ctx, newCluster("ns", "-telemetry"))).To(BeEmpty())
+	})
+
+	It("applies nothing and returns no error when an identity object isn't the plugin's", func(ctx context.Context) {
+		build(newCluster("ns", "pg", ours(nil)), &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg-telemetry"}})
+		reconcileOnce(ctx, "ns", "pg")
+
+		Expect(identityExists(ctx, c, "pg")).To(Equal([4]bool{false, false, false, true}))
+		Expect(writes.Load()).To(BeZero())
+	})
+
 	It("registers with a manager", func() {
 		mgr, err := operator.NewManager(&rest.Config{Host: discoveryServer().URL})
 		Expect(err).NotTo(HaveOccurred())
@@ -185,7 +244,7 @@ var _ = Describe("IdentityController", func() {
 				return errApply
 			},
 		})
-		ctrl = &operator.IdentityController{Client: failing, Identity: &identity.Ensurer{Reader: failing, Writer: failing}}
+		ctrl = &operator.IdentityController{Client: failing, Identity: &identity.Ensurer{Reader: failing, Live: failing, Writer: failing}}
 
 		res, err := ctrl.Reconcile(ctx, requestFor("ns", "pg"))
 		Expect(err).To(MatchError(ContainSubstring("apply refused")))

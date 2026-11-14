@@ -88,6 +88,25 @@ var _ = Describe("GatherFacts", func() {
 		}))
 	})
 
+	It("omits only the check whose setting does not exist and still gathers the facts", func(ctx SpecContext) {
+		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1, time.Minute,
+			clocktesting.NewFakePassiveClock(time.Now()))
+		DeferCleanup(pool.Close)
+		conn, release, err := pool.Acquire(ctx, "postgres")
+		Expect(err).NotTo(HaveOccurred())
+		defer release(false)
+
+		f, err := planner.GatherFactsWith(ctx, conn, map[string]string{
+			"track_io_timing":     "track_io_timing",
+			"track_wal_io_timing": "no_such_setting",
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.Checks).To(HaveKeyWithValue("track_io_timing", false))
+		Expect(f.Checks).NotTo(HaveKey("track_wal_io_timing"))
+		Expect(f.Checks).To(HaveKey("pg_monitor"))
+		Expect(f.Databases).To(Equal([]string{"app", "postgres"}))
+	})
+
 	It("returns a wrapped error when the context is cancelled", func(ctx SpecContext) {
 		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1, time.Minute,
 			clocktesting.NewFakePassiveClock(time.Now()))

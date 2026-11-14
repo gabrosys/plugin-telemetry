@@ -62,6 +62,17 @@ var _ = Describe("Catalogue", func() {
 		Expect(buf.String()).To(HaveSuffix("| `m` | gauge |  |  | d |\n"))
 	})
 
+	It("documents denied and cnpg_otel_check in docs/self-metrics.md", func() {
+		doc, err := os.ReadFile(goldenPath)
+		Expect(err).NotTo(HaveOccurred())
+		text := string(doc)
+		Expect(text).To(ContainSubstring("Query runs by outcome (ok, error, timeout, skipped, capped, denied)."))
+		Expect(text).To(ContainSubstring("Configuration loads by source and outcome (ok, error, denied)."))
+		Expect(text).To(ContainSubstring("| `cnpg_otel_check` | gauge |  | `check` |"))
+		Expect(text).To(ContainSubstring("pg_monitor, read_only, track_io_timing, track_wal_io_timing, track_functions"))
+		Expect(text).To(ContainSubstring("session of the engine itself"))
+	})
+
 	It("renders the committed markdown", func() {
 		var buf bytes.Buffer
 		Expect(selfmetrics.Render(&buf, selfmetrics.Catalogue())).To(Succeed())

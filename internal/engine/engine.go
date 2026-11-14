@@ -682,6 +682,9 @@ func (e *engine) factsRound(ctx context.Context, timed bool) {
 	}
 	e.setUp(true)
 	e.stats.SetChecks(facts.Checks)
+	if facts.ChecksErr != nil {
+		logger.Info("some live checks could not be read", "error", facts.ChecksErr.Error())
+	}
 	v := facts.Version
 	e.server.Store(&v)
 	e.plan.setFacts(ctx, facts)

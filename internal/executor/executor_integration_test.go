@@ -393,7 +393,7 @@ var _ = Describe("Executor", func() {
 		Expect(next.Samples[0].Value).NotTo(Equal(first.Samples[0].Value))
 	})
 
-	It("reports a database that refuses the connection as denied, then as a backoff error", func(ctx SpecContext) {
+	It("reports a database that refuses the connection as denied on every run, also during the backoff", func(ctx SpecContext) {
 		job := jobFor("SELECT 'a' AS datname, 1 AS value")
 		job.Database = "noconnect"
 
@@ -402,7 +402,7 @@ var _ = Describe("Executor", func() {
 		Expect(res.Err).NotTo(MatchError(pg.ErrBackoff))
 
 		res = exec.Run(ctx, job)
-		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeError))
+		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeDenied))
 		Expect(res.Err).To(MatchError(pg.ErrBackoff))
 	})
 })
@@ -445,6 +445,8 @@ var _ = Describe("Result.ConnectionLost", func() {
 
 		res = wrong.Run(ctx, jobFor("SELECT 'a' AS datname, 1 AS value"))
 		Expect(res.Err).To(MatchError(pg.ErrBackoff))
+		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeError))
+		Expect(res.Err.Error()).NotTo(ContainSubstring("wrong"))
 		Expect(res.ConnectionLost).To(BeTrue())
 	})
 

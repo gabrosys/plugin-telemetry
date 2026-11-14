@@ -27,9 +27,20 @@ const (
 	// parityWindow and parityExports give our series several query runs, so constants stand out from gauges.
 	parityWindow  = 70 * time.Second
 	parityExports = 7
-	metricsPort   = "9187"
-	metricsPath   = "/metrics"
-	reportDir     = "bin/e2e"
+	// parityTail covers parityWindow, and probeTail one export, for every resource that exports to the collector.
+	parityTail = 120
+	probeTail  = 20
+	// alignQuery is the query of CNPG's default monitoring whose sample times AC7 aligns.
+	alignQuery = "pg_stat_database"
+	// Our sample may be this old at the scrape: 1 s off the interval for CNPG's whole seconds, 1 s for the scrape.
+	parityFreshness = exportInterval - 2*time.Second
+	// Our query runs drift against the export ticks by their 0-1 s jitter alone, so a bad phase takes up to 12 runs.
+	parityAlignTimeout = 6 * time.Minute
+	// cnpgQueriesTTL is CNPG's default metricsQueriesTTL: a scrape within it gets the cached query metrics.
+	cnpgQueriesTTL = 30 * time.Second
+	metricsPort    = "9187"
+	metricsPath    = "/metrics"
+	reportDir      = "bin/e2e"
 )
 
 var errNoRepoRoot = errors.New("no go.mod above the working directory")
@@ -57,28 +68,51 @@ func itParity(target func() parityTarget) {
 		cs, err := kubernetes.NewForConfig(t.cfg)
 		Expect(err).NotTo(HaveOccurred())
 
-		// CNPG is scraped right after an export of the primary newer than start, at most one export
-		// interval after our newest point.
+		// CNPG is scraped once our newest export holds a fresh alignQuery sample, so that CNPG's recomputed
+		// sample lands within one export interval of ours. A scrape that misses waits out CNPG's cache.
 		start := time.Now()
 		var (
-			text  []byte
-			lines []otlp.Line
+			text                 []byte
+			lines                []otlp.Line
+			scraped              time.Time
+			scrapes              int
+			sampled, cnpgSampled time.Time
 		)
 		Eventually(func(g Gomega, ctx SpecContext) {
-			all, err := framework.CollectorLinesSince(ctx, t.cfg, collectorTail, start.Add(-parityWindow))
-			g.Expect(err).NotTo(HaveOccurred())
-			lines = otlp.ForResource(all, "service.namespace", t.ns)
+			g.Expect(time.Since(scraped)).To(BeNumerically(">", cnpgQueriesTTL), "CNPG still serves the cache of the scrape at %s", scraped)
 
-			times := exportTimes(otlp.ForResource(lines, "k8s.pod.name", primary))
-			g.Expect(len(times)).To(BeNumerically(">=", parityExports), "exports of %s since %s", primary, start.Add(-parityWindow))
+			probe, err := framework.CollectorLinesSince(ctx, t.cfg, probeTail, start)
+			g.Expect(err).NotTo(HaveOccurred())
+			probe = otlp.ForResource(probe, "service.namespace", t.ns)
+			times := exportTimes(otlp.ForResource(probe, "k8s.pod.name", primary))
+			g.Expect(times).NotTo(BeEmpty(), "no export of %s since %s", primary, start)
 			newest := times[len(times)-1]
-			g.Expect(newest).To(BeTemporally(">", start), "no export of %s since %s", primary, start)
+			var ok bool
+			sampled, ok = plugin.OurSampleTime(probe, primary, alignQuery)
+			g.Expect(ok).To(BeTrue(), "the newest export of %s holds no %s sample", primary, alignQuery)
+			g.Expect(time.Since(sampled)).To(BeNumerically("<=", parityFreshness), "our %s sample is from %s", alignQuery, sampled)
 
 			text, err = cs.CoreV1().Pods(t.ns).ProxyGet("http", primary, metricsPort, metricsPath, nil).DoRaw(ctx)
+			scraped = time.Now()
+			scrapes++
 			g.Expect(err).NotTo(HaveOccurred())
-			scraped := time.Now()
 			g.Expect(scraped.Sub(newest)).To(BeNumerically("<=", exportInterval), "CNPG scraped at %s, our newest point at %s", scraped, newest)
-		}).WithContext(ctx).WithTimeout(4 * time.Minute).WithPolling(time.Second).Should(Succeed())
+			cnpgSampled, ok, err = plugin.CNPGSampleTime(text)
+			g.Expect(err).NotTo(HaveOccurred())
+			if ok {
+				// 1 s under the interval, which Compare measures from the exports.
+				g.Expect(cnpgSampled.Sub(sampled).Abs()).To(BeNumerically("<=", exportInterval-time.Second),
+					"CNPG sampled at %s, our %s at %s", cnpgSampled, alignQuery, sampled)
+			}
+
+			all, err := framework.CollectorLinesSince(ctx, t.cfg, parityTail, start.Add(-parityWindow))
+			g.Expect(err).NotTo(HaveOccurred())
+			lines = upTo(otlp.ForResource(all, "service.namespace", t.ns), newest)
+			g.Expect(len(exportTimes(otlp.ForResource(lines, "k8s.pod.name", primary)))).To(BeNumerically(">=", parityExports),
+				"exports of %s since %s", primary, start.Add(-parityWindow))
+		}).WithContext(ctx).WithTimeout(parityAlignTimeout).WithPolling(500 * time.Millisecond).Should(Succeed())
+		AddReportEntry("parity alignment", fmt.Sprintf("%d scrapes in %s; our %s sample at %s, CNPG's at %s",
+			scrapes, time.Since(start).Round(time.Second), alignQuery, sampled.Format(time.RFC3339Nano), cnpgSampled.Format(time.RFC3339)))
 
 		p, err := plugin.Compare(text, lines, primary)
 		Expect(err).NotTo(HaveOccurred())
@@ -88,7 +122,19 @@ func itParity(target func() parityTarget) {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(appendStepSummary(os.Getenv("GITHUB_STEP_SUMMARY"), report)).To(Succeed())
 		AddReportEntry("parity report", path)
-	}, SpecTimeout(6*time.Minute))
+	}, SpecTimeout(parityAlignTimeout+2*time.Minute))
+}
+
+// upTo returns the lines whose Time is at or before t.
+func upTo(lines []otlp.Line, t time.Time) []otlp.Line {
+	var out []otlp.Line
+	for _, l := range lines {
+		if !l.Time.After(t) {
+			out = append(out, l)
+		}
+	}
+
+	return out
 }
 
 // exportTimes returns the distinct times of lines, sorted.

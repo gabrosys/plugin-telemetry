@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
@@ -54,6 +55,31 @@ type Parity struct {
 	Gauges []Diff
 	// NotCompared are the counter and histogram series whose values weren't checked, with the reason.
 	NotCompared []Diff
+	// Checked counts the counter and histogram series whose values were checked.
+	Checked int
+}
+
+// CNPGSampleTime returns CNPG's cnpg_last_update_timestamp: when it last computed its query metrics, in
+// whole seconds. ok is false when the text doesn't hold it.
+func CNPGSampleTime(promText []byte) (time.Time, bool, error) {
+	families, err := cnpgFamilies(promText)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	at, ok := cnpgUpdatedAt(families)
+
+	return unixTime(at), ok, nil
+}
+
+// OurSampleTime returns when query last ran with outcome ok on pod, from pod's newest export in lines;
+// for a query that runs on several databases, the oldest of their times.
+func OurSampleTime(lines []otlp.Line, pod, query string) (time.Time, bool) {
+	databases := querySuccesses(otlp.ForResource(lines, podAttribute, pod))[query]
+	if len(databases) == 0 {
+		return time.Time{}, false
+	}
+
+	return unixTime(slices.Min(slices.Collect(maps.Values(databases)))), true
 }
 
 // Diff is a difference on a metric, or on a series written name{key="value",...}.
@@ -173,6 +199,7 @@ func (p *Parity) compare(name string, c, o family, times sampleTimes) {
 				p.NotCompared = append(p.NotCompared, Diff{series, "counter: " + reason + "; " + values(cv.value, inCNPG, ov.value, inOurs)})
 				continue
 			}
+			p.Checked++
 			if d, ok := counterDiff(cv.value, inCNPG, ov.value, inOurs); !ok {
 				p.ValueDiffs = append(p.ValueDiffs, Diff{series, "counter: " + d})
 			}
@@ -182,6 +209,7 @@ func (p *Parity) compare(name string, c, o family, times sampleTimes) {
 					reason, values(cv.value, inCNPG, ov.value, inOurs), values(cv.sum, inCNPG, ov.sum, inOurs))})
 				continue
 			}
+			p.Checked++
 			for _, part := range []struct {
 				name       string
 				cnpg, ours float64
@@ -194,7 +222,10 @@ func (p *Parity) compare(name string, c, o family, times sampleTimes) {
 			switch {
 			case inCNPG && inOurs && ov.constant:
 				if !same(cv.value, ov.value) {
-					p.ValueDiffs = append(p.ValueDiffs, Diff{series, "constant: " + values(cv.value, inCNPG, ov.value, inOurs)})
+					p.ValueDiffs = append(p.ValueDiffs, Diff{
+						series,
+						"constant: " + values(cv.value, inCNPG, ov.value, inOurs) + "; " + times.gapDetail(name, attrs),
+					})
 				}
 			default:
 				p.Gauges = append(p.Gauges, Diff{series, values(cv.value, inCNPG, ov.value, inOurs)})
@@ -209,9 +240,7 @@ func scalar(k kind) bool { return k == kindCounter || k == kindGauge }
 
 func newSampleTimes(cnpg map[string]family, podLines []otlp.Line) sampleTimes {
 	var t sampleTimes
-	if s, ok := cnpg[cnpgUpdated].series[""]; ok {
-		t.cnpg, t.hasCNPG = s.value, true
-	}
+	t.cnpg, t.hasCNPG = cnpgUpdatedAt(cnpg)
 
 	exports := make([]float64, 0, len(podLines))
 	for _, l := range podLines {
@@ -226,7 +255,22 @@ func newSampleTimes(cnpg map[string]family, podLines []otlp.Line) sampleTimes {
 		}
 		t.interval = median(gaps)
 	}
+	t.ours = querySuccesses(podLines)
 
+	return t
+}
+
+func cnpgUpdatedAt(cnpg map[string]family) (float64, bool) {
+	s, ok := cnpg[cnpgUpdated].series[""]
+	return s.value, ok
+}
+
+// querySuccesses returns our last success times by query and database, from the newest export in podLines.
+func querySuccesses(podLines []otlp.Line) map[string]map[string]float64 {
+	out := map[string]map[string]float64{}
+	if len(podLines) == 0 {
+		return out
+	}
 	newest := slices.MaxFunc(podLines, func(a, b otlp.Line) int { return a.Time.Compare(b.Time) }).Time
 	var last []otlp.Line
 	for _, l := range podLines {
@@ -234,16 +278,20 @@ func newSampleTimes(cnpg map[string]family, podLines []otlp.Line) sampleTimes {
 			last = append(last, l)
 		}
 	}
-	t.ours = map[string]map[string]float64{}
 	for _, pt := range otlp.Points(last, ourSuccess) {
 		query, database := pt.Attrs["query"], pt.Attrs["database"]
-		if t.ours[query] == nil {
-			t.ours[query] = map[string]float64{}
+		if out[query] == nil {
+			out[query] = map[string]float64{}
 		}
-		t.ours[query][database] = pt.Value
+		out[query][database] = pt.Value
 	}
 
-	return t
+	return out
+}
+
+func unixTime(seconds float64) time.Time {
+	whole := math.Floor(seconds)
+	return time.Unix(int64(whole), int64((seconds-whole)*1e9))
 }
 
 func median(xs []float64) float64 {
@@ -257,14 +305,37 @@ func median(xs []float64) float64 {
 }
 
 // close reports whether CNPG's and our sample times of the series of metric with labels are at most one
-// export interval apart. Our time is that of the query with the longest cnpg_<query>_ prefix of metric, on
-// the series' database or datname when the query ran there, else on the query's oldest database.
+// export interval apart, or why not.
 func (t sampleTimes) close(metric string, labels map[string]string) (string, bool) {
-	if !t.hasCNPG {
-		return "no CNPG time", false
-	}
-	if t.interval == 0 {
+	gap, unknown := t.gap(metric, labels)
+	switch {
+	case unknown != "":
+		return unknown, false
+	case t.interval == 0:
 		return "one export, no export interval", false
+	case gap > t.interval:
+		return "sample times " + strconv.FormatFloat(gap, 'f', 1, 64) + " s apart", false
+	}
+
+	return "", true
+}
+
+// gapDetail describes the gap between the sample times of the series of metric with labels.
+func (t sampleTimes) gapDetail(metric string, labels map[string]string) string {
+	gap, unknown := t.gap(metric, labels)
+	if unknown != "" {
+		return "sample time unknown: " + unknown
+	}
+
+	return "sample times " + strconv.FormatFloat(gap, 'f', 1, 64) + " s apart"
+}
+
+// gap returns how far apart CNPG's and our sample times of the series of metric with labels are, or why
+// that is unknown. Our time is that of the query with the longest cnpg_<query>_ prefix of metric, on the
+// series' database or datname when the query ran there, else on the query's oldest database.
+func (t sampleTimes) gap(metric string, labels map[string]string) (float64, string) {
+	if !t.hasCNPG {
+		return 0, "no CNPG time"
 	}
 	var query string
 	for q := range t.ours {
@@ -273,7 +344,7 @@ func (t sampleTimes) close(metric string, labels map[string]string) (string, boo
 		}
 	}
 	if query == "" {
-		return "no query match", false
+		return 0, "no query match"
 	}
 
 	databases := t.ours[query]
@@ -284,11 +355,8 @@ func (t sampleTimes) close(metric string, labels map[string]string) (string, boo
 	if !ok {
 		ours = slices.Min(slices.Collect(maps.Values(databases)))
 	}
-	if gap := math.Abs(t.cnpg - ours); gap > t.interval {
-		return "sample times " + strconv.FormatFloat(gap, 'f', 1, 64) + " s apart", false
-	}
 
-	return "", true
+	return math.Abs(t.cnpg - ours), ""
 }
 
 // counterDiff applies the counter rule: ours ≤ CNPG and CNPG − ours ≤ 10 % of CNPG, NaN equal to NaN.
@@ -546,7 +614,8 @@ func (p Parity) Markdown(title string) string {
 	b.WriteString("Counters, and histogram counts and sums, pass when ours ≤ CNPG and CNPG − ours ≤ 10 % of CNPG. " +
 		"They are checked only when CNPG's cnpg_last_update_timestamp and our query's last success are at most " +
 		"one export interval apart, and are listed as not compared otherwise. " +
-		"A series whose points of ours, at least 2, all hold one value must match exactly; other gauges are listed and never fail. " +
+		"A series whose points of ours, at least 2, all hold one value must match exactly whatever their sample times, " +
+		"and its difference gives their gap; other gauges are listed and never fail. " +
 		"NaN equals NaN.\n\n")
 	b.WriteString("CNPG can't see MetricQuerySets, so their metrics are only in ours.\n\n")
 
@@ -561,6 +630,7 @@ func (p Parity) Markdown(title string) string {
 		{"Expected only in ours", len(p.ExpectedOurs)},
 		{"Label differences", len(p.LabelDiffs)},
 		{"Value differences", len(p.ValueDiffs)},
+		{"Checked by the counter rule", p.Checked},
 		{"Not compared", len(p.NotCompared)},
 		{"Gauges", len(p.Gauges)},
 	} {

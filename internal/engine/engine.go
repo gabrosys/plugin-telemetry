@@ -106,6 +106,7 @@ type poolSpec struct {
 	postgres                  settings.Postgres
 	queryTimeout, lockTimeout time.Duration
 	idleTimeout               time.Duration
+	maxBackoff                time.Duration // the planning cycle
 }
 
 // loopRun is a running export loop.
@@ -381,11 +382,9 @@ func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 		}
 		e.exp, e.exporterFiles, e.exporterDigest = exp, files, digest
 	}
-	switch {
-	case first || poolReplaced:
+	// A planInterval change replaces the pool too, as the pool's backoff is capped at it.
+	if first || poolReplaced {
 		e.setFactsTimer(0)
-	case old.PlanInterval != s.PlanInterval:
-		e.setFactsTimer(factsWait(e.factsFailures, s.PlanInterval))
 	}
 	return nil
 }
@@ -406,7 +405,10 @@ func PostgresConfig(s settings.Settings) pg.Config {
 // setRunner makes the runner match s, building a new pool when the connection settings or the idle
 // timeout changed. The replaced runner's pool closes once its runs end.
 func (e *engine) setRunner(ctx context.Context, s settings.Settings, idle time.Duration) (poolReplaced bool) {
-	spec := poolSpec{postgres: s.Postgres, queryTimeout: s.Limits.QueryTimeout, lockTimeout: s.Limits.LockTimeout, idleTimeout: idle}
+	spec := poolSpec{
+		postgres: s.Postgres, queryTimeout: s.Limits.QueryTimeout, lockTimeout: s.Limits.LockTimeout,
+		idleTimeout: idle, maxBackoff: s.PlanInterval,
+	}
 	cur := e.runner
 	if cur != nil && cur.spec == spec && cur.limits == s.Limits {
 		return false
@@ -416,7 +418,7 @@ func (e *engine) setRunner(ctx context.Context, s settings.Settings, idle time.D
 		pool = cur.pool
 	} else {
 		pool = &sharedPool{Pool: pg.NewPool(PostgresConfig(s), s.Postgres.MaxConnections, idle, e.clk,
-			pg.WithLogger(log.FromContext(ctx).GetLogger()))}
+			pg.WithLogger(log.FromContext(ctx).GetLogger()), pg.WithMaxBackoff(spec.maxBackoff))}
 	}
 	next := &runner{spec: spec, limits: s.Limits, pool: pool, exec: executor.New(pool.Pool, s.Limits, e.serverVersion, e.clk)}
 
@@ -641,7 +643,8 @@ func (e *engine) gatherFacts(ctx context.Context, s settings.Settings) (planner.
 	// Long enough to wait for one run to free a connection, connect and run the facts queries.
 	ctx, cancel := context.WithTimeout(ctx, connectTimeout+2*(s.Limits.QueryTimeout+runGrace))
 	defer cancel()
-	conn, release, err := e.runner.pool.Acquire(ctx, s.Postgres.Database)
+	// factsWait and earlyFactsGap already space the rounds, so they skip the pool's backoff.
+	conn, release, err := e.runner.pool.AcquireNow(ctx, s.Postgres.Database)
 	if err != nil {
 		return planner.Facts{}, fmt.Errorf("acquire a connection: %w", err)
 	}

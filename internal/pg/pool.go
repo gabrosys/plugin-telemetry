@@ -14,9 +14,9 @@ import (
 )
 
 const (
-	initialBackoff = time.Second
-	maxBackoff     = 30 * time.Second
-	closeTimeout   = 2 * time.Second
+	initialBackoff    = time.Second
+	defaultMaxBackoff = 30 * time.Second
+	closeTimeout      = 2 * time.Second
 )
 
 // ErrPoolClosed is returned by Acquire once the pool is closed.
@@ -27,6 +27,7 @@ type Pool struct {
 	cfg         Config
 	maxConns    int
 	idleTimeout time.Duration
+	maxBackoff  time.Duration
 	clk         clock.PassiveClock
 	log         logr.Logger
 	// base is the context connections are closed with; it is never cancelled.
@@ -63,12 +64,22 @@ func WithLogger(l logr.Logger) PoolOption {
 	return func(p *Pool) { p.log = l }
 }
 
+// WithMaxBackoff caps the wait before reconnecting to a failing database; d <= 0 keeps the default 30s.
+func WithMaxBackoff(d time.Duration) PoolOption {
+	return func(p *Pool) {
+		if d > 0 {
+			p.maxBackoff = d
+		}
+	}
+}
+
 // NewPool returns a pool that opens no connection until Acquire.
 func NewPool(c Config, maxConns int, idleTimeout time.Duration, clk clock.PassiveClock, opts ...PoolOption) *Pool {
 	p := &Pool{
 		cfg:         c,
 		maxConns:    max(1, maxConns),
 		idleTimeout: idleTimeout,
+		maxBackoff:  defaultMaxBackoff,
 		clk:         clk,
 		base:        context.Background(),
 		failed:      make(map[string]*backoff),
@@ -83,8 +94,18 @@ func NewPool(c Config, maxConns int, idleTimeout time.Duration, clk clock.Passiv
 
 // Acquire returns a connection to database. At the cap it closes the least recently used idle
 // connection of another database, or waits. After a failed connect it returns ErrBackoff until
-// 1s, 2s, 4s ... up to 30s have passed for that database.
+// 1s, 2s, 4s ... up to the maximum backoff have passed for that database.
 func (p *Pool) Acquire(ctx context.Context, database string) (*pgx.Conn, func(broken bool), error) {
+	return p.acquire(ctx, database, true)
+}
+
+// AcquireNow is Acquire without the backoff: it connects even while database waits before
+// reconnecting, and a successful connect ends that wait.
+func (p *Pool) AcquireNow(ctx context.Context, database string) (*pgx.Conn, func(broken bool), error) {
+	return p.acquire(ctx, database, false)
+}
+
+func (p *Pool) acquire(ctx context.Context, database string, withBackoff bool) (*pgx.Conn, func(broken bool), error) {
 	for {
 		p.mu.Lock()
 		if p.closed {
@@ -97,7 +118,7 @@ func (p *Pool) Acquire(ctx context.Context, database string) (*pgx.Conn, func(br
 			return conn, p.releaser(conn, database), nil
 		}
 
-		if b := p.failed[database]; b != nil && p.clk.Now().Before(b.retryAt) {
+		if b := p.failed[database]; withBackoff && b != nil && p.clk.Now().Before(b.retryAt) {
 			p.mu.Unlock()
 			return nil, nil, fmt.Errorf("database %s: %w", database, ErrBackoff)
 		}
@@ -159,7 +180,7 @@ func (p *Pool) dial(ctx context.Context, database string) (*pgx.Conn, func(bool)
 				b = &backoff{}
 				p.failed[database] = b
 			}
-			b.retryAt = p.clk.Now().Add(backoffDelay(b.failures))
+			b.retryAt = p.clk.Now().Add(backoffDelay(b.failures, p.maxBackoff))
 			b.failures++
 		}
 		p.mu.Unlock()
@@ -196,15 +217,15 @@ func (p *Pool) connect(ctx context.Context, database string) (*pgx.Conn, error) 
 	return conn, nil
 }
 
-func backoffDelay(failures int) time.Duration {
+func backoffDelay(failures int, maxBackoff time.Duration) time.Duration {
 	delay := initialBackoff
 	for range failures {
-		delay *= 2
 		if delay >= maxBackoff {
-			return maxBackoff
+			break
 		}
+		delay *= 2
 	}
-	return delay
+	return min(delay, maxBackoff)
 }
 
 // releaser returns the function that hands conn back; only its first call has an effect.

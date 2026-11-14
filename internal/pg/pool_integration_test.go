@@ -337,6 +337,59 @@ var _ = Describe("Pool", func() {
 		}
 	})
 
+	It("caps the delay at WithMaxBackoff", func(ctx SpecContext) {
+		cfg.Port = 1
+		pool = pg.NewPool(cfg, 2, time.Minute, clk, pg.WithMaxBackoff(5*time.Second))
+		DeferCleanup(pool.Close)
+
+		now := start
+		for _, delay := range []time.Duration{
+			time.Second, 2 * time.Second, 4 * time.Second, 5 * time.Second, 5 * time.Second,
+		} {
+			clk.SetTime(now)
+			_, _, err := pool.Acquire(ctx, "app")
+			Expect(err).To(HaveOccurred())
+			Expect(err).NotTo(MatchError(pg.ErrBackoff))
+
+			clk.SetTime(now.Add(delay - time.Millisecond))
+			_, _, err = pool.Acquire(ctx, "app")
+			Expect(err).To(MatchError(pg.ErrBackoff), "delay %s", delay)
+
+			now = now.Add(delay)
+		}
+	})
+
+	It("AcquireNow dials during the backoff and a success clears it", func(ctx SpecContext) {
+		newPool(2, time.Minute)
+		good, err := os.ReadFile(cfg.PasswordFile)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(os.WriteFile(cfg.PasswordFile, []byte("wrong\n"), 0o600)).To(Succeed())
+
+		_, _, err = pool.Acquire(ctx, "app")
+		Expect(err).To(HaveOccurred())
+		Expect(err).NotTo(MatchError(pg.ErrBackoff))
+		_, _, err = pool.Acquire(ctx, "app")
+		Expect(err).To(MatchError(pg.ErrBackoff))
+
+		_, _, err = pool.AcquireNow(ctx, "app")
+		var authErr *pgconn.PgError
+		Expect(errors.As(err, &authErr)).To(BeTrue(), "AcquireNow dials while Acquire waits: %v", err)
+		Expect(authErr.Code).To(Equal("28P01"))
+
+		Expect(os.WriteFile(cfg.PasswordFile, good, 0o600)).To(Succeed())
+		_, _, err = pool.Acquire(ctx, "app")
+		Expect(err).To(MatchError(pg.ErrBackoff))
+		conn, release, err := pool.AcquireNow(ctx, "app")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(conn.IsClosed()).To(BeFalse())
+		release(true)
+
+		conn, release, err = pool.Acquire(ctx, "app")
+		Expect(err).NotTo(HaveOccurred(), "a successful AcquireNow ends the backoff")
+		defer release(false)
+		Expect(conn.IsClosed()).To(BeFalse())
+	})
+
 	It("uses a rotated password file for the next connection", func(ctx SpecContext) {
 		newPool(2, time.Minute)
 		_, release, err := pool.Acquire(ctx, "app")

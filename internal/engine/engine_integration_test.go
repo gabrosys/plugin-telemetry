@@ -507,3 +507,27 @@ var _ = Describe("Run when PostgreSQL stops", func() {
 		Eventually(expectUp(f.srv, 1)).WithTimeout(45 * time.Second).WithPolling(250 * time.Millisecond).Should(Succeed())
 	}, SpecTimeout(2*time.Minute))
 })
+
+var _ = Describe("Run when PostgreSQL comes back after an outage", func() {
+	It("reports cnpg_collector_up 1 within a planning cycle although the runs drove the reconnect backoff up", func(ctx SpecContext) {
+		// The runs on the default database fail every second during the 17s outage: with a 30s cap their
+		// reconnect backoff would hold every connect to that database until about 32s after the stop.
+		planInterval := 5 * time.Second
+		f := newFixture(planInterval)
+		writeFile(f.config, f.valid)
+		f.run()
+		Eventually(expectUp(f.srv, 1)).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+
+		Expect(server.StopServer(ctx)).To(Succeed())
+		stopped := time.Now()
+		DeferCleanup(func(ctx SpecContext) { Expect(server.StartServer(ctx)).To(Succeed()) })
+		Eventually(expectUp(f.srv, 0)).WithTimeout(10 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+		time.Sleep(time.Until(stopped.Add(17 * time.Second)))
+
+		Expect(server.StartServer(ctx)).To(Succeed())
+		back := time.Now()
+		Eventually(expectUp(f.srv, 1)).WithTimeout(planInterval + exportInterval + 2*slack).
+			WithPolling(100 * time.Millisecond).Should(Succeed())
+		GinkgoWriter.Printf("cnpg_collector_up was 1 again %s after the restart\n", time.Since(back))
+	}, SpecTimeout(2*time.Minute))
+})

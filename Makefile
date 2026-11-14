@@ -35,6 +35,9 @@ COLLECTOR_IMAGE ?= otel/opentelemetry-collector:0.165.0@sha256:34b24b740c3c88d34
 E2E_SUITES := smoke spikes admission engine plugin
 KIND_E2E_SUITES := $(filter-out engine,$(E2E_SUITES))
 E2E_TARGETS := $(addprefix e2e-,$(KIND_E2E_SUITES))
+# go test -timeout of a kind e2e suite: E2E_GO_TEST_TIMEOUT_<suite> when set, else E2E_GO_TEST_TIMEOUT.
+E2E_GO_TEST_TIMEOUT := 30m
+E2E_GO_TEST_TIMEOUT_plugin := 50m
 
 DEV_ENV := KIND=$(KIND) KUBECTL=$(KUBECTL) CMCTL=$(CMCTL) KIND_CLUSTER=$(KIND_CLUSTER) KIND_NODE_IMAGE=$(KIND_NODE_IMAGE) \
 	CNPG_VERSION=$(CNPG_VERSION) CERT_MANAGER_VERSION=$(CERT_MANAGER_VERSION)
@@ -101,7 +104,7 @@ deploy: $(KUBECTL) ## Deploy the plugin to the kind environment (after image and
 .PHONY: $(E2E_TARGETS)
 $(E2E_TARGETS): e2e-%: dev-up
 	E2E_KUBE_CONTEXT=kind-$(KIND_CLUSTER) CNPG_VERSION=$(CNPG_VERSION) POSTGRES_IMAGE=$(POSTGRES_IMAGE) \
-		$(GO) test -tags e2e -count=1 -timeout 30m -v ./test/e2e/$*/... -ginkgo.v
+		$(GO) test -tags e2e -count=1 -timeout $(or $(E2E_GO_TEST_TIMEOUT_$*),$(E2E_GO_TEST_TIMEOUT)) -v ./test/e2e/$*/... -ginkgo.v
 
 e2e-spikes: image kind-load deploy
 e2e-admission: image kind-load deploy

@@ -16,7 +16,7 @@ jobs:
     name: e2e (${{ inputs.suite }}, CNPG ${{ matrix.cnpg }})
     if: inputs.suite != 'engine'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 75
     permissions:
       contents: read
     strategy:

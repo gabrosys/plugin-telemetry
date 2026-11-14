@@ -370,7 +370,9 @@ func printConfig(ctx context.Context, w io.Writer, path string, gates *featurega
 // describe renders the settings, the headers, the sources and the feature gates.
 func describe(c *config, gates *featuregate.Registry) (string, error) {
 	var b strings.Builder
-	raw, err := yaml.Marshal(c.settings)
+	shown := c.settings
+	shown.Exporter.Endpoint = settings.RedactEndpoint(shown.Exporter.Endpoint)
+	raw, err := yaml.Marshal(shown)
 	if err != nil {
 		return "", fmt.Errorf("render settings: %w", err)
 	}

@@ -241,13 +241,36 @@ func (s Settings) validateExporter() []error {
 	case e.Endpoint == "":
 		errs = append(errs, errors.New("exporter.endpoint: must not be empty"))
 	case err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "":
-		errs = append(errs, fmt.Errorf("exporter.endpoint: must be an http or https URL with a host, got %q", e.Endpoint))
+		errs = append(errs, fmt.Errorf("exporter.endpoint: must be an http or https URL with a host, got %q",
+			RedactEndpoint(e.Endpoint)))
+	case u.User != nil || u.RawQuery != "" || u.Fragment != "":
+		errs = append(errs, fmt.Errorf("exporter.endpoint: must not have user info, a query or a fragment "+
+			"(headers go in exporter.headersFile), got %q", RedactEndpoint(e.Endpoint)))
 	case u.Scheme == "http" && !e.tlsConfigured():
 		// plaintext without tls settings is valid
 	case u.Scheme == "http":
 		errs = append(errs, errors.New("exporter.tls: cannot be set with an http:// endpoint"))
 	}
 	return errs
+}
+
+// RedactEndpoint returns endpoint for messages: the URL's Redacted form with the user, the query and
+// the fragment also replaced by xxxxx, or "(not a URL)" when it does not parse.
+func RedactEndpoint(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "(not a URL)"
+	}
+	if u.User != nil {
+		u.User = url.UserPassword("xxxxx", "xxxxx")
+	}
+	if u.RawQuery != "" {
+		u.RawQuery = "xxxxx"
+	}
+	if u.Fragment != "" {
+		u.Fragment, u.RawFragment = "xxxxx", ""
+	}
+	return u.Redacted()
 }
 
 // tlsConfigured reports whether any TLS option other than the default minVersion is set.

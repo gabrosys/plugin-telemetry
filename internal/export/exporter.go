@@ -94,7 +94,7 @@ func NewExporter(ctx context.Context, s settings.Exporter) (*Exporter, error) {
 	}
 	u, err := url.Parse(s.Endpoint)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
-		return nil, fmt.Errorf("exporter endpoint %q: not an http or https URL with a host", s.Endpoint)
+		return nil, fmt.Errorf("exporter endpoint %q: not an http or https URL with a host", settings.RedactEndpoint(s.Endpoint))
 	}
 	if s.Timeout <= 0 || s.Interval*9/10 <= s.Timeout {
 		return nil, fmt.Errorf("exporter timeout %s: must be positive and below 0.9 × interval %s", s.Timeout, s.Interval)

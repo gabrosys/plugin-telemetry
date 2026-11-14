@@ -511,6 +511,17 @@ var _ = Describe("Exporter", func() {
 		})
 	})
 
+	DescribeTable("NewExporter never echoes the credentials of an endpoint it rejects",
+		func(endpoint string) {
+			_, err := export.NewExporter(context.Background(), exporterSettings(settings.ProtocolHTTP, endpoint))
+			Expect(err).To(MatchError(ContainSubstring("endpoint")))
+			Expect(err.Error()).NotTo(ContainSubstring("secret"))
+		},
+		Entry("a password with another scheme", "ftp://user:secret@127.0.0.1:4318"),
+		Entry("a query without a host", "http:///v1/metrics?token=secret"),
+		Entry("a password in a URL that does not parse", "http://user:secret@[::1"),
+	)
+
 	DescribeTable("NewExporter rejects",
 		func(mutate func(s *settings.Exporter, dir string), msg string) {
 			s := exporterSettings(settings.ProtocolHTTP, "https://127.0.0.1:4318/v1/metrics")

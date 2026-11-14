@@ -140,6 +140,20 @@ var _ = Describe("instance validate", func() {
 })
 
 var _ = Describe("instance print-config", func() {
+	It("never prints the credentials of an endpoint", func() {
+		raw, err := os.ReadFile(testdata("engine-valid.yaml"))
+		Expect(err).NotTo(HaveOccurred())
+		config := strings.Replace(string(raw), "http://127.0.0.1:4318", "http://user:secret@127.0.0.1:4318", 1)
+		Expect(config).To(ContainSubstring("secret"))
+		path := filepath.Join(GinkgoT().TempDir(), "engine.yaml")
+		Expect(os.WriteFile(path, []byte(config), 0o600)).To(Succeed())
+
+		out, err := execute(context.Background(), "instance", "print-config", "--offline", "--config", path)
+		Expect(err).To(MatchError(ContainSubstring("exporter.endpoint")))
+		Expect(err.Error()).NotTo(ContainSubstring("secret"))
+		Expect(out).NotTo(ContainSubstring("secret"))
+	})
+
 	It("never prints a header value", func() {
 		out, err := execute(context.Background(), "instance", "print-config", "--offline", "--config", testdata("engine-headers.yaml"))
 		Expect(err).NotTo(HaveOccurred())

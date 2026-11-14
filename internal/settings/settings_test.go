@@ -217,6 +217,12 @@ var _ = Describe("Validate", func() {
 		Entry("non-http endpoint", func(s *settings.Settings) { s.Exporter.Endpoint = "ftp://x" }, "exporter.endpoint"),
 		Entry("endpoint without host", func(s *settings.Settings) { s.Exporter.Endpoint = "http://" }, "exporter.endpoint"),
 		Entry("endpoint without scheme", func(s *settings.Settings) { s.Exporter.Endpoint = "collector:4318" }, "exporter.endpoint"),
+		Entry("endpoint with a user and password", func(s *settings.Settings) {
+			s.Exporter.Endpoint = "http://user:pw@x/v1/metrics"
+		}, "exporter.endpoint"),
+		Entry("endpoint with a user", func(s *settings.Settings) { s.Exporter.Endpoint = "http://token@x/v1/metrics" }, "exporter.endpoint"),
+		Entry("endpoint with a query", func(s *settings.Settings) { s.Exporter.Endpoint = "http://x/v1/metrics?key=k" }, "exporter.endpoint"),
+		Entry("endpoint with a fragment", func(s *settings.Settings) { s.Exporter.Endpoint = "http://x/v1/metrics#f" }, "exporter.endpoint"),
 		Entry("tls with an http endpoint", func(s *settings.Settings) { s.Exporter.TLS.CAFile = "/ca.pem" }, "exporter.tls"),
 		Entry("certFile without keyFile", func(s *settings.Settings) {
 			s.Exporter.Endpoint = "https://x"
@@ -252,6 +258,23 @@ var _ = Describe("Validate", func() {
 		Entry("maxDatabases", func(s *settings.Settings) { s.Limits.MaxDatabases = 0 }, "limits.maxDatabases"),
 		Entry("maxLabelValueLength", func(s *settings.Settings) { s.Limits.MaxLabelValueLength = 0 }, "limits.maxLabelValueLength"),
 		Entry("maxLabelsPerSeries", func(s *settings.Settings) { s.Limits.MaxLabelsPerSeries = 0 }, "limits.maxLabelsPerSeries"),
+	)
+
+	DescribeTable("never echoes the user info, the query or the fragment of a rejected endpoint",
+		func(endpoint string) {
+			s := mustLoad("minimal.yaml")
+			s.Exporter.Endpoint = endpoint
+			err := s.Validate()
+			Expect(err).To(MatchError(ContainSubstring("exporter.endpoint")))
+			Expect(err.Error()).NotTo(ContainSubstring("secret"))
+		},
+		Entry("a password", "https://user:secret@x/v1/metrics"),
+		Entry("a user", "https://secret@x/v1/metrics"),
+		Entry("a query", "https://x/v1/metrics?token=secret"),
+		Entry("a fragment", "https://x/v1/metrics#secret"),
+		Entry("a password with another scheme", "ftp://user:secret@x"),
+		Entry("a password without a host", "http://user:secret@"),
+		Entry("a password in a URL that does not parse", "http://user:secret@[::1"),
 	)
 
 	It("reports every problem at once", func() {

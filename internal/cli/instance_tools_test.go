@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -168,3 +170,42 @@ var _ = Describe("formatSamples", func() {
 		}))
 	})
 })
+
+var _ = DescribeTable("the paths that connect clear PG* and OTEL_* before connecting",
+	func(subcommand []string, config string, runsEngine bool) {
+		const (
+			pgValue   = "secret-pg-host"
+			otelValue = "secret-otel-token"
+		)
+		GinkgoT().Setenv("PGHOST", pgValue)
+		GinkgoT().Setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization="+otelValue)
+		logFile := filepath.Join(GinkgoT().TempDir(), "log.json")
+		DeferCleanup(cli.SetMemlimit(func(func(string) ([]byte, error), func(string) string) (int64, error) { return 0, nil }))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		args := append(slices.Clone(subcommand), "--config", testdata(config), "--log-destination", logFile)
+		_, err := execute(ctx, args...)
+		if runsEngine {
+			Expect(err).NotTo(HaveOccurred())
+		} else {
+			Expect(err).To(HaveOccurred())
+		}
+
+		_, pgSet := os.LookupEnv("PGHOST")
+		_, otelSet := os.LookupEnv("OTEL_EXPORTER_OTLP_HEADERS")
+		Expect(pgSet).To(BeFalse())
+		Expect(otelSet).To(BeFalse())
+
+		logged, err := os.ReadFile(logFile) //nolint:gosec // a file the spec created
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(logged)).To(ContainSubstring("removed environment variables"))
+		Expect(string(logged)).To(ContainSubstring("PGHOST"))
+		Expect(string(logged)).To(ContainSubstring("OTEL_EXPORTER_OTLP_HEADERS"))
+		Expect(string(logged)).NotTo(ContainSubstring(pgValue))
+		Expect(string(logged)).NotTo(ContainSubstring(otelValue))
+	},
+	Entry("instance --config", []string{"instance"}, "engine-valid.yaml", true),
+	Entry("instance test", []string{"instance", "test"}, "engine-unreachable.yaml", false),
+	Entry("instance print-config", []string{"instance", "print-config"}, "engine-unreachable.yaml", false),
+)

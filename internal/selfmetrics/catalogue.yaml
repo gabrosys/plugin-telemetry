@@ -44,7 +44,7 @@
   attributes: [source]
 - name: cnpg_otel_config_info
   instrument: gauge
-  unit: "1"
+  unit: ""
   description: Always 1; the active configuration generation and hash are attributes.
   attributes: [generation, hash]
 - name: cnpg_otel_exports_total

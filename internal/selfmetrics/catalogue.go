@@ -60,11 +60,14 @@ func Render(w io.Writer, ms []Metric) error {
 	b.WriteString("| Name | Instrument | Unit | Attributes | Description |\n")
 	b.WriteString("|---|---|---|---|---|\n")
 	for _, m := range ms {
-		attrs := ""
+		unit, attrs := "", ""
+		if m.Unit != "" {
+			unit = "`" + m.Unit + "`"
+		}
 		if len(m.Attributes) > 0 {
 			attrs = "`" + strings.Join(m.Attributes, "`, `") + "`"
 		}
-		fmt.Fprintf(&b, "| `%s` | %s | `%s` | %s | %s |\n", m.Name, m.Instrument, m.Unit, attrs, m.Description)
+		fmt.Fprintf(&b, "| `%s` | %s | %s | %s | %s |\n", m.Name, m.Instrument, unit, attrs, m.Description)
 	}
 	if _, err := io.WriteString(w, b.String()); err != nil {
 		return fmt.Errorf("write catalogue: %w", err)

@@ -55,7 +55,7 @@ const (
 	// cardinalityLimit is the most series one instrument reports per collection (the SDK default is 2000).
 	cardinalityLimit = 10000
 
-	// upMetric and upDescription are CloudNativePG v1.30.1's (pg_collector.go:130-135).
+	// upMetric and upDescription are CloudNativePG v1.30.1's (pg_collector.go:130-135), which sets no unit.
 	upMetric      = "cnpg_collector_up"
 	upDescription = "1 if PostgreSQL is up, 0 otherwise."
 )
@@ -86,12 +86,18 @@ func Run(ctx context.Context, o Options) error {
 	return nil
 }
 
-// runner runs jobs on one pool; each run holds inflight, so a replaced pool closes after its runs.
+// runner runs jobs on a pool with the executor built for one set of limits.
 type runner struct {
-	spec     poolSpec
-	limits   settings.Limits
-	pool     *pg.Pool
-	exec     *executor.Executor
+	spec   poolSpec
+	limits settings.Limits
+	pool   *sharedPool
+	exec   *executor.Executor
+}
+
+// sharedPool counts the runs in flight on a pool, whichever runner started them, so a replaced
+// pool closes after all of them.
+type sharedPool struct {
+	*pg.Pool
 	inflight sync.WaitGroup
 }
 
@@ -131,7 +137,7 @@ type engine struct {
 	plan   *replanner
 	errs   errorLog
 
-	up      atomic.Bool                    // the last facts round succeeded
+	up      atomic.Int64                   // 1 or 0 after the last facts round, -1 before the first
 	cluster atomic.Pointer[string]         // the cluster label of upMetric; nil before a valid configuration
 	server  atomic.Pointer[semver.Version] // from the last successful facts round
 	changed chan struct{}                  // a watched file changed
@@ -148,6 +154,7 @@ type engine struct {
 	factsTimer     clock.Timer
 	earlyTimer     clock.Timer
 	lastFacts      time.Time
+	factsFailures  int      // consecutive failed facts rounds
 	factsErrs      errorLog // the facts errors logged, keyed by the default database
 	exp            *export.Exporter
 	exporterFiles  []string
@@ -167,6 +174,7 @@ func newEngine(ctx context.Context, o Options) (*engine, error) {
 		changed: make(chan struct{}, 1),
 		early:   make(chan struct{}, 1),
 	}
+	e.up.Store(-1)
 	if e.clk == nil {
 		e.clk = clock.RealClock{}
 	}
@@ -208,16 +216,11 @@ func (e *engine) instrument(meter metric.Meter) error {
 		return fmt.Errorf("start runtime metrics: %w", err)
 	}
 	_, err := meter.Int64ObservableGauge(upMetric,
-		metric.WithUnit("1"),
 		metric.WithDescription(upDescription),
 		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			cluster := e.cluster.Load()
-			if cluster == nil {
+			cluster, up := e.cluster.Load(), e.up.Load()
+			if cluster == nil || up < 0 {
 				return nil
-			}
-			var up int64
-			if e.up.Load() {
-				up = 1
 			}
 			o.Observe(up, metric.WithAttributes(attribute.String("cluster", *cluster)))
 			return nil
@@ -382,7 +385,7 @@ func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 	case first || poolReplaced:
 		e.setFactsTimer(0)
 	case old.PlanInterval != s.PlanInterval:
-		e.setFactsTimer(s.PlanInterval)
+		e.setFactsTimer(factsWait(e.factsFailures, s.PlanInterval))
 	}
 	return nil
 }
@@ -407,13 +410,14 @@ func (e *engine) setRunner(ctx context.Context, s settings.Settings, idle time.D
 	if cur != nil && cur.spec == spec && cur.limits == s.Limits {
 		return false
 	}
-	var pool *pg.Pool
+	var pool *sharedPool
 	if cur != nil && cur.spec == spec {
 		pool = cur.pool
 	} else {
-		pool = pg.NewPool(pgConfig(s), s.Postgres.MaxConnections, idle, e.clk, pg.WithLogger(log.FromContext(ctx).GetLogger()))
+		pool = &sharedPool{Pool: pg.NewPool(pgConfig(s), s.Postgres.MaxConnections, idle, e.clk,
+			pg.WithLogger(log.FromContext(ctx).GetLogger()))}
 	}
-	next := &runner{spec: spec, limits: s.Limits, pool: pool, exec: executor.New(pool, s.Limits, e.serverVersion, e.clk)}
+	next := &runner{spec: spec, limits: s.Limits, pool: pool, exec: executor.New(pool.Pool, s.Limits, e.serverVersion, e.clk)}
 
 	e.mu.Lock()
 	e.runner = next
@@ -427,7 +431,7 @@ func (e *engine) setRunner(ctx context.Context, s settings.Settings, idle time.D
 	e.retired.Add(1)
 	go func() {
 		defer e.retired.Done()
-		cur.inflight.Wait()
+		cur.pool.inflight.Wait()
 		cur.pool.Close()
 	}()
 	return true
@@ -463,18 +467,43 @@ func (e *engine) stopLoop() {
 
 // runJob is the scheduler's RunFunc.
 func (e *engine) runJob(ctx context.Context, job planner.Job) {
-	e.mu.Lock()
-	r := e.runner
-	if r != nil {
-		r.inflight.Add(1)
-	}
-	e.mu.Unlock()
+	r, done := e.takeRunner()
 	if r == nil {
 		return
 	}
-	res := r.exec.Run(ctx, job)
-	r.inflight.Done()
+	res := func() executor.Result {
+		defer done()
+		return r.exec.Run(ctx, job)
+	}()
+	defer e.recoverRecord(ctx, res)
 	e.record(ctx, res)
+}
+
+// recoverRecord turns a panic in the bookkeeping of res into a failed run: logged once through
+// errorLog, counted with outcome error, its entry deleted.
+func (e *engine) recoverRecord(ctx context.Context, res executor.Result) {
+	p := recover()
+	if p == nil {
+		return
+	}
+	job := res.Job
+	err := fmt.Errorf("record the result: panic: %v", p)
+	e.errs.Failed(log.FromContext(ctx).GetLogger(), job.Query, job.Database, err)
+	e.store.Delete(snapshot.Key{Query: job.Query, Database: job.Database})
+	e.stats.QueryRun(job.Query, job.Database, selfmetrics.OutcomeError, res.Duration, res.Started)
+	e.stats.Series(e.store.Series())
+}
+
+// takeRunner returns the current runner with one more run in flight, and the function that ends that run.
+func (e *engine) takeRunner() (*runner, func()) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	r := e.runner
+	if r == nil {
+		return nil, nil
+	}
+	r.pool.inflight.Add(1)
+	return r, r.pool.inflight.Done
 }
 
 // record stores the result of a run that is still planned and counts it.
@@ -563,7 +592,8 @@ func (e *engine) onEarlyFacts(ctx context.Context) {
 	e.earlyTimer = e.clk.NewTimer(wait)
 }
 
-// factsRound gathers the facts, sets upMetric, closes idle connections and replans when the facts changed.
+// factsRound gathers the facts, sets upMetric, closes idle connections, replans when the facts changed
+// and schedules the next round: a planning cycle after a success, sooner with backoff after a failure.
 func (e *engine) factsRound(ctx context.Context) {
 	stopTimer(&e.earlyTimer)
 	cur := e.plan.current
@@ -571,7 +601,6 @@ func (e *engine) factsRound(ctx context.Context) {
 		return
 	}
 	s := cur.settings
-	e.setFactsTimer(s.PlanInterval)
 	e.lastFacts = e.clk.Now()
 
 	facts, err := e.gatherFacts(ctx, s)
@@ -579,19 +608,32 @@ func (e *engine) factsRound(ctx context.Context) {
 	logger := log.FromContext(ctx)
 	key := snapshot.Key{Database: s.Postgres.Database}
 	if err != nil {
-		e.up.Store(false)
+		e.factsFailures++
+		e.setFactsTimer(factsWait(e.factsFailures, s.PlanInterval))
+		e.setUp(false)
 		if ctx.Err() == nil && e.factsErrs.note(key, err.Error()) {
 			logger.Error(err, "gather facts", "database", s.Postgres.Database)
 		}
 		return
 	}
+	e.factsFailures = 0
+	e.setFactsTimer(s.PlanInterval)
 	if e.factsErrs.forget(key) {
 		logger.Info("gathered facts again", "database", s.Postgres.Database)
 	}
-	e.up.Store(true)
+	e.setUp(true)
 	v := facts.Version
 	e.server.Store(&v)
 	e.plan.setFacts(ctx, facts)
+}
+
+// setUp records the outcome of a facts round for upMetric.
+func (e *engine) setUp(ok bool) {
+	var up int64
+	if ok {
+		up = 1
+	}
+	e.up.Store(up)
 }
 
 func (e *engine) gatherFacts(ctx context.Context, s settings.Settings) (planner.Facts, error) {
@@ -608,6 +650,19 @@ func (e *engine) gatherFacts(ctx context.Context, s settings.Settings) (planner.
 		return planner.Facts{}, fmt.Errorf("gather facts: %w", err)
 	}
 	return facts, nil
+}
+
+// factsWait is the wait before the next facts round after failures consecutive failed ones:
+// planInterval after a success, else 1s, 2s, 4s ... capped at planInterval.
+func factsWait(failures int, planInterval time.Duration) time.Duration {
+	if failures == 0 {
+		return planInterval
+	}
+	wait := time.Second
+	for i := 1; i < failures && wait < planInterval; i++ {
+		wait *= 2
+	}
+	return min(wait, planInterval)
 }
 
 func (e *engine) setFactsTimer(d time.Duration) {
@@ -652,9 +707,14 @@ func (e *engine) watch(ctx context.Context, files []string) {
 		}
 		return
 	}
+	swapped := e.watcher != nil
 	e.stopWatch()
 	e.watcher, e.pendingWatch = w, nil
 	stopTimer(&e.retryTimer)
+	if swapped {
+		// An edit during the swap may have reached only the old watcher, so look at the files again.
+		e.notify()
+	}
 }
 
 // retryWatch retries a failed watch and reloads once it works, since changes may have been missed.

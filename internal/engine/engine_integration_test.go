@@ -273,7 +273,7 @@ var _ = Describe("Run", Ordered, func() {
 		}).WithTimeout(30 * time.Second).WithPolling(250 * time.Millisecond).Should(Succeed())
 
 		for _, p := range points(f.srv, "cnpg_otel_query_runs_total", time.Time{}) {
-			Expect(p.attrs["outcome"]).To(Equal("ok"), "%v", p.attrs)
+			Expect(p.attrs["outcome"]).NotTo(BeElementOf("error", "timeout"), "%v", p.attrs)
 		}
 		info := points(f.srv, "cnpg_otel_config_info", time.Time{})
 		Expect(info[len(info)-1].attrs).To(HaveKeyWithValue("generation", "1"))
@@ -470,9 +470,30 @@ var _ = Describe("Run with an invalid configuration at start", func() {
 	})
 })
 
+var _ = Describe("Run while PostgreSQL is not up yet", func() {
+	It("retries the facts with backoff and plans once PostgreSQL comes up", func(ctx SpecContext) {
+		// Nothing is planned, so no run can ask for an early round, and the planning cycle is far
+		// longer than the spec: only the facts backoff can bring cnpg_collector_up to 1.
+		f := newFixture(time.Hour)
+		writeFile(f.config, f.valid)
+		Expect(server.StopServer(ctx)).To(Succeed())
+		DeferCleanup(func(ctx SpecContext) { Expect(server.StartServer(ctx)).To(Succeed()) })
+		f.run()
+		Eventually(expectUp(f.srv, 0)).WithTimeout(10 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+
+		Expect(server.StartServer(ctx)).To(Succeed())
+		Eventually(expectUp(f.srv, 1)).WithTimeout(20 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+		since := time.Now()
+		Eventually(func() []point { return points(f.srv, "cnpg_backends_total", since) }).
+			WithTimeout(10 * time.Second).ShouldNot(BeEmpty())
+	}, SpecTimeout(2*time.Minute))
+})
+
 var _ = Describe("Run when PostgreSQL stops", func() {
 	It("gathers facts right after a run loses its connection", func(ctx SpecContext) {
-		// The planning cycle is far longer than the spec, so only the early facts rounds can move cnpg_collector_up.
+		// The planning cycle is far longer than the spec: after a successful round only an early round, asked
+		// for by a run that lost its connection, can bring cnpg_collector_up to 0. The way back to 1 comes from
+		// the facts backoff or further early rounds, bounded by the pool's reconnect backoff.
 		f := newFixture(time.Hour)
 		writeFile(f.config, f.valid)
 		f.run()

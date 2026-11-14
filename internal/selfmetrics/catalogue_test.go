@@ -28,7 +28,7 @@ var _ = Describe("Catalogue", func() {
 			{"cnpg_otel_series", "gauge", "{series}", nil},
 			{"cnpg_otel_config_loads_total", "counter", "{load}", []string{"source", "outcome"}},
 			{"cnpg_otel_config_duplicate_queries_total", "counter", "{query}", []string{"source"}},
-			{"cnpg_otel_config_info", "gauge", "1", []string{"generation", "hash"}},
+			{"cnpg_otel_config_info", "gauge", "", []string{"generation", "hash"}},
 			{"cnpg_otel_exports_total", "counter", "{export}", []string{"outcome"}},
 			{"cnpg_otel_last_export_success_timestamp_seconds", "gauge", "s", nil},
 			{
@@ -53,6 +53,12 @@ var _ = Describe("Catalogue", func() {
 			Expect(m.Description).NotTo(BeEmpty(), m.Name)
 		}
 		Expect(got).To(Equal(want))
+	})
+
+	It("leaves the unit cell empty for a metric without a unit", func() {
+		var buf bytes.Buffer
+		Expect(selfmetrics.Render(&buf, []selfmetrics.Metric{{Name: "m", Instrument: "gauge", Description: "d"}})).To(Succeed())
+		Expect(buf.String()).To(HaveSuffix("| `m` | gauge |  |  | d |\n"))
 	})
 
 	It("renders the committed markdown", func() {

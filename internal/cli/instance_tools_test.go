@@ -3,10 +3,13 @@ package cli_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -68,6 +71,37 @@ var _ = Describe("instance --config", func() {
 		cancel()
 		Eventually(done, 20*time.Second).Should(Receive(BeNil()))
 		Expect(calls).To(Equal(1))
+	})
+})
+
+var _ = Describe("instance --config with an unreadable memory limit", func() {
+	It("logs the error at info and runs the engine", func() {
+		DeferCleanup(cli.SetMemlimit(func(func(string) ([]byte, error), func(string) string) (int64, error) {
+			return 0, fmt.Errorf("read /sys/fs/cgroup/memory.max: %w", fs.ErrPermission)
+		}))
+		logFile := filepath.Join(GinkgoT().TempDir(), "log")
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			_, err := execute(ctx, "--log-destination", logFile, "instance", "--config", testdata("engine-valid.yaml"))
+			done <- err
+		}()
+		logged := func(g Gomega) string {
+			raw, err := os.ReadFile(logFile) //nolint:gosec // a file the spec created
+			g.Expect(err).NotTo(HaveOccurred())
+			return string(raw)
+		}
+		Eventually(logged).WithTimeout(10 * time.Second).Should(ContainSubstring("starting the metrics engine"))
+		cancel()
+		Eventually(done, 20*time.Second).Should(Receive(BeNil()))
+
+		var line string
+		for l := range strings.Lines(logged(Default)) {
+			if strings.Contains(l, fs.ErrPermission.Error()) {
+				line = l
+			}
+		}
+		Expect(line).To(And(ContainSubstring(`"level":"info"`), ContainSubstring("memory limit")))
 	})
 })
 

@@ -20,7 +20,8 @@ const (
 var setMemoryLimit = debug.SetMemoryLimit
 
 // Set sets the soft memory limit to 80% of the cgroup v2 memory.max, unless GOMEMLIMIT is set
-// or there is no limit; it returns the limit applied, or 0.
+// or there is no limit; it returns the limit applied, or 0. A read error other than a missing
+// file returns 0 with the error, and the limit is left alone.
 func Set(readFile func(string) ([]byte, error), getenv func(string) string) (int64, error) {
 	if getenv("GOMEMLIMIT") != "" {
 		return 0, nil
@@ -40,6 +41,9 @@ func Set(readFile func(string) ([]byte, error), getenv func(string) string) (int
 	limit := total / 100 * percent
 	if r := total % 100; r > 0 {
 		limit += r * percent / 100
+	}
+	if limit <= 0 {
+		return 0, nil
 	}
 	setMemoryLimit(limit)
 	return limit, nil

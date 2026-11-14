@@ -78,11 +78,11 @@ func newInstanceCommand() *cobra.Command {
 			}
 
 			clearEnv(ctx)
-			limit, err := setMemoryLimit(os.ReadFile, os.Getenv)
-			if err != nil {
-				return fmt.Errorf("set memory limit: %w", err)
+			if limit, err := setMemoryLimit(os.ReadFile, os.Getenv); err != nil {
+				logger.Info("memory limit not set", "error", err.Error())
+			} else {
+				logger.Info("memory limit", "bytes", limit)
 			}
-			logger.Info("memory limit", "bytes", limit)
 			rnd, err := newRand()
 			if err != nil {
 				return err

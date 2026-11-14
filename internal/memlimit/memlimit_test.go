@@ -73,8 +73,16 @@ var _ = Describe("Set", func() {
 	})
 
 	It("reports a read error other than a missing file", func() {
-		_, err := memlimit.Set(func(string) ([]byte, error) { return nil, fs.ErrPermission }, noEnv)
+		n, err := memlimit.Set(func(string) ([]byte, error) { return nil, fs.ErrPermission }, noEnv)
 		Expect(errors.Is(err, fs.ErrPermission)).To(BeTrue())
+		Expect(n).To(BeZero())
+		Expect(applied).To(BeEmpty())
+	})
+
+	It("leaves the limit alone when 80% of memory.max rounds down to zero", func() {
+		n, err := memlimit.Set(file("1\n"), noEnv)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(n).To(BeZero())
 		Expect(applied).To(BeEmpty())
 	})
 })

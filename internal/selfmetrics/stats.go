@@ -173,7 +173,8 @@ func (s *Stats) ConfigGeneration(generation uint64, hash string) {
 	s.generation, s.hash, s.configSet = generation, hash, true
 }
 
-// Export records one export operation. Skipped exports only count in the export total.
+// Export records one export operation. Skipped exports only count in the export total. The last
+// success time moves only when the backend accepted at least one point.
 func (s *Stats) Export(r ExportRecord) {
 	s.mu.Lock()
 	s.exports[r.Outcome]++
@@ -183,7 +184,9 @@ func (s *Stats) Export(r ExportRecord) {
 	}
 	key := pointKey{r.ErrorType, r.ComponentType, r.ServerAddress, r.ServerPort}
 	if r.Outcome == OutcomeOK {
-		s.lastExportOK, s.lastExportSet = timestamp(r.At), true
+		if r.Rejected < r.Points {
+			s.lastExportOK, s.lastExportSet = timestamp(r.At), true
+		}
 		key.errorType = ""
 		s.addPoints(key, r.Points-r.Rejected)
 	} else {

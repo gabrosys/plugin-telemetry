@@ -212,6 +212,31 @@ var _ = Describe("Stats", func() {
 		}
 	})
 
+	It("moves the export heartbeat only when the backend accepted at least one point", func() {
+		heartbeat := func() map[string]float64 {
+			GinkgoHelper()
+			m, found := collect()["cnpg_otel_last_export_success_timestamp_seconds"]
+			if !found {
+				return nil
+			}
+			return points(m)
+		}
+		export := func(at time.Time, pts, rejected int) {
+			stats.Export(selfmetrics.ExportRecord{
+				Outcome: selfmetrics.OutcomeOK, At: at, Points: pts, Rejected: rejected,
+				ComponentType: "otlp_http_metric_exporter", ServerAddress: "collector", ServerPort: 4318,
+			})
+		}
+
+		export(at, 5, 5)
+		Expect(heartbeat()).To(BeEmpty(), "a request with every point rejected")
+		export(at.Add(time.Minute), 5, 4)
+		Expect(heartbeat()).To(Equal(map[string]float64{"": float64(at.Add(time.Minute).Unix())}))
+		export(at.Add(2*time.Minute), 5, 5)
+		Expect(heartbeat()).To(Equal(map[string]float64{"": float64(at.Add(time.Minute).Unix())}))
+		Expect(points(collect()["cnpg_otel_exports_total"])).To(Equal(map[string]float64{"outcome=ok": 3}))
+	})
+
 	It("does not move the last success timestamp on a capped run", func() {
 		stats.QueryRun("q", "app", selfmetrics.OutcomeOK, time.Second, at)
 		stats.QueryRun("q", "app", selfmetrics.OutcomeCapped, time.Second, at.Add(time.Hour))

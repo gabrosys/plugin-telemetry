@@ -1,9 +1,8 @@
 package clusterconfig
 
 import (
-	"errors"
 	"fmt"
-	"net/url"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -11,8 +10,6 @@ import (
 	"github.com/gabrosys/plugin-telemetry/api/v1alpha1"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
 )
-
-var errEndpointShape = errors.New("must be an http or https URL with a host and no user info, query or fragment")
 
 const (
 	envPrefix        = "OTEL_EXPORTER_OTLP_"
@@ -122,11 +119,17 @@ func (o otlpEnv) apply(e *settings.Exporter, spec v1alpha1.OTLPExporter) (warnin
 
 	if spec.Timeout == nil {
 		if v, ok := o.signal("TIMEOUT"); ok {
-			ms, err := strconv.Atoi(v.value)
-			if err != nil || ms <= 0 {
+			ms, err := strconv.ParseInt(v.value, 10, 64)
+			switch {
+			case err != nil || ms <= 0 || ms > math.MaxInt64/int64(time.Millisecond):
 				warnings = append(warnings, v.key+": not a positive number of milliseconds, ignored")
-			} else {
-				e.Timeout = time.Duration(ms) * time.Millisecond
+			default:
+				timeout := time.Duration(ms) * time.Millisecond
+				if err := settings.CheckExporterTimeout(timeout, e.Interval); err != nil {
+					errs = append(errs, fmt.Errorf("%s: %w", v.key, err))
+				} else {
+					e.Timeout = timeout
+				}
 			}
 		}
 	}
@@ -147,14 +150,14 @@ func (o otlpEnv) apply(e *settings.Exporter, spec v1alpha1.OTLPExporter) (warnin
 // which gets the signal path for http/protobuf (spec v1.62.0 protocol/exporter.md:108-171).
 func (o otlpEnv) endpoint(protocol string) (string, error) {
 	if v, ok := o.get(envMetricsPrefix + "ENDPOINT"); ok {
-		if !validEndpoint(v.value) {
-			return "", fmt.Errorf("%s: %w", v.key, errEndpointShape)
+		if err := settings.CheckEndpoint(v.value); err != nil {
+			return "", fmt.Errorf("%s: %w", v.key, err)
 		}
 		return v.value, nil
 	}
 	if v, ok := o.get(envPrefix + "ENDPOINT"); ok {
-		if !validEndpoint(v.value) {
-			return "", fmt.Errorf("%s: %w", v.key, errEndpointShape)
+		if err := settings.CheckEndpoint(v.value); err != nil {
+			return "", fmt.Errorf("%s: %w", v.key, err)
 		}
 		if protocol == settings.ProtocolHTTP {
 			return signalURL(v.value), nil
@@ -180,13 +183,4 @@ func signalURL(base string) string {
 		base += "/"
 	}
 	return base + metricsPath
-}
-
-// validEndpoint reports whether s is an http or https URL with a host and no user info, query or fragment.
-func validEndpoint(s string) bool {
-	u, err := url.Parse(s)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return false
-	}
-	return u.User == nil && u.RawQuery == "" && u.Fragment == ""
 }

@@ -129,6 +129,21 @@ var _ = Describe("Build", func() {
 		Expect(mustBuild(in).DefaultInterval).To(Equal(20 * time.Second))
 	})
 
+	DescribeTable("keeps 30s and warns when metricsQueriesTTL is under 1s",
+		func(ttl time.Duration) {
+			in := newInputs()
+			in.Cluster.Spec.Monitoring = &apiv1.MonitoringConfiguration{MetricsQueriesTTL: dur(ttl)}
+			in.Exporter.Spec.Metrics.Groups = []v1alpha1.QueryGroup{{Name: "g", Queries: []string{"q"}}}
+			s, warnings, err := clusterconfig.Build(in)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(s.DefaultInterval).To(Equal(30 * time.Second))
+			Expect(s.Groups[0].Interval).To(Equal(30 * time.Second))
+			Expect(warnings).To(ConsistOf(ContainSubstring("spec.monitoring.metricsQueriesTTL")))
+		},
+		Entry("zero, which disables CNPG's cache", time.Duration(0)),
+		Entry("500ms", 500*time.Millisecond),
+	)
+
 	It("orders sources as CNPG does: ConfigMaps, then Secrets, then querySets, all after the builtin query", func() {
 		in := newInputs()
 		in.Cluster = monitored()

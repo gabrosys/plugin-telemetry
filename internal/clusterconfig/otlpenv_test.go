@@ -205,6 +205,14 @@ var _ = Describe("OTEL_EXPORTER_OTLP_* keys", func() {
 		))
 	})
 
+	It("rejects a _TIMEOUT above half the interval without echoing it", func() {
+		in := withEnv(nil, map[string]string{"OTEL_EXPORTER_OTLP_TIMEOUT": "20000"})
+		_, _, err := clusterconfig.Build(in)
+		Expect(err).To(MatchError(And(ContainSubstring("OTEL_EXPORTER_OTLP_TIMEOUT"), ContainSubstring("15s"))))
+		Expect(err.Error()).NotTo(ContainSubstring("20s"))
+		Expect(err.Error()).NotTo(ContainSubstring("20000"))
+	})
+
 	It("never puts a value read from the Secret in an error or warning", func() {
 		const secret = "secret-value-xyz"
 		cases := []map[string]string{
@@ -218,10 +226,14 @@ var _ = Describe("OTEL_EXPORTER_OTLP_* keys", func() {
 			{"OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": secret},
 			{"OTEL_RESOURCE_ATTRIBUTES": secret},
 			{"OTEL_SERVICE_NAME": secret},
+			{"OTEL_EXPORTER_OTLP_TIMEOUT": "20000"},
+			{"OTEL_EXPORTER_OTLP_TIMEOUT": "99999999999999999"},
 		}
 		for _, data := range cases {
 			in := withEnv(nil, data)
-			in.Exporter.Spec.Exporter.Endpoint = ""
+			if _, ok := data[envEndpoint]; ok {
+				in.Exporter.Spec.Exporter.Endpoint = ""
+			}
 			_, warnings, err := clusterconfig.Build(in)
 			messages := append([]string{}, warnings...)
 			if err != nil {

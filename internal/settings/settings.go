@@ -216,8 +216,8 @@ func (s Settings) validateExporter() []error {
 	if e.Interval < minInterval {
 		errs = append(errs, fmt.Errorf("exporter.interval: must be at least %s, got %s", minInterval, e.Interval))
 	}
-	if e.Timeout <= 0 || e.Timeout > e.Interval/2 {
-		errs = append(errs, fmt.Errorf("exporter.timeout: must be above 0 and at most half of exporter.interval (%s), got %s", e.Interval/2, e.Timeout))
+	if err := CheckExporterTimeout(e.Timeout, e.Interval); err != nil {
+		errs = append(errs, fmt.Errorf("exporter.timeout: %w, got %s", err, e.Timeout))
 	}
 	if e.MaxPointsPerRequest < 1 {
 		errs = append(errs, fmt.Errorf("exporter.maxPointsPerRequest: must be at least 1, got %d", e.MaxPointsPerRequest))
@@ -236,22 +236,46 @@ func (s Settings) validateExporter() []error {
 		errs = append(errs, fmt.Errorf("exporter.tls.%s: required when the other of certFile and keyFile is set", missing))
 	}
 
-	u, err := url.Parse(e.Endpoint)
-	switch {
+	switch err := CheckEndpoint(e.Endpoint); {
 	case e.Endpoint == "":
 		errs = append(errs, errors.New("exporter.endpoint: must not be empty"))
-	case err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "":
-		errs = append(errs, fmt.Errorf("exporter.endpoint: must be an http or https URL with a host, got %q",
-			RedactEndpoint(e.Endpoint)))
-	case u.User != nil || u.RawQuery != "" || u.Fragment != "":
-		errs = append(errs, fmt.Errorf("exporter.endpoint: must not have user info, a query or a fragment "+
-			"(headers go in exporter.headersFile), got %q", RedactEndpoint(e.Endpoint)))
-	case u.Scheme == "http" && !e.tlsConfigured():
-		// plaintext without tls settings is valid
-	case u.Scheme == "http":
+	case err != nil:
+		errs = append(errs, fmt.Errorf("exporter.endpoint: %w, got %q", err, RedactEndpoint(e.Endpoint)))
+	case e.tlsConfigured() && plaintext(e.Endpoint):
 		errs = append(errs, errors.New("exporter.tls: cannot be set with an http:// endpoint"))
 	}
 	return errs
+}
+
+// plaintext reports whether a valid endpoint has the http scheme.
+func plaintext(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	return err == nil && u.Scheme == "http"
+}
+
+// CheckExporterTimeout checks the per-attempt timeout against the export interval. The error holds no value.
+func CheckExporterTimeout(timeout, interval time.Duration) error {
+	if timeout <= 0 || timeout > interval/2 {
+		return fmt.Errorf("must be above 0 and at most half of the export interval (%s)", interval/2)
+	}
+	return nil
+}
+
+var (
+	errEndpointURL   = errors.New("must be an http or https URL with a host")
+	errEndpointParts = errors.New("must not have user info, a query or a fragment (headers go in exporter.headersFile)")
+)
+
+// CheckEndpoint checks the shape of an exporter endpoint. The error holds no value.
+func CheckEndpoint(endpoint string) error {
+	u, err := url.Parse(endpoint)
+	switch {
+	case err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "":
+		return errEndpointURL
+	case u.User != nil || u.RawQuery != "" || u.Fragment != "":
+		return errEndpointParts
+	}
+	return nil
 }
 
 // RedactEndpoint returns endpoint for messages: the URL's Redacted form with the user, the query and

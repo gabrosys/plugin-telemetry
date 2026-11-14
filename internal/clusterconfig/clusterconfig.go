@@ -3,6 +3,7 @@ package clusterconfig
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 
@@ -54,14 +55,15 @@ func Build(in Inputs) (settings.Settings, []string, error) {
 	}
 
 	spec := in.Exporter.Spec
-	applyMetrics(&s, in.Cluster, spec.Metrics)
+	warnings := applyMetrics(&s, in.Cluster, spec.Metrics)
 	applyExporter(&s.Exporter, spec.Exporter)
 
 	env := otlpEnv{configMap: in.EnvConfigMap, secret: in.EnvSecret}
 	if spec.EnvFrom != nil && spec.EnvFrom.Secret != nil {
 		env.secretName = spec.EnvFrom.Secret.Name
 	}
-	warnings, envErrs := env.apply(&s.Exporter, spec.Exporter)
+	envWarnings, envErrs := env.apply(&s.Exporter, spec.Exporter)
+	warnings = append(warnings, envWarnings...)
 	errs = append(errs, envErrs...)
 	errs = append(errs, env.unsupported()...)
 	warnings = append(warnings, env.ignored()...)
@@ -121,7 +123,7 @@ func applyAuth(s *settings.Settings, in Inputs) error {
 	return nil
 }
 
-func applyMetrics(s *settings.Settings, c *apiv1.Cluster, m v1alpha1.MetricsSpec) {
+func applyMetrics(s *settings.Settings, c *apiv1.Cluster, m v1alpha1.MetricsSpec) (warnings []string) {
 	if m.Interval != nil {
 		s.Exporter.Interval = m.Interval.Duration
 	}
@@ -135,7 +137,12 @@ func applyMetrics(s *settings.Settings, c *apiv1.Cluster, m v1alpha1.MetricsSpec
 	case m.DefaultInterval != nil:
 		s.DefaultInterval = m.DefaultInterval.Duration
 	case c.Spec.Monitoring != nil && c.Spec.Monitoring.MetricsQueriesTTL != nil:
-		s.DefaultInterval = c.Spec.Monitoring.MetricsQueriesTTL.Duration
+		if ttl := c.Spec.Monitoring.MetricsQueriesTTL.Duration; ttl >= time.Second {
+			s.DefaultInterval = ttl
+		} else {
+			warnings = append(warnings, fmt.Sprintf(
+				"spec.monitoring.metricsQueriesTTL: below 1s, using the default interval of %s", s.DefaultInterval))
+		}
 	}
 
 	for _, g := range m.Groups {
@@ -173,6 +180,7 @@ func applyMetrics(s *settings.Settings, c *apiv1.Cluster, m v1alpha1.MetricsSpec
 	for _, name := range m.QuerySets {
 		s.Sources = append(s.Sources, QuerySetFile(name))
 	}
+	return warnings
 }
 
 func setInt(dst *int, v *int32) {

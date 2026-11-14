@@ -26,6 +26,9 @@ var _ = Describe("ParseResourceAttributes", func() {
 		Entry("an empty key", "a=1,=secretvalue"),
 		Entry("a bad escape in a key", "%zz=secretvalue"),
 		Entry("a trailing comma", "a=1,"),
+		Entry("an unencoded '=' in a value", "a=b=csecretvalue"),
+		Entry("a value that decodes to invalid UTF-8", "a=%FFsecretvalue"),
+		Entry("a key that decodes to invalid UTF-8", "%FFsecretvalue=1"),
 	)
 
 	It("trims spaces around keys and values", func() {

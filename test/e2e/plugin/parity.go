@@ -26,6 +26,10 @@ const (
 	// counterTolerance is how far below CNPG's value ours may be, as a fraction of CNPG's.
 	counterTolerance = 0.1
 	absent           = "absent"
+	// cnpgUpdated is when CNPG last computed its query metrics, in whole Unix seconds.
+	cnpgUpdated = "cnpg_last_update_timestamp"
+	// ourSuccess is when a query of ours last ran with outcome ok, by query and database.
+	ourSuccess = "cnpg_otel_query_last_success_timestamp_seconds"
 )
 
 var (
@@ -48,6 +52,8 @@ type Parity struct {
 	ExpectedCNPG, ExpectedOurs []string
 	// Gauges are the gauge series that are not constants, with both values. They are never differences.
 	Gauges []Diff
+	// NotCompared are the counter and histogram series whose values weren't checked, with the reason.
+	NotCompared []Diff
 }
 
 // Diff is a difference on a metric, or on a series written name{key="value",...}.
@@ -73,14 +79,24 @@ type family struct {
 
 // sample is a series' newest value, or for a histogram its count and sum.
 type sample struct {
+	labels     map[string]string
 	value, sum float64
 	constant   bool // ours only: at least 2 points, all with one value
 }
 
+// sampleTimes says when each side computed its values, in Unix seconds.
+type sampleTimes struct {
+	cnpg     float64
+	hasCNPG  bool
+	ours     map[string]map[string]float64 // by query, then database, from the newest export
+	interval float64                       // median gap between the pod's exports; 0 with one export
+}
+
 // Compare compares CNPG's text for pod with the lines that hold pod's resource, found by its
-// k8s.pod.name attribute. The counter rule assumes CNPG was scraped within one export interval of our
-// newest point for pod; the caller ensures it. Compare fails when the text doesn't parse or holds no
-// metric, and when no line holds pod.
+// k8s.pod.name attribute. Counters and histograms are value-checked only when CNPG's
+// cnpg_last_update_timestamp and our query's last success are at most one export interval apart, the
+// interval being the median gap between pod's exports in lines. Compare fails when the text doesn't
+// parse or holds no metric, and when no line holds pod.
 func Compare(promText []byte, lines []otlp.Line, pod string) (Parity, error) {
 	cnpg, err := cnpgFamilies(promText)
 	if err != nil {
@@ -94,6 +110,7 @@ func Compare(promText []byte, lines []otlp.Line, pod string) (Parity, error) {
 	if err != nil {
 		return Parity{}, err
 	}
+	times := newSampleTimes(cnpg, podLines)
 
 	selfMetrics := map[string]bool{}
 	for _, m := range selfmetrics.ByComponent(selfmetrics.ComponentEngine) {
@@ -114,7 +131,7 @@ func Compare(promText []byte, lines []otlp.Line, pod string) (Parity, error) {
 		case !inCNPG:
 			p.OnlyOurs = append(p.OnlyOurs, name)
 		default:
-			p.compare(name, c, o)
+			p.compare(name, c, o, times)
 		}
 	}
 	p.sort()
@@ -130,7 +147,7 @@ func expectedCNPG(name string) bool {
 	return strings.HasPrefix(name, "cnpg_collector_") || strings.HasPrefix(name, "go_") || strings.HasPrefix(name, "process_")
 }
 
-func (p *Parity) compare(name string, c, o family) {
+func (p *Parity) compare(name string, c, o family, times sampleTimes) {
 	if c.kind != o.kind {
 		p.ValueDiffs = append(p.ValueDiffs, Diff{name, fmt.Sprintf("type: CNPG %s, ours %s", c.kind, o.kind)})
 		if !scalar(c.kind) || !scalar(o.kind) {
@@ -146,12 +163,25 @@ func (p *Parity) compare(name string, c, o family) {
 		cv, inCNPG := c.series[labels]
 		ov, inOurs := o.series[labels]
 		series := seriesName(name, labels)
+		attrs := ov.labels
+		if !inOurs {
+			attrs = cv.labels
+		}
 		switch o.kind {
 		case kindCounter:
+			if reason, ok := times.close(name, attrs); !ok {
+				p.NotCompared = append(p.NotCompared, Diff{series, "counter: " + reason + "; " + values(cv.value, inCNPG, ov.value, inOurs)})
+				continue
+			}
 			if d, ok := counterDiff(cv.value, inCNPG, ov.value, inOurs); !ok {
 				p.ValueDiffs = append(p.ValueDiffs, Diff{series, "counter: " + d})
 			}
 		case kindHistogram:
+			if reason, ok := times.close(name, attrs); !ok {
+				p.NotCompared = append(p.NotCompared, Diff{series, fmt.Sprintf("histogram: %s; count %s; sum %s",
+					reason, values(cv.value, inCNPG, ov.value, inOurs), values(cv.sum, inCNPG, ov.sum, inOurs))})
+				continue
+			}
 			for _, part := range []struct {
 				name       string
 				cnpg, ours float64
@@ -176,6 +206,90 @@ func (p *Parity) compare(name string, c, o family) {
 }
 
 func scalar(k kind) bool { return k == kindCounter || k == kindGauge }
+
+func newSampleTimes(cnpg map[string]family, podLines []otlp.Line) sampleTimes {
+	var t sampleTimes
+	if s, ok := cnpg[cnpgUpdated].series[""]; ok {
+		t.cnpg, t.hasCNPG = s.value, true
+	}
+
+	exports := make([]float64, 0, len(podLines))
+	for _, l := range podLines {
+		exports = append(exports, float64(l.Time.UnixNano())/1e9)
+	}
+	slices.Sort(exports)
+	exports = slices.Compact(exports)
+	if len(exports) > 1 {
+		gaps := make([]float64, 0, len(exports)-1)
+		for i := 1; i < len(exports); i++ {
+			gaps = append(gaps, exports[i]-exports[i-1])
+		}
+		t.interval = median(gaps)
+	}
+
+	newest := slices.MaxFunc(podLines, func(a, b otlp.Line) int { return a.Time.Compare(b.Time) }).Time
+	var last []otlp.Line
+	for _, l := range podLines {
+		if l.Time.Equal(newest) {
+			last = append(last, l)
+		}
+	}
+	t.ours = map[string]map[string]float64{}
+	for _, pt := range otlp.Points(last, ourSuccess) {
+		query, database := pt.Attrs["query"], pt.Attrs["database"]
+		if t.ours[query] == nil {
+			t.ours[query] = map[string]float64{}
+		}
+		t.ours[query][database] = pt.Value
+	}
+
+	return t
+}
+
+func median(xs []float64) float64 {
+	sorted := slices.Sorted(slices.Values(xs))
+	mid := len(sorted) / 2
+	if len(sorted)%2 == 1 {
+		return sorted[mid]
+	}
+
+	return (sorted[mid-1] + sorted[mid]) / 2
+}
+
+// close reports whether CNPG's and our sample times of the series of metric with labels are at most one
+// export interval apart. Our time is that of the query with the longest cnpg_<query>_ prefix of metric, on
+// the series' database or datname when the query ran there, else on the query's oldest database.
+func (t sampleTimes) close(metric string, labels map[string]string) (string, bool) {
+	if !t.hasCNPG {
+		return "no CNPG time", false
+	}
+	if t.interval == 0 {
+		return "one export, no export interval", false
+	}
+	var query string
+	for q := range t.ours {
+		if strings.HasPrefix(metric, "cnpg_"+q+"_") && len(q) > len(query) {
+			query = q
+		}
+	}
+	if query == "" {
+		return "no query match", false
+	}
+
+	databases := t.ours[query]
+	ours, ok := databases[labels["database"]]
+	if !ok {
+		ours, ok = databases[labels["datname"]]
+	}
+	if !ok {
+		ours = slices.Min(slices.Collect(maps.Values(databases)))
+	}
+	if gap := math.Abs(t.cnpg - ours); gap > t.interval {
+		return "sample times " + strconv.FormatFloat(gap, 'f', 1, 64) + " s apart", false
+	}
+
+	return "", true
+}
 
 // counterDiff applies the counter rule: ours ≤ CNPG and CNPG − ours ≤ 10 % of CNPG, NaN equal to NaN.
 func counterDiff(cnpg float64, inCNPG bool, ours float64, inOurs bool) (string, bool) {
@@ -237,7 +351,7 @@ func (p *Parity) sort() {
 	for _, names := range []*[]string{&p.OnlyCNPG, &p.OnlyOurs, &p.ExpectedCNPG, &p.ExpectedOurs} {
 		slices.Sort(*names)
 	}
-	for _, diffs := range []*[]Diff{&p.LabelDiffs, &p.ValueDiffs, &p.Gauges} {
+	for _, diffs := range []*[]Diff{&p.LabelDiffs, &p.ValueDiffs, &p.NotCompared, &p.Gauges} {
 		slices.SortFunc(*diffs, func(a, b Diff) int {
 			return cmp.Or(strings.Compare(a.Metric, b.Metric), strings.Compare(a.Detail, b.Detail))
 		})
@@ -264,7 +378,9 @@ func cnpgFamilies(text []byte) (map[string]family, error) {
 				labels[lp.GetName()] = lp.GetValue()
 				keys[lp.GetName()] = true
 			}
-			f.series[labelString(labels)] = cnpgSample(m)
+			s := cnpgSample(m)
+			s.labels = labels
+			f.series[labelString(labels)] = s
 		}
 		f.keys = slices.Sorted(maps.Keys(keys))
 		out[name] = f
@@ -356,7 +472,9 @@ func ourSeries(lines []otlp.Line, s otlp.Shape) map[string]sample {
 			byLabels[labels] = append(byLabels[labels], pt)
 		}
 		for labels, pts := range byLabels {
-			out[labels] = pointsSample(pts)
+			s := pointsSample(pts)
+			s.labels = pts[0].Attrs
+			out[labels] = s
 		}
 	case otlp.TypeHistogram:
 		newest := map[string]otlp.HistogramPoint{}
@@ -367,7 +485,7 @@ func ourSeries(lines []otlp.Line, s otlp.Shape) map[string]sample {
 			}
 		}
 		for labels, pt := range newest {
-			out[labels] = sample{value: float64(pt.Count), sum: pt.Sum}
+			out[labels] = sample{labels: pt.Attrs, value: float64(pt.Count), sum: pt.Sum}
 		}
 	}
 
@@ -426,6 +544,8 @@ func (p Parity) Markdown(title string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s\n\n", title)
 	b.WriteString("Counters, and histogram counts and sums, pass when ours ≤ CNPG and CNPG − ours ≤ 10 % of CNPG. " +
+		"They are checked only when CNPG's cnpg_last_update_timestamp and our query's last success are at most " +
+		"one export interval apart, and are listed as not compared otherwise. " +
 		"A series whose points of ours, at least 2, all hold one value must match exactly; other gauges are listed and never fail. " +
 		"NaN equals NaN.\n\n")
 	b.WriteString("CNPG can't see MetricQuerySets, so their metrics are only in ours.\n\n")
@@ -441,6 +561,7 @@ func (p Parity) Markdown(title string) string {
 		{"Expected only in ours", len(p.ExpectedOurs)},
 		{"Label differences", len(p.LabelDiffs)},
 		{"Value differences", len(p.ValueDiffs)},
+		{"Not compared", len(p.NotCompared)},
 		{"Gauges", len(p.Gauges)},
 	} {
 		fmt.Fprintf(&b, "| %s | %d |\n", row.name, row.count)
@@ -454,6 +575,7 @@ func (p Parity) Markdown(title string) string {
 	writeNames(&b, "### Ours", p.ExpectedOurs)
 	writeDiffs(&b, "## Label differences", p.LabelDiffs)
 	writeDiffs(&b, "## Value differences", p.ValueDiffs)
+	writeDiffs(&b, "## Not compared", p.NotCompared)
 	writeDiffs(&b, "## Gauges", p.Gauges)
 
 	return strings.TrimRight(b.String(), "\n") + "\n"

@@ -57,8 +57,8 @@ func itParity(target func() parityTarget) {
 		cs, err := kubernetes.NewForConfig(t.cfg)
 		Expect(err).NotTo(HaveOccurred())
 
-		// CNPG is scraped right after an export of the primary newer than start, so the scrape and our
-		// newest point are at most one export interval apart, as Compare's counter rule needs.
+		// CNPG is scraped right after an export of the primary newer than start, at most one export
+		// interval after our newest point.
 		start := time.Now()
 		var (
 			text  []byte

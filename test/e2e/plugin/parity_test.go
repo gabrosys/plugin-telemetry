@@ -26,16 +26,20 @@ const (
 	parityOther  = "plugin-peer-2"
 	podAttribute = `{"key":"k8s.pod.name","value":{"stringValue":"`
 
-	xactCommit   = "cnpg_pg_stat_database_xact_commit"
-	baseOne      = "cnpg_e2e_base_one"
-	primaryOne   = "cnpg_e2e_primary_one"
-	histogram    = "cnpg_parity_latency"
-	histogramCNP = `# HELP cnpg_parity_latency Query latency.
-# TYPE cnpg_parity_latency histogram
-cnpg_parity_latency_bucket{op="read",le="1"} 2
-cnpg_parity_latency_bucket{op="read",le="+Inf"} 5
-cnpg_parity_latency_sum{op="read"} 2.5
-cnpg_parity_latency_count{op="read"} 5
+	xactCommit    = "cnpg_pg_stat_database_xact_commit"
+	buffersAlloc  = "cnpg_pg_stat_bgwriter_buffers_alloc"
+	baseOne       = "cnpg_e2e_base_one"
+	primaryOne    = "cnpg_e2e_primary_one"
+	lastUpdate    = "cnpg_last_update_timestamp"
+	lastSuccess   = "cnpg_otel_query_last_success_timestamp_seconds"
+	statDatabase  = "pg_stat_database"
+	histogram     = "cnpg_e2e_base_latency"
+	histogramText = `# HELP cnpg_e2e_base_latency Query latency.
+# TYPE cnpg_e2e_base_latency histogram
+cnpg_e2e_base_latency_bucket{op="read",le="1"} 2
+cnpg_e2e_base_latency_bucket{op="read",le="+Inf"} 5
+cnpg_e2e_base_latency_sum{op="read"} 2.5
+cnpg_e2e_base_latency_count{op="read"} 5
 `
 )
 
@@ -121,7 +125,39 @@ func newestValue(lines []otlp.Line, name string, attrs map[string]string) float6
 	return p.Value
 }
 
-// addHistogram adds the histogram cnpg_parity_latency{op="read"} to the last line, under our scope.
+// querySuccess is the last success time of query on the app database in our newest export.
+func querySuccess(lines []otlp.Line, query string) float64 {
+	GinkgoHelper()
+
+	return newestValue(lines, lastSuccess, map[string]string{"query": query, "database": "app"})
+}
+
+// sampledAfter sets CNPG's cnpg_last_update_timestamp to the whole second of query's last success plus offset.
+func sampledAfter(text []byte, lines []otlp.Line, query string, offset float64) []byte {
+	GinkgoHelper()
+
+	return setSample(text, lastUpdate, math.Floor(querySuccess(lines, query))+offset)
+}
+
+// addSuccess adds our last success time of query on database to the newest export.
+func addSuccess(lines []otlp.Line, query, database string, at float64) {
+	GinkgoHelper()
+
+	ms := metricsNamed(lines[len(lines)-1:], lastSuccess)
+	Expect(ms).To(HaveLen(1))
+	gauge := ms[0].GetGauge()
+	Expect(gauge.GetDataPoints()).NotTo(BeEmpty())
+	gauge.DataPoints = append(gauge.DataPoints, &metricpb.NumberDataPoint{
+		TimeUnixNano: gauge.GetDataPoints()[0].GetTimeUnixNano(),
+		Value:        &metricpb.NumberDataPoint_AsDouble{AsDouble: at},
+		Attributes: []*commonpb.KeyValue{
+			{Key: "query", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: query}}},
+			{Key: "database", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: database}}},
+		},
+	})
+}
+
+// addHistogram adds the histogram cnpg_e2e_base_latency to the last line, under our scope.
 func addHistogram(lines []otlp.Line, count uint64, sum float64, attrs map[string]string) {
 	GinkgoHelper()
 
@@ -221,15 +257,15 @@ var _ = Describe("the parity report", func() {
 				"a series whose points all hold one value is a constant, not a gauge")
 		})
 
-		It("passes a counter within 10 % and fails one further below CNPG's", func() {
+		It("compares no counter, because every query of ours ran more than one export interval before CNPG's", func() {
 			p := compare()
 
-			// postgres: ours 964, CNPG 980. app: ours 168, CNPG 199.
-			Expect(diffMetrics(p.ValueDiffs)).NotTo(ContainElement(xactCommit + `{datname="postgres"}`))
-			Expect(p.ValueDiffs).To(ContainElement(SatisfyAll(
+			// CNPG computed at 1794676065, our pg_stat_database ran at 1794676044.92.
+			Expect(p.NotCompared).To(ContainElement(SatisfyAll(
 				HaveField("Metric", xactCommit+`{datname="app"}`),
-				HaveField("Detail", SatisfyAll(ContainSubstring("168"), ContainSubstring("199"))),
+				HaveField("Detail", ContainSubstring("sample times 20.1 s apart")),
 			)))
+			Expect(p.ValueDiffs).NotTo(ContainElement(HaveField("Detail", HavePrefix("counter:"))))
 		})
 
 		It("passes the constants that match exactly", func() {
@@ -253,11 +289,92 @@ var _ = Describe("the parity report", func() {
 		})
 	})
 
+	Describe("sample times", func() {
+		It("checks a counter whose samples are at most one export interval apart", func() {
+			text = sampledAfter(text, lines, statDatabase, 5)
+			p := compare()
+
+			// postgres: ours 964, CNPG 980. app: ours 168, CNPG 199.
+			Expect(diffMetrics(p.ValueDiffs)).NotTo(ContainElement(xactCommit + `{datname="postgres"}`))
+			Expect(diffMetrics(p.NotCompared)).NotTo(ContainElements(xactCommit+`{datname="postgres"}`, xactCommit+`{datname="app"}`))
+			Expect(p.ValueDiffs).To(ContainElement(SatisfyAll(
+				HaveField("Metric", xactCommit+`{datname="app"}`),
+				HaveField("Detail", SatisfyAll(ContainSubstring("168"), ContainSubstring("199"))),
+			)))
+		})
+
+		It("lists a stale counter as not compared, with the gap, and never as a value difference", func() {
+			text = sampledAfter(text, lines, statDatabase, 16)
+			p := compare()
+
+			Expect(p.NotCompared).To(ContainElement(SatisfyAll(
+				HaveField("Metric", xactCommit+`{datname="app"}`),
+				HaveField("Detail", SatisfyAll(ContainSubstring("15.1 s apart"), ContainSubstring("168"), ContainSubstring("199"))),
+			)))
+			Expect(diffMetrics(p.ValueDiffs)).NotTo(ContainElement(HavePrefix(xactCommit)))
+		})
+
+		It("lists every counter as not compared when CNPG's text has no cnpg_last_update_timestamp", func() {
+			text = regexp.MustCompile(`(?m)^cnpg_last_update_timestamp \S+\n`).ReplaceAllLiteral(text, nil)
+			p := compare()
+
+			Expect(p.NotCompared).To(ContainElement(SatisfyAll(
+				HaveField("Metric", xactCommit+`{datname="app"}`), HaveField("Detail", ContainSubstring("no CNPG time")),
+			)))
+			Expect(p.ValueDiffs).NotTo(ContainElement(HaveField("Detail", HavePrefix("counter:"))))
+		})
+
+		It("lists a counter whose name matches no query of ours as not compared", func() {
+			// The query is pg_stat_bgwriter_17, and its metrics are named after pg_stat_bgwriter.
+			text = sampledAfter(text, lines, "pg_stat_bgwriter_17", 1)
+			p := compare()
+
+			Expect(p.NotCompared).To(ContainElement(SatisfyAll(
+				HaveField("Metric", buffersAlloc), HaveField("Detail", ContainSubstring("no query match")),
+			)))
+			Expect(diffMetrics(p.ValueDiffs)).NotTo(ContainElement(buffersAlloc))
+		})
+
+		It("measures the export interval from the gaps between the pod's exports", func() {
+			text = sampledAfter(text, lines, statDatabase, 15)
+			series := xactCommit + `{datname="app"}`
+
+			Expect(compare().NotCompared).To(ContainElement(SatisfyAll(
+				HaveField("Metric", series), HaveField("Detail", ContainSubstring("14.1 s apart")),
+			)), "the exports are 10 s apart")
+
+			p, err := plugin.Compare(text, []otlp.Line{lines[0], lines[2]}, parityPod)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(diffMetrics(p.NotCompared)).NotTo(ContainElement(series), "the exports are 20 s apart")
+			Expect(diffMetrics(p.ValueDiffs)).To(ContainElement(series))
+		})
+
+		It("takes the time of the series' own database, else the oldest of its query's databases", func() {
+			text = sampledAfter(text, lines, statDatabase, 1)
+			addSuccess(lines, statDatabase, "postgres", querySuccess(lines, statDatabase)-30)
+			p := compare()
+
+			Expect(diffMetrics(p.NotCompared)).To(ContainElements(
+				xactCommit+`{datname="postgres"}`, xactCommit+`{datname="template1"}`))
+			Expect(diffMetrics(p.NotCompared)).NotTo(ContainElement(xactCommit + `{datname="app"}`))
+			Expect(diffMetrics(p.ValueDiffs)).To(ContainElement(xactCommit + `{datname="app"}`))
+		})
+
+		It("never holds back a constant or a gauge", func() {
+			text = setSample(text, baseOne, 2)
+			p := compare()
+
+			Expect(diffMetrics(p.ValueDiffs)).To(ContainElement(baseOne))
+			Expect(diffMetrics(p.NotCompared)).NotTo(ContainElement(HavePrefix("cnpg_backends_total")))
+		})
+	})
+
 	Describe("counters", func() {
 		var ours float64
 		series := xactCommit + `{datname="postgres"}`
 
 		BeforeEach(func() {
+			text = sampledAfter(text, lines, statDatabase, 1)
 			ours = newestValue(lines, xactCommit, map[string]string{"datname": "postgres"})
 		})
 
@@ -392,7 +509,7 @@ var _ = Describe("the parity report", func() {
 
 	Describe("histograms", func() {
 		BeforeEach(func() {
-			text = append(text, histogramCNP...)
+			text = append(sampledAfter(text, lines, "e2e_base", 1), histogramText...)
 		})
 
 		It("maps CNPG's family with _bucket, _sum and _count to our histogram and passes equal ones", func() {
@@ -402,7 +519,17 @@ var _ = Describe("the parity report", func() {
 			Expect(p.OnlyCNPG).NotTo(ContainElement(HavePrefix(histogram)))
 			Expect(p.OnlyOurs).NotTo(ContainElement(HavePrefix(histogram)))
 			Expect(diffMetrics(p.ValueDiffs)).NotTo(ContainElement(HavePrefix(histogram)))
+			Expect(diffMetrics(p.NotCompared)).NotTo(ContainElement(HavePrefix(histogram)))
 			Expect(diffMetrics(p.LabelDiffs)).NotTo(ContainElement(HavePrefix(histogram)))
+		})
+
+		It("lists a stale histogram as not compared", func() {
+			text = sampledAfter(text, lines, "e2e_base", 40)
+			addHistogram(lines, 6, 2.0, map[string]string{"op": "read"})
+			p := compare()
+
+			Expect(diffMetrics(p.NotCompared)).To(ContainElement(histogram + `{op="read"}`))
+			Expect(diffMetrics(p.ValueDiffs)).NotTo(ContainElement(HavePrefix(histogram)))
 		})
 
 		It("compares the count and the sum with the counter rule", func() {
@@ -478,16 +605,21 @@ var _ = Describe("the parity report", func() {
 				"### Ours",
 				"## Label differences",
 				"## Value differences",
+				"## Not compared",
 				"## Gauges",
 			}))
 		})
 
 		It("names the tolerance rules and says CNPG can't see MetricQuerySets", func() {
 			md := compare().Markdown(title)
+			intro, _, found := strings.Cut(md, "## Summary")
+			Expect(found).To(BeTrue())
 
-			Expect(md).To(ContainSubstring("10 %"))
-			Expect(md).To(ContainSubstring("NaN"))
-			Expect(md).To(ContainSubstring("MetricQuerySet"))
+			Expect(intro).To(ContainSubstring("10 %"))
+			Expect(intro).To(ContainSubstring("cnpg_last_update_timestamp"))
+			Expect(intro).To(ContainSubstring("one export interval"))
+			Expect(intro).To(ContainSubstring("NaN"))
+			Expect(intro).To(ContainSubstring("MetricQuerySet"))
 		})
 
 		It("counts each section, lists its entries and says none when it is empty", func() {
@@ -497,6 +629,7 @@ var _ = Describe("the parity report", func() {
 			Expect(md).To(ContainSubstring("| Only in CNPG | 4 |"))
 			Expect(md).To(ContainSubstring("| Only in ours | 0 |"))
 			Expect(md).To(ContainSubstring("| Value differences | " + strconv.Itoa(len(p.ValueDiffs)) + " |"))
+			Expect(md).To(ContainSubstring("| Not compared | " + strconv.Itoa(len(p.NotCompared)) + " |"))
 			Expect(md).To(ContainSubstring("- `cnpg_cache_hits`\n"))
 			Expect(md).To(MatchRegexp(`(?m)^## Only in ours\n\nnone\n`))
 			Expect(md).To(MatchRegexp(`(?m)^## Label differences\n\nnone\n`))
@@ -522,7 +655,7 @@ var _ = Describe("the parity report", func() {
 			p := plugin.Parity{OnlyCNPG: []string{"a`b"}}
 
 			Expect(p.Markdown(title)).To(ContainSubstring("- `` a`b ``\n"))
-			Expect(strings.Count(p.Markdown(title), "none")).To(Equal(6))
+			Expect(strings.Count(p.Markdown(title), "none")).To(Equal(7))
 		})
 	})
 })

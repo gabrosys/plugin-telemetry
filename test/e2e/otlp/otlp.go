@@ -1,7 +1,5 @@
-//go:build e2e
-
-// Package engine reads the OTLP/JSON lines the collector's file exporter writes, for the engine e2e suite.
-package engine
+// Package otlp reads the OTLP/JSON lines the collector's file exporter writes, for the e2e suites.
+package otlp
 
 import (
 	"bytes"

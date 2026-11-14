@@ -16,7 +16,7 @@ import (
 
 	"github.com/gabrosys/plugin-telemetry/internal/scheduler"
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
-	"github.com/gabrosys/plugin-telemetry/test/e2e/engine"
+	"github.com/gabrosys/plugin-telemetry/test/e2e/otlp"
 )
 
 // The intervals of testdata/engine.yaml and testdata/collector.yaml.
@@ -68,7 +68,7 @@ func testdata() *os.Root {
 }
 
 // marshalShapes writes one metric per line, so the golden file diffs by metric.
-func marshalShapes(shapes []engine.Shape) []byte {
+func marshalShapes(shapes []otlp.Shape) []byte {
 	GinkgoHelper()
 	rows := make([]string, 0, len(shapes))
 	for _, s := range shapes {
@@ -80,9 +80,9 @@ func marshalShapes(shapes []engine.Shape) []byte {
 }
 
 // exportTimes returns the collection times of the exports in lines, from the one config info point each carries.
-func exportTimes(lines []engine.Line) []time.Time {
+func exportTimes(lines []otlp.Line) []time.Time {
 	var out []time.Time
-	for _, p := range engine.Points(lines, configInfo) {
+	for _, p := range otlp.Points(lines, configInfo) {
 		out = append(out, p.Time)
 	}
 	slices.SortFunc(out, func(a, b time.Time) int { return a.Compare(b) })
@@ -90,9 +90,9 @@ func exportTimes(lines []engine.Line) []time.Time {
 }
 
 // exportAt returns the lines of the export collected at t; its points are stamped within a second of t.
-func exportAt(lines []engine.Line, t time.Time) []engine.Line {
-	var out []engine.Line
-	for _, l := range engine.Since(lines, t) {
+func exportAt(lines []otlp.Line, t time.Time) []otlp.Line {
+	var out []otlp.Line
+	for _, l := range otlp.Since(lines, t) {
 		if l.Time.Before(t.Add(time.Second)) {
 			out = append(out, l)
 		}
@@ -101,7 +101,7 @@ func exportAt(lines []engine.Line, t time.Time) []engine.Line {
 }
 
 // latestExport returns the lines of the last export.
-func latestExport(lines []engine.Line) []engine.Line {
+func latestExport(lines []otlp.Line) []otlp.Line {
 	times := exportTimes(lines)
 	if len(times) == 0 {
 		return nil
@@ -110,11 +110,11 @@ func latestExport(lines []engine.Line) []engine.Line {
 }
 
 // increase returns how much the counter series matching want grew over the window that ends at its last point.
-func increase(g Gomega, lines []engine.Line, name string, want map[string]string, window time.Duration) float64 {
-	points := engine.Matching(engine.Points(lines, name), want)
+func increase(g Gomega, lines []otlp.Line, name string, want map[string]string, window time.Duration) float64 {
+	points := otlp.Matching(otlp.Points(lines, name), want)
 	g.Expect(points).NotTo(BeEmpty(), "%s%v", name, want)
 	end := points[len(points)-1]
-	start := slices.IndexFunc(points, func(p engine.Point) bool {
+	start := slices.IndexFunc(points, func(p otlp.Point) bool {
 		d := end.Time.Sub(p.Time) - window
 		return d > -time.Second && d < time.Second
 	})
@@ -123,8 +123,8 @@ func increase(g Gomega, lines []engine.Line, name string, want map[string]string
 }
 
 // lastValue returns the latest value of the series of name matching want, failing g when there is none.
-func lastValue(g Gomega, lines []engine.Line, name string, want map[string]string) float64 {
-	p, ok := engine.Last(lines, name, want)
+func lastValue(g Gomega, lines []otlp.Line, name string, want map[string]string) float64 {
+	p, ok := otlp.Last(lines, name, want)
 	g.Expect(ok).To(BeTrue(), "%s%v was not exported", name, want)
 	return p.Value
 }
@@ -133,19 +133,19 @@ var _ = Describe("the engine", Ordered, func() {
 	It("exports CNPG's default metrics with the golden names, kinds and attribute keys", func(ctx SpecContext) {
 		// Every job of the first plan runs within MaxInitialDelay of the start.
 		settled := proc.started.Add(scheduler.MaxInitialDelay + slack)
-		var lines []engine.Line
+		var lines []otlp.Line
 		Eventually(func(g Gomega) {
-			lines = engine.Since(exported(ctx, g), settled)
-			intervals := engine.Points(lines, "cnpg_otel_query_interval_seconds")
+			lines = otlp.Since(exported(ctx, g), settled)
+			intervals := otlp.Points(lines, "cnpg_otel_query_interval_seconds")
 			g.Expect(intervals).NotTo(BeEmpty())
 			for _, p := range intervals {
-				_, ok := engine.Last(lines, runsTotal, map[string]string{"query": p.Attrs["query"], "outcome": "ok"})
+				_, ok := otlp.Last(lines, runsTotal, map[string]string{"query": p.Attrs["query"], "outcome": "ok"})
 				g.Expect(ok).To(BeTrue(), "query %s has no ok run", p.Attrs["query"])
 			}
-			g.Expect(engine.Points(lines, "cnpg_otel_last_export_success_timestamp_seconds")).NotTo(BeEmpty())
+			g.Expect(otlp.Points(lines, "cnpg_otel_last_export_success_timestamp_seconds")).NotTo(BeEmpty())
 		}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(time.Second).Should(Succeed())
 
-		shapes, err := engine.Shapes(lines, engineScope)
+		shapes, err := otlp.Shapes(lines, engineScope)
 		Expect(err).NotTo(HaveOccurred())
 		got := marshalShapes(shapes)
 		root := testdata()
@@ -158,7 +158,7 @@ var _ = Describe("the engine", Ordered, func() {
 	}, SpecTimeout(2*time.Minute))
 
 	It("sets the resource attributes of design 6.6", func(ctx SpecContext) {
-		var lines []engine.Line
+		var lines []otlp.Line
 		Eventually(func(g Gomega) {
 			lines = exported(ctx, g)
 			g.Expect(lines).NotTo(BeEmpty())
@@ -175,28 +175,28 @@ var _ = Describe("the engine", Ordered, func() {
 			"k8s.container.name":  "otel-metrics",
 			"e2e.suite":           "engine",
 		}
-		resources := engine.Resources(lines)
+		resources := otlp.Resources(lines)
 		Expect(resources).NotTo(BeEmpty())
 		for _, res := range resources {
 			Expect(res).To(Equal(want))
 		}
-		var engineScopes []engine.Scope
-		for _, s := range engine.Scopes(lines) {
+		var engineScopes []otlp.Scope
+		for _, s := range otlp.Scopes(lines) {
 			if s.Name == engineScope {
 				engineScopes = append(engineScopes, s)
 			}
 		}
-		Expect(engineScopes).To(ConsistOf(engine.Scope{Name: engineScope, Version: proc.version}))
+		Expect(engineScopes).To(ConsistOf(otlp.Scope{Name: engineScope, Version: proc.version}))
 	}, SpecTimeout(time.Minute))
 
 	It("exports every 5s and runs each group at its own interval", func(ctx SpecContext) {
 		slow := map[string]string{"query": "pg_database", "database": defaultDatabase, "outcome": "ok"}
 		fast := map[string]string{"query": "backends", "database": defaultDatabase, "outcome": "ok"}
 		slowWindow, fastWindow := 2*slowInterval, 10*fastInterval
-		var lines []engine.Line
+		var lines []otlp.Line
 		Eventually(func(g Gomega) {
 			lines = exported(ctx, g)
-			points := engine.Matching(engine.Points(lines, runsTotal), slow)
+			points := otlp.Matching(otlp.Points(lines, runsTotal), slow)
 			g.Expect(points).NotTo(BeEmpty())
 			g.Expect(points[len(points)-1].Time.Sub(points[0].Time)).To(BeNumerically(">=", slowWindow))
 		}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(time.Second).Should(Succeed())
@@ -229,7 +229,7 @@ var _ = Describe("the engine", Ordered, func() {
 
 	It("exports a query added to a source file, and keeps it when the file stops parsing", func(ctx SpecContext) {
 		extra := filepath.Join(configDir, "extra.yaml")
-		var lines []engine.Line
+		var lines []otlp.Line
 		Eventually(func(g Gomega) {
 			lines = exported(ctx, g)
 			g.Expect(lines).NotTo(BeEmpty())
@@ -240,8 +240,8 @@ var _ = Describe("the engine", Ordered, func() {
 		bound := watchDebounce + min(defaultInterval, scheduler.MaxInitialDelay) + exportInterval + flushInterval + slack
 		start := time.Now()
 		writeFile("extra.yaml", probeQuery)
-		Eventually(func(g Gomega) []engine.Point {
-			return engine.Points(engine.Since(exported(ctx, g), start), probeMetric)
+		Eventually(func(g Gomega) []otlp.Point {
+			return otlp.Points(otlp.Since(exported(ctx, g), start), probeMetric)
 		}).WithContext(ctx).WithTimeout(bound).WithPolling(250 * time.Millisecond).Should(
 			ContainElement(HaveField("Value", 42.0)))
 		AddReportEntry("probe exported after", time.Since(start))
@@ -251,8 +251,8 @@ var _ = Describe("the engine", Ordered, func() {
 		generation := mustLast(lines, configInfo, nil).Attrs["generation"]
 		Expect(generation).NotTo(Equal(oldGeneration))
 
-		loadErrors := func(ls []engine.Line) float64 {
-			p, ok := engine.Last(ls, configLoads, map[string]string{"source": extra, "outcome": "error"})
+		loadErrors := func(ls []otlp.Line) float64 {
+			p, ok := otlp.Last(ls, configLoads, map[string]string{"source": extra, "outcome": "error"})
 			if !ok {
 				return 0
 			}
@@ -264,20 +264,20 @@ var _ = Describe("the engine", Ordered, func() {
 		Eventually(func(g Gomega) {
 			ls := exported(ctx, g)
 			g.Expect(loadErrors(ls)).To(BeNumerically(">", errorsBefore))
-			p, _ := engine.Last(ls, configLoads, map[string]string{"source": extra, "outcome": "error"})
+			p, _ := otlp.Last(ls, configLoads, map[string]string{"source": extra, "outcome": "error"})
 			broken = p.Time
 		}).WithContext(ctx).WithTimeout(watchDebounce + exportInterval + flushInterval + slack).
 			WithPolling(250 * time.Millisecond).Should(Succeed())
 
 		// The exports after the failed load still carry the probe, under the same generation.
-		var after []engine.Line
+		var after []otlp.Line
 		Eventually(func(g Gomega) {
-			after = engine.Since(exported(ctx, g), broken)
+			after = otlp.Since(exported(ctx, g), broken)
 			g.Expect(len(exportTimes(after))).To(BeNumerically(">=", 3))
 		}).WithContext(ctx).WithTimeout(3*exportInterval + slack).WithPolling(time.Second).Should(Succeed())
 		for _, at := range exportTimes(after) {
 			export := exportAt(after, at)
-			Expect(engine.Points(export, probeMetric)).To(ContainElement(HaveField("Value", 42.0)), "export at %s", at)
+			Expect(otlp.Points(export, probeMetric)).To(ContainElement(HaveField("Value", 42.0)), "export at %s", at)
 			Expect(mustLast(export, configInfo, nil).Attrs).To(HaveKeyWithValue("generation", generation), "export at %s", at)
 		}
 	}, SpecTimeout(2*time.Minute))
@@ -285,7 +285,7 @@ var _ = Describe("the engine", Ordered, func() {
 	It("sets cnpg_collector_up to 0 while PostgreSQL is down and back to 1 after", func(ctx SpecContext) {
 		upSince := func(since time.Time) func(Gomega) float64 {
 			return func(g Gomega) float64 {
-				return lastValue(g, engine.Since(exported(ctx, g), since), up, map[string]string{"cluster": "e2e"})
+				return lastValue(g, otlp.Since(exported(ctx, g), since), up, map[string]string{"cluster": "e2e"})
 			}
 		}
 		Eventually(upSince(time.Now())).WithContext(ctx).WithTimeout(exportInterval + flushInterval + slack).
@@ -315,16 +315,16 @@ var _ = Describe("the engine", Ordered, func() {
 		Expect(want).NotTo(BeEmpty())
 		Eventually(func(g Gomega) {
 			current := latestExport(exported(ctx, g))
-			g.Expect(engine.Names(current, engineScope)).To(ContainElements(want))
-			g.Expect(engine.Names(current, otelruntime.ScopeName)).To(ContainElements("go.goroutine.count", "go.memory.used"))
+			g.Expect(otlp.Names(current, engineScope)).To(ContainElements(want))
+			g.Expect(otlp.Names(current, otelruntime.ScopeName)).To(ContainElements("go.goroutine.count", "go.memory.used"))
 		}).WithContext(ctx).WithTimeout(exportInterval + flushInterval + slack).WithPolling(time.Second).Should(Succeed())
 	}, SpecTimeout(time.Minute))
 })
 
 // mustLast returns the latest point of the series of name matching want.
-func mustLast(lines []engine.Line, name string, want map[string]string) engine.Point {
+func mustLast(lines []otlp.Line, name string, want map[string]string) otlp.Point {
 	GinkgoHelper()
-	p, ok := engine.Last(lines, name, want)
+	p, ok := otlp.Last(lines, name, want)
 	Expect(ok).To(BeTrue(), "%s%v was not exported", name, want)
 	return p
 }

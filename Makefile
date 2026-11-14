@@ -32,7 +32,7 @@ KIND_CLUSTER ?= plugin-telemetry
 CNPG_VERSION ?= v1.30.1
 POSTGRES_IMAGE ?= ghcr.io/cloudnative-pg/postgresql:18.7-system-trixie@sha256:5a5dfbde88d5909fd4938189c141f53fb153f53c519f14907dce9e7c04baa153
 COLLECTOR_IMAGE ?= otel/opentelemetry-collector:0.165.0@sha256:34b24b740c3c88d3467740e8642a397c13898ef76d7295c5425164c482ed1b73
-E2E_SUITES := smoke spikes admission engine
+E2E_SUITES := smoke spikes admission engine plugin
 KIND_E2E_SUITES := $(filter-out engine,$(E2E_SUITES))
 E2E_TARGETS := $(addprefix e2e-,$(KIND_E2E_SUITES))
 
@@ -87,14 +87,16 @@ dev-down: $(KIND) ## Delete the kind environment
 	$(DEV_ENV) hack/dev-env.sh down
 
 .PHONY: kind-load
-kind-load: $(KIND) ## Load the image into kind and record its digest reference in bin/image-ref
+kind-load: $(KIND) ## Load the plugin image into kind, pull the collector image on its nodes and record the plugin digest reference in bin/image-ref
 	$(KIND) load docker-image $(IMG) --name $(KIND_CLUSTER)
+	for node in $$($(KIND) get nodes --name $(KIND_CLUSTER)); do docker exec $$node crictl pull $(COLLECTOR_IMAGE); done
 	KIND=$(KIND) hack/kind-image-ref.sh $(KIND_CLUSTER) $(IMG) > $(BIN)/image-ref
 
 .PHONY: deploy
 deploy: $(KUBECTL) ## Deploy the plugin to the kind environment (after image and kind-load)
 	@test -s $(BIN)/image-ref || { echo "run make image kind-load first" >&2; exit 1; }
-	KUBECTL=$(KUBECTL) KIND_CLUSTER=$(KIND_CLUSTER) BIN=$(BIN) hack/deploy.sh "$$(cat $(BIN)/image-ref)"
+	KUBECTL=$(KUBECTL) KIND_CLUSTER=$(KIND_CLUSTER) BIN=$(BIN) COLLECTOR_IMAGE=$(COLLECTOR_IMAGE) POSTGRES_IMAGE=$(POSTGRES_IMAGE) \
+		hack/deploy.sh "$$(cat $(BIN)/image-ref)"
 
 .PHONY: $(E2E_TARGETS)
 $(E2E_TARGETS): e2e-%: dev-up
@@ -103,6 +105,7 @@ $(E2E_TARGETS): e2e-%: dev-up
 
 e2e-spikes: image kind-load deploy
 e2e-admission: image kind-load deploy
+e2e-plugin: image kind-load deploy
 
 .PHONY: e2e-engine
 e2e-engine: build ## Run the engine e2e suite with Docker, without kind

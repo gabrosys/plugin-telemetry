@@ -79,8 +79,12 @@ var _ = Describe("readers", func() {
 				Resource: map[string]string{"service.name": "plugin-telemetry"},
 				Time:     time.Unix(2, 0),
 				Series:   []string{`calls_total{hook="EVALUATE"}`},
+				Scopes:   []otlp.Scope{{Name: "scope-a", Version: "1"}},
 			},
-			{Resource: map[string]string{}, Time: time.Unix(3, 0), Series: []string{"up{}"}},
+			{
+				Resource: map[string]string{}, Time: time.Unix(3, 0), Series: []string{"up{}"},
+				Scopes: []otlp.Scope{{Name: "scope-b"}},
+			},
 		}))
 	})
 

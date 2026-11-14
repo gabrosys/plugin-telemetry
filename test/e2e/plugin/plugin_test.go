@@ -21,12 +21,12 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
 	"github.com/gabrosys/plugin-telemetry/api/v1alpha1"
+	"github.com/gabrosys/plugin-telemetry/internal/export"
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/framework"
@@ -48,6 +48,8 @@ const (
 	partOfValue    = "plugin-e2e"
 	unlistedLabel  = "plugin-e2e/unlisted"
 	touchAnnot     = "plugin-e2e/touch"
+	extraAttribute = "plugin.e2e.extra"
+	extraValue     = "extra-value"
 	resourceLabel  = "cnpg.cluster.label."
 	collectorTail  = 300
 	exportInterval = 10 * time.Second
@@ -80,6 +82,7 @@ type instance struct {
 	UID      types.UID
 	PodSpec  string
 	Restarts int32
+	Deleting bool
 }
 
 func readTestdata(name string) []byte {
@@ -141,17 +144,9 @@ func jsonEscaped(s string) string {
 	return strings.Trim(strconv.Quote(s), `"`)
 }
 
-func containerLogs(ctx context.Context, cfg *rest.Config, ns, pod, container string) (string, error) {
-	cs, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		return "", fmt.Errorf("create clientset: %w", err)
-	}
-	logs, err := cs.CoreV1().Pods(ns).GetLogs(pod, &corev1.PodLogOptions{Container: container}).DoRaw(ctx)
-	if err != nil {
-		return "", fmt.Errorf("get logs of %s/%s %s: %w", ns, pod, container, err)
-	}
-
-	return string(logs), nil
+func sidecarLogs(ctx context.Context, cfg *rest.Config, ns, pod string) (string, error) {
+	return framework.ContainerLogs(ctx, cfg, types.NamespacedName{Namespace: ns, Name: pod},
+		metadata.SidecarContainerName, &corev1.PodLogOptions{})
 }
 
 //nolint:maintidx // one Ordered container per mode; the specs share its state
@@ -201,7 +196,10 @@ func describeMode(m mode) {
 
 			out := map[string]instance{}
 			for _, pod := range pods(ctx) {
-				in := instance{UID: pod.UID, PodSpec: pod.Annotations[framework.PodSpecAnnotation]}
+				in := instance{
+					UID: pod.UID, PodSpec: pod.Annotations[framework.PodSpecAnnotation],
+					Deleting: pod.DeletionTimestamp != nil,
+				}
 				for _, s := range pod.Status.InitContainerStatuses {
 					if s.Name == metadata.SidecarContainerName {
 						in.Restarts = s.RestartCount
@@ -302,7 +300,8 @@ func describeMode(m mode) {
 			return ok
 		}
 
-		touch := func(ctx context.Context, value string) {
+		// touch sets an annotation on the Cluster and returns the resourceVersion of that write.
+		touch := func(ctx context.Context, value string) string {
 			GinkgoHelper()
 
 			cl := getCluster(ctx)
@@ -312,6 +311,31 @@ func describeMode(m mode) {
 			}
 			cl.Annotations[touchAnnot] = value
 			Expect(c.Patch(ctx, cl, patch)).To(Succeed())
+
+			return cl.ResourceVersion
+		}
+
+		// identityGone fails until none of the four identity objects exists.
+		identityGone := func(ctx context.Context) error {
+			for _, probe := range []struct {
+				obj  client.Object
+				name string
+			}{
+				{&corev1.ServiceAccount{}, metadata.ServiceAccountName(cname)},
+				{&rbacv1.Role{}, metadata.ServiceAccountName(cname)},
+				{&rbacv1.RoleBinding{}, metadata.ServiceAccountName(cname)},
+				{&corev1.Secret{}, metadata.TokenSecretName(cname)},
+			} {
+				err := c.Get(ctx, key(probe.name), probe.obj)
+				if err == nil {
+					return fmt.Errorf("%T %s is still there", probe.obj, probe.name) //nolint:err113 // a polled condition
+				}
+				if !apierrors.IsNotFound(err) {
+					return fmt.Errorf("get %T %s: %w", probe.obj, probe.name, err)
+				}
+			}
+
+			return nil
 		}
 
 		BeforeAll(func(ctx SpecContext) {
@@ -366,6 +390,13 @@ func describeMode(m mode) {
 			}
 			clusterCreated = time.Now()
 			Expect(c.Create(ctx, cluster)).To(Succeed())
+			// Runs before the namespace's cleanup: a namespace deleted around a live Cluster stays Terminating.
+			DeferCleanup(func(ctx SpecContext) {
+				Expect(client.IgnoreNotFound(c.Delete(ctx, cluster))).To(Succeed())
+				Eventually(func(ctx SpecContext) bool {
+					return apierrors.IsNotFound(c.Get(ctx, key(cname), &apiv1.Cluster{}))
+				}).WithContext(ctx).WithTimeout(3 * time.Minute).WithPolling(specPoll).Should(BeTrue())
+			}, NodeTimeout(4*time.Minute))
 
 			Eventually(func(ctx context.Context) (bool, error) {
 				return framework.ClusterReady(ctx, c, key(cname))
@@ -384,7 +415,7 @@ func describeMode(m mode) {
 				return
 			}
 			for _, pod := range pods(ctx) {
-				logs, err := containerLogs(ctx, cfg, ns, pod.Name, metadata.SidecarContainerName)
+				logs, err := sidecarLogs(ctx, cfg, ns, pod.Name)
 				if err != nil {
 					logs = err.Error()
 				}
@@ -411,7 +442,7 @@ func describeMode(m mode) {
 
 				for _, pod := range pods(ctx) {
 					Eventually(func(ctx SpecContext) (string, error) {
-						return containerLogs(ctx, cfg, ns, pod.Name, metadata.SidecarContainerName)
+						return sidecarLogs(ctx, cfg, ns, pod.Name)
 					}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(specPoll).Should(
 						ContainSubstring(jsonEscaped(fmt.Sprintf("telemetryexporter %q does not exist", exporterName))), pod.Name)
 				}
@@ -475,6 +506,7 @@ func describeMode(m mode) {
 				exporter := framework.ExporterFor(ns, exporterName)
 				exporter.Spec.Exporter.Headers = &v1alpha1.KeySelector{Name: headersSecret, Key: headersKey}
 				exporter.Spec.ResourceLabels = []string{partOfLabel}
+				exporter.Spec.ResourceAttributes = map[string]string{extraAttribute: extraValue}
 
 				exporterCreated = time.Now()
 				Expect(c.Create(ctx, exporter)).To(Succeed())
@@ -501,6 +533,14 @@ func describeMode(m mode) {
 						byPod[e.Resource["k8s.pod.name"]] = e
 					}
 				}
+				stdout, stderr, err := framework.Exec(ctx, cfg, types.NamespacedName{Namespace: ns, Name: pods(ctx)[0].Name},
+					metadata.SidecarContainerName, []string{"/plugin-telemetry", "version"})
+				Expect(err).NotTo(HaveOccurred(), stderr)
+				versionFields := strings.Fields(stdout)
+				Expect(versionFields).To(HaveLen(4), stdout)
+				sidecarVersion := versionFields[1]
+				Expect(sidecarVersion).NotTo(BeEmpty())
+
 				for _, pod := range pods(ctx) {
 					e, ok := byPod[pod.Name]
 					Expect(ok).To(BeTrue(), pod.Name)
@@ -514,7 +554,9 @@ func describeMode(m mode) {
 						HaveKeyWithValue("k8s.node.name", pod.Spec.NodeName),
 						HaveKeyWithValue("k8s.container.name", metadata.SidecarContainerName),
 						HaveKeyWithValue(resourceLabel+partOfLabel, partOfValue),
+						HaveKeyWithValue(extraAttribute, extraValue),
 					), pod.Name)
+					Expect(e.Scopes).To(ContainElement(otlp.Scope{Name: export.ScopeName, Version: sidecarVersion}), pod.Name)
 					for k := range e.Resource {
 						if strings.HasPrefix(k, resourceLabel) {
 							Expect(k).To(Equal(resourceLabel+partOfLabel), "only the allowlisted Cluster labels become attributes")
@@ -643,13 +685,21 @@ func describeMode(m mode) {
 					}
 				}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(specPoll).Should(Succeed())
 
-				resourceVersion := getCluster(ctx).ResourceVersion
 				edits := time.Now()
+				var lastWrite string
 				for i := range 10 {
-					touch(ctx, fmt.Sprint(i))
+					lastWrite = touch(ctx, fmt.Sprint(i))
 					time.Sleep(500 * time.Millisecond)
 				}
-				Expect(getCluster(ctx).ResourceVersion).NotTo(Equal(resourceVersion))
+
+				// The status is a subresource with its own field manager: CloudNativePG wrote it after the edits began.
+				Eventually(func(g Gomega, ctx SpecContext) {
+					cl := getCluster(ctx)
+					g.Expect(cl.ManagedFields).To(ContainElement(SatisfyAll(
+						HaveField("Subresource", "status"),
+						HaveField("Time", HaveValue(HaveField("Time", BeTemporally(">=", edits.Truncate(time.Second))))),
+					)), "no status write since the edits (last edit wrote %s)", lastWrite)
+				}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(specPoll).Should(Succeed())
 
 				// Wait for two exports of each pod after the edits, so a reload would have shown.
 				var after map[string]otlp.Export
@@ -752,7 +802,7 @@ func describeMode(m mode) {
 
 		It("security: no seeded Secret value appears in the sidecar's logs or in print-config", func(ctx SpecContext) {
 			for _, pod := range pods(ctx) {
-				logs, err := containerLogs(ctx, cfg, ns, pod.Name, metadata.SidecarContainerName)
+				logs, err := sidecarLogs(ctx, cfg, ns, pod.Name)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(logs).NotTo(BeEmpty())
 
@@ -769,6 +819,55 @@ func describeMode(m mode) {
 				}
 			}
 		}, SpecTimeout(3*time.Minute))
+
+		It("AC5: an invalid TelemetryExporter is reported, and the sidecars keep the configuration in force", func(ctx SpecContext) {
+			// Without metrics.interval the interval is 30 s, so a 20 s timeout fails Build; the CRD only checks both set.
+			var exporter v1alpha1.TelemetryExporter
+			Expect(c.Get(ctx, key(exporterName), &exporter)).To(Succeed())
+			valid := exporter.DeepCopy()
+			patch := client.MergeFrom(exporter.DeepCopy())
+			exporter.Spec.Metrics.Interval = nil
+			exporter.Spec.Exporter.Timeout = &metav1.Duration{Duration: 20 * time.Second}
+			invalidAt := time.Now()
+			Expect(c.Patch(ctx, &exporter, patch)).To(Succeed())
+
+			touch(ctx, "invalid") // a reconcile makes CloudNativePG ask for the status
+			Eventually(func(g Gomega, ctx SpecContext) {
+				st := status(g, ctx)
+				g.Expect(st.ExporterState).To(Equal("invalid"))
+				g.Expect(st.Message).To(ContainSubstring("exporter.timeout"))
+			}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(specPoll).Should(Succeed())
+
+			for _, pod := range pods(ctx) {
+				Eventually(func(ctx SpecContext) (string, error) {
+					return sidecarLogs(ctx, cfg, ns, pod.Name)
+				}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(specPoll).Should(
+					ContainSubstring("invalid configuration, keeping the one in force"), pod.Name)
+			}
+
+			// The configuration was valid before, so it stays in force: the sidecars keep exporting every 10 s.
+			Eventually(func(g Gomega, ctx SpecContext) {
+				g.Expect(podsExporting(lines(g, ctx, invalidAt.Add(2*exportInterval)), "cnpg_e2e_base_one")).
+					To(ConsistOf(instanceNames(ctx)))
+			}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(specPoll).Should(Succeed())
+			noRollout(ctx)
+
+			restored := time.Now()
+			var current v1alpha1.TelemetryExporter
+			Expect(c.Get(ctx, key(exporterName), &current)).To(Succeed())
+			restore := client.MergeFrom(current.DeepCopy())
+			current.Spec = valid.Spec
+			Expect(c.Patch(ctx, &current, restore)).To(Succeed())
+
+			touch(ctx, "restored")
+			Eventually(func(g Gomega, ctx SpecContext) {
+				st := status(g, ctx)
+				g.Expect(st.ExporterState).To(Equal("ok"))
+				g.Expect(st.Message).To(BeEmpty())
+			}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(specPoll).Should(Succeed())
+			awaitMetric(ctx, "cnpg_e2e_base_one", restored, time.Minute)
+			noRollout(ctx)
+		}, SpecTimeout(6*time.Minute))
 
 		It("AC5: deleting the TelemetryExporter stops exports, and the status says missing after the next reconcile", func(ctx SpecContext) {
 			deleted := time.Now()
@@ -791,30 +890,19 @@ func describeMode(m mode) {
 				g.Expect(st.ExporterState).To(Equal("missing"))
 			}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(specPoll).Should(Succeed())
 
-			noRollout(ctx)
+			// A Pod that a rollout deletes keeps its UID and annotations until it is gone, so look for a while.
+			Consistently(func(ctx SpecContext) map[string]instance {
+				return states(ctx)
+			}).WithContext(ctx).WithTimeout(30*time.Second).WithPolling(specPoll).Should(Equal(baseline),
+				"an instance Pod is being replaced, or its sidecar restarted")
 		}, SpecTimeout(8*time.Minute))
 
 		It("AC2: deleting the Cluster deletes the four objects", func(ctx SpecContext) {
-			_, err := framework.Identity(ctx, c, ns, cname)
-			Expect(err).NotTo(HaveOccurred())
+			Expect(identityGone(ctx)).NotTo(Succeed(), "the identity is gone before the Cluster is deleted")
 
 			Expect(c.Delete(ctx, getCluster(ctx))).To(Succeed())
 
-			Eventually(func(ctx SpecContext) error {
-				_, err := framework.Identity(ctx, c, ns, cname)
-
-				return err
-			}).WithContext(ctx).WithTimeout(3 * time.Minute).WithPolling(specPoll).Should(MatchError(apierrors.IsNotFound, "a NotFound error"))
-
-			for _, probe := range []client.Object{
-				&corev1.ServiceAccount{}, &rbacv1.Role{}, &rbacv1.RoleBinding{}, &corev1.Secret{},
-			} {
-				name := metadata.ServiceAccountName(cname)
-				if _, isSecret := probe.(*corev1.Secret); isSecret {
-					name = metadata.TokenSecretName(cname)
-				}
-				Expect(apierrors.IsNotFound(c.Get(ctx, key(name), probe))).To(BeTrue(), "%T %s is still there", probe, name)
-			}
+			Eventually(identityGone).WithContext(ctx).WithTimeout(3 * time.Minute).WithPolling(specPoll).Should(Succeed())
 		}, SpecTimeout(5*time.Minute))
 	})
 }

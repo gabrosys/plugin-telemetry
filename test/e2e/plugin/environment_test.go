@@ -10,6 +10,7 @@ import (
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -58,7 +59,15 @@ var _ = Describe("the plugin environment", Ordered, func() {
 
 		start = time.Now()
 		Expect(c.Create(ctx, framework.ExporterFor(ns, podpatch.DefaultExporter))).To(Succeed())
-		Expect(c.Create(ctx, framework.PeerCluster(ns, clusterName, env.PostgresImage))).To(Succeed())
+		cluster := framework.PeerCluster(ns, clusterName, env.PostgresImage)
+		Expect(c.Create(ctx, cluster)).To(Succeed())
+		// Runs before the namespace's cleanup: a namespace deleted around a live Cluster stays Terminating.
+		DeferCleanup(func(ctx SpecContext) {
+			Expect(client.IgnoreNotFound(c.Delete(ctx, cluster))).To(Succeed())
+			Eventually(func(ctx SpecContext) bool {
+				return apierrors.IsNotFound(c.Get(ctx, client.ObjectKeyFromObject(cluster), &apiv1.Cluster{}))
+			}).WithContext(ctx).WithTimeout(3 * time.Minute).WithPolling(environmentPollInterval).Should(BeTrue())
+		}, NodeTimeout(4*time.Minute))
 	})
 
 	It("CNPG reports the reconciler hooks and SetStatusInCluster for a Cluster using the plugin", func(ctx SpecContext) {

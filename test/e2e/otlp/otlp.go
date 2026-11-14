@@ -138,11 +138,12 @@ func ResourcePoints(lines []Line, name string) []ResourcePoint {
 }
 
 // Export is the part of a request that one resource sent: its resource, the time of the request, and
-// its series as `name{key="value",...}`, attributes sorted by key, in file order.
+// its series as `name{key="value",...}`, attributes sorted by key, in file order, and its scopes.
 type Export struct {
 	Resource map[string]string
 	Time     time.Time
 	Series   []string
+	Scopes   []Scope // distinct, in file order
 }
 
 // Exports returns one Export per ResourceMetrics of every line, in file order.
@@ -152,6 +153,10 @@ func Exports(lines []Line) []Export {
 		for _, rm := range l.Request.GetResourceMetrics() {
 			e := Export{Resource: Attributes(rm.GetResource().GetAttributes()), Time: l.Time}
 			for _, sm := range rm.GetScopeMetrics() {
+				scope := Scope{Name: sm.GetScope().GetName(), Version: sm.GetScope().GetVersion()}
+				if !slices.Contains(e.Scopes, scope) {
+					e.Scopes = append(e.Scopes, scope)
+				}
 				for _, m := range sm.GetMetrics() {
 					for _, attrs := range pointAttributes(m) {
 						e.Series = append(e.Series, seriesKey(m.GetName(), attrs))

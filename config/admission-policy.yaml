@@ -10,10 +10,16 @@ spec:
         apiVersions: [v1]
         operations: [CREATE, UPDATE, DELETE]
         resources: [secrets, serviceaccounts]
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE]
+        resources: [serviceaccounts/token]
   matchConditions:
     - name: plugin-service-account
       expression: request.userInfo.username == 'system:serviceaccount:cnpg-system:plugin-telemetry'
   variables:
+    - name: tokenRequest
+      expression: request.resource.resource == 'serviceaccounts' && request.?subResource.orValue('') == 'token'
     - name: secret
       expression: request.resource.resource == 'secrets'
     - name: newAllowed
@@ -31,11 +37,15 @@ spec:
             oldObject.metadata.name == oldObject.metadata.annotations['kubernetes.io/service-account.name'] + '-token'
           : oldObject.metadata.name.endsWith('-telemetry'))
   validations:
-    - expression: variables.newAllowed && variables.oldAllowed
+    - expression: variables.tokenRequest || (variables.newAllowed && variables.oldAllowed)
       reason: Forbidden
       message: >-
-        plugin-telemetry may write only ServiceAccounts named *-telemetry and their
+        plugin-telemetry-identities: plugin-telemetry may write only ServiceAccounts named *-telemetry and their
         kubernetes.io/service-account-token Secrets named <account>-token
+    - expression: '!variables.tokenRequest'
+      reason: Forbidden
+      message: >-
+        plugin-telemetry-identities: plugin-telemetry may not request ServiceAccount tokens (TokenRequest)
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

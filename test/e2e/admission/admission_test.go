@@ -8,6 +8,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -15,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/gabrosys/plugin-telemetry/test/e2e/framework"
@@ -26,6 +28,8 @@ const (
 	pluginAccount  = "plugin-telemetry"
 	pluginNS       = "cnpg-system"
 	grantName      = "plugin-telemetry-admission-e2e"
+	tokenGrantName = "plugin-telemetry-admission-token-e2e"
+	throwawayName  = "throwaway-telemetry"
 	telemetryName  = "adm-telemetry"
 	telemetryToken = "adm-telemetry-token"
 	otherToken     = "other-token"
@@ -64,13 +68,13 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 	var (
 		c      client.Client
 		plugin *kubernetes.Clientset
+		cfg    *rest.Config
 		ns     string
 	)
 
 	BeforeAll(func(ctx SpecContext) {
 		env, err := framework.LoadEnv(os.Getenv)
 		Expect(err).NotTo(HaveOccurred())
-		var cfg *rest.Config
 		c, cfg, err = framework.NewClients(env.KubeContext)
 		Expect(err).NotTo(HaveOccurred())
 
@@ -186,6 +190,46 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 	It("allows deleting adm-telemetry-token and adm-telemetry", func(ctx SpecContext) {
 		Expect(plugin.CoreV1().Secrets(ns).Delete(ctx, telemetryToken, metav1.DeleteOptions{})).To(Succeed())
 		Expect(plugin.CoreV1().ServiceAccounts(ns).Delete(ctx, telemetryName, metav1.DeleteOptions{})).To(Succeed())
+	})
+
+	It("denies the plugin's account a TokenRequest for a -telemetry account", func(ctx SpecContext) {
+		grant := &rbacv1.ClusterRole{
+			ObjectMeta: metav1.ObjectMeta{Name: tokenGrantName},
+			Rules: []rbacv1.PolicyRule{{
+				APIGroups: []string{""},
+				Resources: []string{"serviceaccounts/token"},
+				Verbs:     []string{"create"},
+			}},
+		}
+		tokenBinding := &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: tokenGrantName},
+			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: tokenGrantName},
+			Subjects:   []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Namespace: pluginNS, Name: pluginAccount}},
+		}
+		for _, obj := range []client.Object{grant, tokenBinding} {
+			Expect(c.Create(ctx, obj)).To(Succeed())
+			DeferCleanup(func(ctx SpecContext) {
+				Expect(client.IgnoreNotFound(c.Delete(ctx, obj))).To(Succeed())
+			})
+		}
+
+		throwaway := serviceAccount(ns, throwawayName)
+		Expect(c.Create(ctx, throwaway)).To(Succeed())
+		DeferCleanup(func(ctx SpecContext) {
+			Expect(client.IgnoreNotFound(c.Delete(ctx, throwaway))).To(Succeed())
+		})
+
+		Eventually(func(g Gomega, ctx SpecContext) {
+			allowed, err := framework.CanI(ctx, cfg, pluginUser, authorizationv1.ResourceAttributes{
+				Verb: "create", Resource: "serviceaccounts", Subresource: "token", Namespace: ns, Name: throwawayName,
+			})
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(allowed).To(BeTrue())
+		}).WithContext(ctx).WithTimeout(timeout).WithPolling(time.Second).Should(Succeed())
+
+		request := &authenticationv1.TokenRequest{Spec: authenticationv1.TokenRequestSpec{ExpirationSeconds: ptr.To(int64(600))}}
+		_, err := plugin.CoreV1().ServiceAccounts(ns).CreateToken(ctx, throwawayName, request, metav1.CreateOptions{})
+		Expect(err).To(denied())
 	})
 
 	It("leaves other users alone", func(ctx SpecContext) {

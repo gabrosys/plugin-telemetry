@@ -1,0 +1,24 @@
+cluster: e2e
+namespace: e2e
+postgres:
+  host: {{ printf "%q" .PostgresHost }}
+  port: {{ .PostgresPort }}
+  user: {{ printf "%q" .PostgresUser }}
+  passwordFile: {{ printf "%q" .PasswordFile }}
+planInterval: 5s
+defaultInterval: 10s
+groups:
+  - name: fast
+    interval: 2s
+    queries: [backends]
+  - name: slow
+    interval: 20s
+    queries: [pg_database]
+sources:
+  - default-queries.yaml
+  - extra.yaml
+exporter:
+  endpoint: {{ printf "%q" .Endpoint }}
+  interval: 5s
+resourceAttributes:
+  e2e.suite: engine

@@ -30,8 +30,10 @@ CMCTL := $(BIN)/cmctl-$(CMCTL_VERSION)
 KIND_CLUSTER ?= plugin-telemetry
 CNPG_VERSION ?= v1.30.1
 POSTGRES_IMAGE ?= ghcr.io/cloudnative-pg/postgresql:18.7-system-trixie@sha256:5a5dfbde88d5909fd4938189c141f53fb153f53c519f14907dce9e7c04baa153
-E2E_SUITES := smoke spikes
-E2E_TARGETS := $(addprefix e2e-,$(E2E_SUITES))
+COLLECTOR_IMAGE ?= otel/opentelemetry-collector:0.165.0@sha256:34b24b740c3c88d3467740e8642a397c13898ef76d7295c5425164c482ed1b73
+E2E_SUITES := smoke spikes admission engine
+KIND_E2E_SUITES := $(filter-out engine,$(E2E_SUITES))
+E2E_TARGETS := $(addprefix e2e-,$(KIND_E2E_SUITES))
 
 DEV_ENV := KIND=$(KIND) KUBECTL=$(KUBECTL) CMCTL=$(CMCTL) KIND_CLUSTER=$(KIND_CLUSTER) KIND_NODE_IMAGE=$(KIND_NODE_IMAGE) \
 	CNPG_VERSION=$(CNPG_VERSION) CERT_MANAGER_VERSION=$(CERT_MANAGER_VERSION)
@@ -44,7 +46,7 @@ BUILDX_BUILDER ?=
 .PHONY: help
 help: ## Show the available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_%-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
-	@printf '  %-16s %s\n' 'e2e-<suite>' 'Run an e2e suite on the kind environment ($(E2E_SUITES))'
+	@printf '  %-16s %s\n' 'e2e-<suite>' 'Run an e2e suite on the kind environment ($(KIND_E2E_SUITES))'
 
 .PHONY: build
 build: ## Build bin/plugin-telemetry and compile every package
@@ -54,6 +56,14 @@ build: ## Build bin/plugin-telemetry and compile every package
 .PHONY: test
 test: ## Run unit tests with the race detector
 	$(GO) test -race -count=1 ./...
+
+.PHONY: test-integration
+test-integration: ## Run the tests that need Docker (PostgreSQL in a container)
+	POSTGRES_IMAGE=$(POSTGRES_IMAGE) $(GO) test -race -count=1 -tags integration ./...
+
+.PHONY: generate
+generate: ## Regenerate docs/self-metrics.md
+	$(GO) run ./internal/selfmetrics/gen > docs/self-metrics.md
 
 .PHONY: image
 image: ## Build the image for the local platform and load it into Docker
@@ -90,14 +100,20 @@ $(E2E_TARGETS): e2e-%: dev-up
 		$(GO) test -tags e2e -count=1 -timeout 30m -v ./test/e2e/$*/... -ginkgo.v
 
 e2e-spikes: image kind-load deploy
+e2e-admission: image kind-load deploy
+
+.PHONY: e2e-engine
+e2e-engine: build ## Run the engine e2e suite with Docker, without kind
+	ENGINE_BIN=$(BIN)/plugin-telemetry POSTGRES_IMAGE=$(POSTGRES_IMAGE) COLLECTOR_IMAGE=$(COLLECTOR_IMAGE) \
+		$(GO) test -tags e2e -count=1 -timeout 20m -v ./test/e2e/engine/...
 
 .PHONY: lint
 lint: $(GOLANGCI_LINT) ## Run linters and the vulnerability scan
 	$(GOLANGCI_LINT) config verify
 	$(GOLANGCI_LINT) run ./...
 	$(GO) run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
-	docker run --rm -v "$(CURDIR):/mnt:ro" -w /mnt $(SHELLCHECK_IMAGE) hack/*.sh test/devenv/testdata/*
-	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) -tags e2e ./...
+	docker run --rm -v "$(CURDIR):/mnt:ro" -w /mnt $(SHELLCHECK_IMAGE) hack/*.sh test/devenv/testdata/* test/pgtest/server.sh
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) -tags e2e,integration ./...
 
 .PHONY: fmt
 fmt: $(GOLANGCI_LINT) ## Format the code

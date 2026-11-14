@@ -7,6 +7,7 @@ resources:
   - service.yaml
   - deployment.yaml
   - pdb.yaml
+  - admission-policy.yaml
 images:
   - name: plugin-telemetry
     newName: ghcr.io/gabrosys/plugin-telemetry

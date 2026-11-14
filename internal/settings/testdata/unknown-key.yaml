@@ -1,0 +1,4 @@
+cluster: pg-main
+exporter:
+  endpoint: http://collector:4318
+  retries: 3

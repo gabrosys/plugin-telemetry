@@ -1,0 +1,8 @@
+cluster: demo
+sources:
+  - queries-warn.yaml
+exclude:
+  queries: [collector]
+  metrics: ["cnpg_probe_value"]
+exporter:
+  endpoint: http://127.0.0.1:4318/v1/metrics

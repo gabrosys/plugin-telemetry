@@ -1,0 +1,1 @@
+authorization=Bearer s3cr3t-token,x-tenant=acme-secret

@@ -1,0 +1,51 @@
+cluster: pg-main
+namespace: prod
+postgres:
+  host: db.internal
+  port: 6432
+  user: metrics
+  passwordFile: secrets/pg-password
+  database: app
+  maxConnections: 8
+planInterval: 1m
+defaultInterval: 45s
+groups:
+  - name: fast
+    interval: 5s
+    queries: [pg_stat_*, pg_locks]
+  - name: slow
+    interval: 5m
+    queries: [pg_database_size]
+limits:
+  queryTimeout: 20s
+  lockTimeout: 2s
+  maxRowsPerQuery: 100
+  maxSeriesPerQuery: 200
+  maxSeriesTotal: 300
+  maxDatabases: 10
+  maxLabelValueLength: 64
+  maxLabelsPerSeries: 8
+exclude:
+  queries: [pg_slow_*]
+  metrics: [cnpg_pg_wal_lsn]
+  databases: [template*, postgres]
+sources:
+  - queries/default.yaml
+  - /etc/cnpg/extra.yaml
+exporter:
+  protocol: grpc
+  endpoint: https://collector:4317
+  tls:
+    caFile: certs/ca.pem
+    certFile: certs/tls.crt
+    keyFile: certs/tls.key
+    serverName: collector.internal
+    minVersion: "1.3"
+  headersFile: secrets/headers
+  compression: none
+  interval: 20s
+  timeout: 7s
+  maxPointsPerRequest: 500
+resourceAttributes:
+  k8s.cluster.name: kind
+  team: db

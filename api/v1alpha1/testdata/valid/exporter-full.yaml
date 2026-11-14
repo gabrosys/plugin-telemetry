@@ -1,0 +1,53 @@
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: TelemetryExporter
+metadata:
+  name: default
+  namespace: app
+spec:
+  exporter:
+    protocol: grpc
+    endpoint: https://otel-collector.observability.svc:4317/base
+    compression: gzip
+    timeout: 10s
+    headers: {name: otel-headers, key: headers}
+    tls:
+      ca:
+        secret: {name: otel-ca, key: ca.crt}
+      clientCertificate: {name: otel-client}
+      serverName: otel-collector.observability.svc
+      minVersion: "1.3"
+  envFrom:
+    configMap: {name: otel-env}
+    secret: {name: otel-env-secret}
+  resourceLabels: [app.kubernetes.io/part-of, team]
+  resourceAttributes:
+    deployment.environment: prod
+    service.namespace: shop
+  metrics:
+    interval: 30s
+    maxPointsPerRequest: 5000
+    useClusterMonitoring: false
+    querySets: [extra-queries, other.set]
+    planInterval: 5m0s
+    defaultInterval: 30s
+    groups:
+    - name: fast
+      interval: 10s
+      queries: [pg_stat_replication, "backends*"]
+    - name: slow
+      interval: 5m0s
+      queries: [pg_database]
+    limits:
+      maxConnections: 2
+      maxRowsPerQuery: 1000
+      maxSeriesPerQuery: 10000
+      maxSeriesTotal: 50000
+      maxDatabases: 50
+      maxLabelValueLength: 256
+      maxLabelsPerSeries: 16
+      queryTimeout: 10s
+      lockTimeout: 2s
+    exclude:
+      queries: [pg_settings]
+      metrics: [cnpg_pg_settings_setting]
+      databases: ["scratch_*"]

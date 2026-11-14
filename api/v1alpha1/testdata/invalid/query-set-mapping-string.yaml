@@ -1,0 +1,14 @@
+# want: must be of type number
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: MetricQuerySet
+metadata:
+  name: extra
+  namespace: app
+spec:
+  queries:
+    q:
+      query: SELECT 1 AS a
+      metrics:
+      - a:
+          usage: MAPPEDMETRIC
+          metric_mapping: {up: "one"}

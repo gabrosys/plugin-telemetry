@@ -1,0 +1,13 @@
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: MetricQuerySet
+metadata:
+  name: extra
+  namespace: app
+spec:
+  queries:
+    lag:
+      query: SELECT 1 AS up
+      metrics:
+      - up:
+          usage: GAUGE
+          description: Always one

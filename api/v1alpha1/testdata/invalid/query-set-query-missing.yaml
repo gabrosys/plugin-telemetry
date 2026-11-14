@@ -1,0 +1,11 @@
+# want: spec.queries.q.query: Required value
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: MetricQuerySet
+metadata:
+  name: extra
+  namespace: app
+spec:
+  queries:
+    q:
+      metrics:
+      - a: {usage: GAUGE}

@@ -1,0 +1,8 @@
+# want: spec.queries in body should have at least 1 properties
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: MetricQuerySet
+metadata:
+  name: extra
+  namespace: app
+spec:
+  queries: {}

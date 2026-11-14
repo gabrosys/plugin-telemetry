@@ -1,0 +1,12 @@
+# want: spec.metrics.limits.maxRowsPerQuery in body should be greater than or equal to 1
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: TelemetryExporter
+metadata:
+  name: default
+  namespace: app
+spec:
+  exporter:
+    endpoint: https://collector:4318
+  metrics:
+    limits:
+      maxRowsPerQuery: 0

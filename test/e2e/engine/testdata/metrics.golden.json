@@ -4,6 +4,7 @@
   {"name":"cnpg_backends_waiting_total","type":"gauge","attributes":[]},
   {"name":"cnpg_collector_lo_pages","type":"gauge","attributes":["datname"]},
   {"name":"cnpg_collector_up","type":"gauge","attributes":["cluster"]},
+  {"name":"cnpg_otel_check","type":"gauge","attributes":["check"]},
   {"name":"cnpg_otel_config_duplicate_queries_total","type":"sum","monotonic":true,"attributes":["source"]},
   {"name":"cnpg_otel_config_info","type":"gauge","attributes":["generation","hash"]},
   {"name":"cnpg_otel_config_loads_total","type":"sum","monotonic":true,"attributes":["outcome","source"]},

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/gabrosys/plugin-telemetry/compare/v0.2.0...v0.3.0) (2026-11-14)
+
+
+### Features
+
+* add the metrics engine and admission policy ([#6](https://github.com/gabrosys/plugin-telemetry/issues/6)) ([e806112](https://github.com/gabrosys/plugin-telemetry/commit/e80611289b2022a0cf56eb8850a2c03fcb6e1f94))
+
 ## [0.2.0](https://github.com/gabrosys/plugin-telemetry/compare/v0.1.0...v0.2.0) (2026-11-13)
 
 

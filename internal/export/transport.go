@@ -35,7 +35,7 @@ func loadMaterial(s settings.Exporter, secure bool, read sources.ReadFile) (mate
 		if err != nil {
 			return m, fmt.Errorf("read headers file: %w", err)
 		}
-		if m.headers, err = parseHeaders(string(data)); err != nil {
+		if m.headers, err = ParseHeaders(string(data)); err != nil {
 			return m, fmt.Errorf("parse headers file %s: %w", s.HeadersFile, err)
 		}
 	}
@@ -74,11 +74,11 @@ func loadMaterial(s settings.Exporter, secure bool, read sources.ReadFile) (mate
 	return m, nil
 }
 
-// parseHeaders reads the OTEL_EXPORTER_OTLP_HEADERS format, "k=v,k2=v2" with percent-encoded
+// ParseHeaders reads the OTEL_EXPORTER_OTLP_HEADERS format, "k=v,k2=v2" with percent-encoded
 // values, as otlpmetrichttp v1.47.0 internal/envconfig/envconfig.go:159-190 does, but fails on a
 // bad entry. Keys and values must be valid gRPC metadata (grpc v1.85.0 internal/metadata/metadata.go:90-144),
 // which HTTP also accepts. Errors give the entry's position, never its content.
-func parseHeaders(s string) (map[string]string, error) {
+func ParseHeaders(s string) (map[string]string, error) {
 	out := map[string]string{}
 	s = strings.TrimSpace(s)
 	if s == "" {

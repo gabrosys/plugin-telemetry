@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"sort"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/gabrosys/plugin-telemetry/internal/engine"
 	"github.com/gabrosys/plugin-telemetry/internal/executor"
+	"github.com/gabrosys/plugin-telemetry/internal/export"
 	"github.com/gabrosys/plugin-telemetry/internal/featuregate"
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
@@ -427,21 +429,19 @@ func describe(c *config, gates *featuregate.Registry) (string, error) {
 	return b.String(), nil
 }
 
-// headerKeys returns the sorted keys of the OTEL_EXPORTER_OTLP_HEADERS-format file; values are dropped.
+// headerKeys returns the sorted keys of the headers file when the exporter's parser accepts all of it;
+// otherwise the parser's error, which names the entry by position only.
 func headerKeys(read sources.ReadFile, file string) ([]string, error) {
 	data, err := read(file)
 	if err != nil {
 		return nil, fmt.Errorf("read headers file: %w", err)
 	}
-	var keys []string
-	for _, pair := range strings.Split(strings.TrimSpace(string(data)), ",") {
-		if k, _, ok := strings.Cut(pair, "="); ok {
-			keys = append(keys, strings.TrimSpace(k))
-		}
+	headers, err := export.ParseHeaders(string(data))
+	if err != nil {
+		return nil, fmt.Errorf("parse headers file: %w", err)
 	}
-	slices.Sort(keys)
 
-	return slices.Compact(keys), nil
+	return slices.Sorted(maps.Keys(headers)), nil
 }
 
 func livePlan(p planner.Plan) string {

@@ -263,6 +263,21 @@ var _ = Describe("instance tools in Kubernetes mode", func() {
 		}))
 	})
 
+	It("print-config shows only the parse error of a headers Secret in HTTP syntax", func() {
+		const value = "Authorization: Basic dXNlcjpwYXNzd29yZA=="
+		files := virtualFiles()
+		files["secret/otlp/headers"] = []byte(value)
+		useSnapshot(newFakeKube("engine-valid.yaml", files, virtual))
+
+		out, err := execute(context.Background(), "instance", "print-config", "--offline")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out).To(ContainSubstring("# headers\nunreadable: "))
+		Expect(out).To(ContainSubstring("entry 1:"))
+		for _, part := range append(strings.Fields(value), "dXNlcjpwYXNzd29yZA") {
+			Expect(out).NotTo(ContainSubstring(part))
+		}
+	})
+
 	It("validate reads a snapshot", func() {
 		useSnapshot(newFakeKube("engine-valid.yaml", virtualFiles(), virtual))
 		out, err := execute(context.Background(), "instance", "validate")

@@ -16,7 +16,6 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/cloudnative-pg/machinery/pkg/log"
-	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -48,10 +47,13 @@ const (
 	connectTimeout = 5 * time.Second
 	// runGrace is the executor's margin over the query timeout.
 	runGrace = 2 * time.Second
-	// earlyFactsGap is the shortest time between a facts round and one a failed run asks for.
+	// earlyFactsGap is the shortest time between a facts round and one a run that lost its connection asks for.
 	earlyFactsGap = time.Second
 	// shutdownTimeout bounds each shutdown step that can block.
 	shutdownTimeout = 5 * time.Second
+
+	// cardinalityLimit is the most series one instrument reports per collection (the SDK default is 2000).
+	cardinalityLimit = 10000
 
 	// upMetric and upDescription are CloudNativePG v1.30.1's (pg_collector.go:130-135).
 	upMetric      = "cnpg_collector_up"
@@ -133,7 +135,7 @@ type engine struct {
 	cluster atomic.Pointer[string]         // the cluster label of upMetric; nil before a valid configuration
 	server  atomic.Pointer[semver.Version] // from the last successful facts round
 	changed chan struct{}                  // a watched file changed
-	early   chan struct{}                  // a run failed without a server error
+	early   chan struct{}                  // a run lost its connection
 
 	mu      sync.Mutex // guards runner, which only the control goroutine writes
 	runner  *runner
@@ -176,11 +178,7 @@ func newEngine(ctx context.Context, o Options) (*engine, error) {
 	}
 
 	e.reader = sdkmetric.NewManualReader(sdkmetric.WithProducer(export.NewProducer(e.store, e.clk, e.duplicates)))
-	e.mp = sdkmetric.NewMeterProvider(
-		sdkmetric.WithReader(e.reader),
-		sdkmetric.WithView(selfmetrics.Views()...),
-		sdkmetric.WithExemplarFilter(exemplar.AlwaysOffFilter),
-	)
+	e.mp = newMeterProvider(e.reader)
 	meter := e.mp.Meter(export.ScopeName, metric.WithInstrumentationVersion(version.Version))
 	if err := e.instrument(meter); err != nil {
 		return nil, errors.Join(err, e.mp.Shutdown(ctx))
@@ -189,6 +187,16 @@ func newEngine(ctx context.Context, o Options) (*engine, error) {
 	e.sched = scheduler.New(e.clk, e.newRand(), e.runJob, e.skipped)
 	e.plan = newReplanner(o.ConfigPath, e.stats, e.store, &e.errs, e.sched.Update, e)
 	return e, nil
+}
+
+// newMeterProvider returns the engine's MeterProvider over reader.
+func newMeterProvider(reader sdkmetric.Reader) *sdkmetric.MeterProvider {
+	return sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(reader),
+		sdkmetric.WithView(selfmetrics.Views()...),
+		sdkmetric.WithExemplarFilter(exemplar.AlwaysOffFilter),
+		sdkmetric.WithCardinalityLimit(cardinalityLimit),
+	)
 }
 
 // instrument registers the self-metrics, the Go runtime metrics and upMetric on meter's provider.
@@ -507,32 +515,23 @@ func (e *engine) record(ctx context.Context, res executor.Result) {
 			e.store.Delete(key)
 			if res.Err != nil {
 				e.errs.Failed(logger, job.Query, job.Database, res.Err)
-				if !serverError(res.Err) {
-					e.requestFacts()
-				}
 			}
+		}
+		if res.ConnectionLost {
+			e.requestFacts()
 		}
 		e.stats.QueryRun(job.Query, job.Database, outcome, res.Duration, res.Started)
 		e.stats.Series(e.store.Series())
 	})
 }
 
-// serverError reports whether PostgreSQL itself returned err, as opposed to a lost connection,
-// a backoff or a context error.
-func serverError(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr)
-}
-
-// skipped is the scheduler's SkipFunc.
+// skipped is the scheduler's SkipFunc. It only counts: the slow run it follows has just stored its result.
 func (e *engine) skipped(job planner.Job, missed int) {
 	e.plan.whilePlanned(job, func() {
-		e.store.Delete(snapshot.Key{Query: job.Query, Database: job.Database})
 		now := e.clk.Now()
 		for range missed {
 			e.stats.QueryRun(job.Query, job.Database, selfmetrics.OutcomeSkipped, 0, now)
 		}
-		e.stats.Series(e.store.Series())
 	})
 }
 

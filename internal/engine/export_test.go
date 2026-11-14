@@ -3,6 +3,9 @@ package engine
 import (
 	"context"
 
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+
+	"github.com/gabrosys/plugin-telemetry/internal/executor"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 	"github.com/gabrosys/plugin-telemetry/internal/snapshot"
@@ -36,3 +39,25 @@ type noComponents struct{}
 func (noComponents) watch(context.Context, []string) {}
 
 func (noComponents) apply(context.Context, *configuration, *configuration) error { return nil }
+
+// EarlyFactsAfter records res for its job, planned, and reports whether that asks for an early facts round.
+func EarlyFactsAfter(ctx context.Context, res executor.Result) (bool, error) {
+	e, err := newEngine(ctx, Options{ConfigPath: "engine.yaml"})
+	if err != nil {
+		return false, err
+	}
+	e.plan.planned = map[snapshot.Key]string{{Query: res.Job.Query, Database: res.Job.Database}: res.Job.Fingerprint}
+	e.record(ctx, res)
+	var early bool
+	select {
+	case <-e.early:
+		early = true
+	default:
+	}
+	return early, e.mp.Shutdown(ctx)
+}
+
+// NewMeterProvider returns the engine's MeterProvider over reader.
+func NewMeterProvider(reader sdkmetric.Reader) *sdkmetric.MeterProvider {
+	return newMeterProvider(reader)
+}

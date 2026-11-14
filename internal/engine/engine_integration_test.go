@@ -399,6 +399,60 @@ var _ = Describe("Run when the exporter files change", func() {
 	})
 })
 
+const slowQuery = `slow_probe:
+  query: SELECT 7 AS value FROM pg_sleep(1.5)
+  metrics:
+    - value:
+        usage: GAUGE
+        description: Slower than its interval.
+`
+
+// requestsSince counts the requests received at or after since, and those that carry the metric called name.
+func requestsSince(srv *otlptest.Server, since time.Time, name string) (total, with int) {
+	for _, req := range srv.Requests() {
+		if req.Received.Before(since) {
+			continue
+		}
+		total++
+		found := false
+		for _, rm := range req.Metrics.GetResourceMetrics() {
+			for _, sm := range rm.GetScopeMetrics() {
+				for _, m := range sm.GetMetrics() {
+					found = found || m.GetName() == name
+				}
+			}
+		}
+		if found {
+			with++
+		}
+	}
+	return total, with
+}
+
+var _ = Describe("Run with a query slower than its interval", func() {
+	It("keeps the fresh entry of each slow run and counts the skips", func() {
+		f := newFixture(time.Second)
+		writeFile(filepath.Join(filepath.Dir(f.config), "default-queries.yaml"), "")
+		writeFile(f.extra, slowQuery)
+		writeFile(f.config, f.valid)
+		f.run()
+
+		Eventually(func(g Gomega) {
+			skips, ok := last(f.srv, "cnpg_otel_query_runs_total", map[string]string{"query": "slow_probe", "outcome": "skipped"})
+			g.Expect(ok).To(BeTrue())
+			g.Expect(skips).To(BeNumerically(">=", 2))
+		}).WithTimeout(20 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+
+		since := time.Now()
+		Eventually(func() int {
+			total, _ := requestsSince(f.srv, since, "cnpg_slow_probe_value")
+			return total
+		}).WithTimeout(10 * time.Second).Should(BeNumerically(">=", 3))
+		total, with := requestsSince(f.srv, since, "cnpg_slow_probe_value")
+		Expect(with).To(Equal(total))
+	})
+})
+
 var _ = Describe("Run with an invalid configuration at start", func() {
 	It("idles until the configuration is fixed", func() {
 		f := newFixture(time.Second)

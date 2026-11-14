@@ -38,14 +38,16 @@ const (
 
 // Result is the outcome of one Run.
 type Result struct {
-	Job      planner.Job
-	Outcome  selfmetrics.Outcome // ok, error, timeout, capped
-	Samples  []queries.Sample    // nil unless ok
-	WouldBe  int                 // capped: series counted before giving up
-	Dropped  map[queries.DropReason]int
-	Err      error
-	Started  time.Time
-	Duration time.Duration
+	Job     planner.Job
+	Outcome selfmetrics.Outcome // ok, error, timeout, capped
+	Samples []queries.Sample    // nil unless ok
+	WouldBe int                 // capped: series counted before giving up
+	Dropped map[queries.DropReason]int
+	Err     error
+	// ConnectionLost is set when the connection broke during the run or none could be acquired.
+	ConnectionLost bool
+	Started        time.Time
+	Duration       time.Duration
 }
 
 // Executor runs jobs on the connections of a pool.
@@ -105,14 +107,17 @@ func (e *Executor) Run(ctx context.Context, job planner.Job) (res Result) {
 func (e *Executor) run(ctx context.Context, job planner.Job, res *Result) error {
 	conn, release, err := e.pool.Acquire(ctx, job.Database)
 	if err != nil {
+		// Waiting for a slot past the run's deadline, or a closed pool, loses no connection.
+		res.ConnectionLost = ctx.Err() == nil && !errors.Is(err, pg.ErrPoolClosed)
 		return fmt.Errorf("acquire connection to %s: %w", job.Database, err)
 	}
-	// A panic leaves broken true.
+	// A panic leaves broken true and ConnectionLost false.
 	broken := true
 	defer func() { release(broken) }()
 
 	discard, err := e.inTransaction(ctx, conn, job, res)
-	broken = discard || conn.IsClosed() || (err != nil && connectionFailed(ctx, conn, err))
+	res.ConnectionLost = conn.IsClosed() || (err != nil && connectionFailed(ctx, conn, err))
+	broken = discard || res.ConnectionLost
 	return err
 }
 

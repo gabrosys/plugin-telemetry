@@ -372,4 +372,66 @@ var _ = Describe("Executor", func() {
 	})
 })
 
+var _ = Describe("Result.ConnectionLost", func() {
+	var (
+		l    settings.Limits
+		exec *executor.Executor
+	)
+
+	BeforeEach(func() {
+		l = limits()
+		exec = newExecutor(newPool(l), l)
+	})
+
+	It("is set when the backend was terminated", func(ctx SpecContext) {
+		pid := jobFor("SELECT 'a' AS datname, pg_backend_pid() AS value")
+		first := exec.Run(ctx, pid)
+		Expect(first.Err).NotTo(HaveOccurred())
+		Expect(first.ConnectionLost).To(BeFalse())
+		Expect(server.Exec(ctx, "SELECT pg_terminate_backend("+formatPID(first.Samples[0].Value)+")")).To(Succeed())
+
+		dead := exec.Run(ctx, pid)
+		Expect(dead.Outcome).To(Equal(selfmetrics.OutcomeError))
+		Expect(dead.ConnectionLost).To(BeTrue())
+	})
+
+	It("is set when no connection can be made, and during the backoff", func(ctx SpecContext) {
+		cfg := server.MonitorConfig(GinkgoT().TempDir())
+		Expect(os.WriteFile(cfg.PasswordFile, []byte("wrong\n"), 0o600)).To(Succeed())
+		cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout
+		pool := pg.NewPool(cfg, 4, time.Minute, clocktesting.NewFakePassiveClock(time.Now()))
+		DeferCleanup(pool.Close)
+		wrong := newExecutor(pool, l)
+
+		res := wrong.Run(ctx, jobFor("SELECT 'a' AS datname, 1 AS value"))
+		Expect(res.Err).To(HaveOccurred())
+		Expect(res.Err).NotTo(MatchError(pg.ErrBackoff))
+		Expect(res.ConnectionLost).To(BeTrue())
+
+		res = wrong.Run(ctx, jobFor("SELECT 'a' AS datname, 1 AS value"))
+		Expect(res.Err).To(MatchError(pg.ErrBackoff))
+		Expect(res.ConnectionLost).To(BeTrue())
+	})
+
+	It("is not set for a column mismatch", func(ctx SpecContext) {
+		res := exec.Run(ctx, jobFor("SELECT 'a' AS datname, 1 AS value, 2 AS extra"))
+		Expect(res.Err).To(MatchError(queries.ErrColumnMismatch))
+		Expect(res.ConnectionLost).To(BeFalse())
+	})
+
+	It("is not set for a statement timeout", func(ctx SpecContext) {
+		res := exec.Run(ctx, jobFor("SELECT 'a' AS datname, 1 AS value FROM pg_sleep(5)"))
+		var pgErr *pgconn.PgError
+		Expect(errors.As(res.Err, &pgErr)).To(BeTrue(), "%v", res.Err)
+		Expect(pgErr.Code).To(Equal("57014"))
+		Expect(res.ConnectionLost).To(BeFalse())
+	})
+
+	It("is not set for a recovered panic", func(ctx SpecContext) {
+		res := exec.Run(ctx, planner.Job{Query: "broken", Database: "postgres"})
+		Expect(res.Err).To(MatchError(ContainSubstring("panic")))
+		Expect(res.ConnectionLost).To(BeFalse())
+	})
+})
+
 func formatPID(v float64) string { return strconv.FormatInt(int64(v), 10) }

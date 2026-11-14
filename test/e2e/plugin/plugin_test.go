@@ -129,6 +129,16 @@ func monitoredConfigMaps(cluster *apiv1.Cluster) []string {
 	return names
 }
 
+// desiredExporter is the valid TelemetryExporter the Cluster ends up using.
+func desiredExporter(ns string) *v1alpha1.TelemetryExporter {
+	exporter := framework.ExporterFor(ns, exporterName)
+	exporter.Spec.Exporter.Headers = &v1alpha1.KeySelector{Name: headersSecret, Key: headersKey}
+	exporter.Spec.ResourceLabels = []string{partOfLabel}
+	exporter.Spec.ResourceAttributes = map[string]string{extraAttribute: extraValue}
+
+	return exporter
+}
+
 // readRule is the rule the Role holds for one kind: get, list and watch on the named objects.
 func readRule(group, resource string, names ...string) rbacv1.PolicyRule {
 	return rbacv1.PolicyRule{
@@ -501,15 +511,55 @@ func describeMode(m mode) {
 				}
 			}, SpecTimeout(2*time.Minute))
 
-		It("AC3: after the TelemetryExporter is created, metrics from both instances reach the collector with the design 6.6 resource attributes and no rollout",
+		It("AC5: an exporter that is invalid from the start leaves the sidecar idle", func(ctx SpecContext) {
+			// Without metrics.interval the interval is 30 s, so a 20 s timeout fails Build; the CRD only checks both set.
+			exporter := desiredExporter(ns)
+			exporter.Spec.Metrics.Interval = nil
+			exporter.Spec.Exporter.Timeout = &metav1.Duration{Duration: 20 * time.Second}
+
+			created := time.Now()
+			Expect(c.Create(ctx, exporter)).To(Succeed())
+
+			Eventually(func(g Gomega, ctx SpecContext) {
+				st := status(g, ctx)
+				g.Expect(st.ExporterState).To(Equal("invalid"))
+				g.Expect(st.Message).To(ContainSubstring("exporter.timeout"))
+			}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(specPoll).Should(Succeed())
+
+			for _, pod := range pods(ctx) {
+				Eventually(func(ctx SpecContext) (string, error) {
+					return sidecarLogs(ctx, cfg, ns, pod.Name)
+				}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(specPoll).Should(
+					ContainSubstring("invalid configuration, waiting for a valid one"), pod.Name)
+			}
+
+			// The collector receives other exporters in the window, so an empty result is not a dead collector.
+			Eventually(func(g Gomega, ctx SpecContext) {
+				var plugin []map[string]string
+				for _, r := range otlp.Resources(lines(g, ctx, created)) {
+					if r["service.name"] == pluginServiceName {
+						plugin = append(plugin, r)
+					}
+				}
+				g.Expect(plugin).NotTo(BeEmpty(), "the collector received nothing from the plugin since %s", created)
+			}).WithContext(ctx).WithTimeout(3 * time.Minute).WithPolling(specPoll).Should(Succeed())
+			Consistently(func(g Gomega, ctx SpecContext) {
+				g.Expect(exports(lines(g, ctx, created))).To(BeEmpty(), "the sidecars export with an invalid TelemetryExporter")
+			}).WithContext(ctx).WithTimeout(4 * exportInterval).WithPolling(specPoll).Should(Succeed())
+
+			noRollout(ctx)
+		}, SpecTimeout(8*time.Minute))
+
+		It("AC3: after the TelemetryExporter is valid, metrics from both instances reach the collector with the design 6.6 resource attributes and no rollout",
 			func(ctx SpecContext) {
-				exporter := framework.ExporterFor(ns, exporterName)
-				exporter.Spec.Exporter.Headers = &v1alpha1.KeySelector{Name: headersSecret, Key: headersKey}
-				exporter.Spec.ResourceLabels = []string{partOfLabel}
-				exporter.Spec.ResourceAttributes = map[string]string{extraAttribute: extraValue}
+				// The exporter exists since the previous spec, invalid; this makes it valid.
+				var current v1alpha1.TelemetryExporter
+				Expect(c.Get(ctx, key(exporterName), &current)).To(Succeed())
+				patch := client.MergeFrom(current.DeepCopy())
+				current.Spec = desiredExporter(ns).Spec
 
 				exporterCreated = time.Now()
-				Expect(c.Create(ctx, exporter)).To(Succeed())
+				Expect(c.Patch(ctx, &current, patch)).To(Succeed())
 
 				Eventually(func(g Gomega, ctx SpecContext) {
 					g.Expect(status(g, ctx).ExporterState).To(Equal("ok"))

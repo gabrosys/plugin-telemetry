@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"io/fs"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -289,6 +290,50 @@ var _ = Describe("Source", func() {
 			cancel()
 			Eventually(done).Should(Receive(BeNil()))
 		})
+	})
+
+	It("logs and forwards a repeated watch error once, and again when the error changes", func() {
+		errs := make(chan error, 8)
+		readyCh := make(chan struct{})
+		start()
+		go func() {
+			_ = src.Watch(ctx, nil, func() {}, sources.WithReady(func() { close(readyCh) }),
+				sources.WithErrorHandler(func(err error) { errs <- err }))
+		}()
+		Eventually(readyCh).Should(BeClosed())
+
+		fw.fail("clusters", "pg", errors.New("connection refused"))
+		fw.fail("clusters", "pg", errors.New("connection refused"))
+		Eventually(errs).Should(Receive())
+		Consistently(errs, "100ms").ShouldNot(Receive())
+		Expect(strings.Count(logs.String(), "watch failed")).To(Equal(1))
+
+		fw.fail("clusters", "pg", errors.New("no route to host"))
+		Eventually(errs).Should(Receive(MatchError(ContainSubstring("no route to host"))))
+		Expect(strings.Count(logs.String(), "watch failed")).To(Equal(2))
+
+		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+		fw.fail("clusters", "pg", errors.New("no route to host"))
+		Eventually(errs).Should(Receive())
+	})
+
+	It("keeps the watches and answers ErrDenied while the exporter is denied and a Cluster event arrives", func() {
+		start()
+		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+		fw.set("telemetryexporters", "default", exporter(map[string]any{
+			"exporter": map[string]any{"endpoint": "http://c:4318"},
+			"metrics":  map[string]any{"querySets": []any{"qs1"}},
+		}))
+		fw.set("metricquerysets", "qs1", querySet("qs1", map[string]any{"q": map[string]any{"query": "SELECT 1"}}))
+		before := fw.active()
+
+		fw.fail("telemetryexporters", "default", errors.Join(errors.New("forbidden"), sources.ErrDenied))
+		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+
+		Expect(fw.active()).To(ConsistOf(before))
+		Expect(src.ReadFile(clusterconfig.QuerySetFile("qs1"))).To(MatchJSON(`{"q":{"query":"SELECT 1"}}`))
+		_, _, err := src.Settings()
+		Expect(err).To(MatchError(sources.ErrDenied))
 	})
 
 	It("never logs a Secret's data", func() {

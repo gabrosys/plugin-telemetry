@@ -123,11 +123,22 @@ func Snapshot(ctx context.Context, o Options) (*Source, error) {
 		return nil, fmt.Errorf("snapshot: %w", ctx.Err())
 	}
 
+	w, errs := snapshotWatcher(client)
+	s.begin(ctx, w)
+	if err := errs(); err != nil {
+		return nil, fmt.Errorf("snapshot: %w", err)
+	}
+
+	return s, nil
+}
+
+// snapshotWatcher gets each object once, synchronously; errs returns the failures other than 403 and 404.
+func snapshotWatcher(client dynamic.Interface) (w watcher, errs func() error) {
 	var (
-		mu   sync.Mutex // covers errs
-		errs []error
+		mu       sync.Mutex // covers failures
+		failures []error
 	)
-	get := func(ctx context.Context, gvr schema.GroupVersionResource, namespace, name string, h handler) func() {
+	w = func(ctx context.Context, gvr schema.GroupVersionResource, namespace, name string, h handler) func() {
 		obj, err := client.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 		switch {
 		case err == nil:
@@ -138,21 +149,20 @@ func Snapshot(ctx context.Context, o Options) (*Source, error) {
 			h.fail(fmt.Errorf("%w: %w", sources.ErrDenied, err))
 		default:
 			mu.Lock()
-			errs = append(errs, fmt.Errorf("get %s %s: %w", gvr.Resource, name, err))
+			failures = append(failures, fmt.Errorf("get %s %s: %w", gvr.Resource, name, err))
 			mu.Unlock()
 			h.fail(err)
 		}
+
 		return func() {}
 	}
-	s.begin(ctx, get)
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(errs) > 0 {
-		return nil, fmt.Errorf("snapshot: %w", errors.Join(errs...))
+	errs = func() error {
+		mu.Lock()
+		defer mu.Unlock()
+		return errors.Join(failures...)
 	}
 
-	return s, nil
+	return w, errs
 }
 
 // client waits for the token and returns the dynamic client; nil when ctx ended first.
@@ -300,6 +310,9 @@ func (s *Source) wantedLocked() map[key]struct{} {
 	}
 
 	cluster, err := s.clusterLocked()
+	if err != nil && !errors.Is(err, errNotSynced) {
+		return s.currentLocked()
+	}
 	if err != nil || cluster == nil {
 		return wanted
 	}
@@ -311,7 +324,10 @@ func (s *Source) wantedLocked() map[key]struct{} {
 	if err != nil {
 		return wanted
 	}
-	exporter, _ := s.exporterLocked(parsed.Params.Exporter)
+	exporter, err := s.exporterLocked(parsed.Params.Exporter)
+	if err != nil && !errors.Is(err, errNotSynced) {
+		return s.currentLocked()
+	}
 
 	refs := clusterconfig.References(cluster, parsed.Params, exporter)
 	wanted[key{kind: kindExporter, name: refs.Exporter}] = struct{}{}
@@ -326,6 +342,16 @@ func (s *Source) wantedLocked() map[key]struct{} {
 	}
 
 	return wanted
+}
+
+// currentLocked returns the keys being watched, for when the wanted set can't be computed.
+func (s *Source) currentLocked() map[key]struct{} {
+	keys := make(map[key]struct{}, len(s.entries))
+	for k := range s.entries {
+		keys[k] = struct{}{}
+	}
+
+	return keys
 }
 
 // clusterLocked returns the decoded Cluster; nil when it isn't known or doesn't exist.
@@ -379,7 +405,7 @@ func (s *Source) handler(k key, e *entry) handler {
 				s.mu.Unlock()
 				return
 			}
-			e.synced, e.obj, e.denied = true, obj, nil
+			e.synced, e.obj, e.denied, e.lastErr = true, obj, nil, ""
 			s.wakeLocked()
 			s.mu.Unlock()
 
@@ -403,6 +429,11 @@ func (s *Source) handler(k key, e *entry) handler {
 				s.mu.Unlock()
 				return
 			}
+			if err.Error() == e.lastErr {
+				s.mu.Unlock()
+				return
+			}
+			e.lastErr = err.Error()
 			s.log.Error(err, "watch failed", "kind", k.kind, "name", k.name)
 			var handlers []func(error)
 			for sub := range s.subs {

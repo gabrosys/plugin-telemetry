@@ -2,6 +2,7 @@ package kubesource_test
 
 import (
 	"context"
+	"io/fs"
 	"sync"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -95,5 +96,68 @@ var _ = Describe("the dynamic watcher", func() {
 		})
 		startWith("a")
 		Eventually(failures).Should(Receive(MatchError(sources.ErrDenied)))
+	})
+})
+
+var _ = Describe("the snapshot watcher", func() {
+	var (
+		ctx    context.Context
+		client *dynfake.FakeDynamicClient
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		gvrs := map[schema.GroupVersionResource]string{
+			{Group: "postgresql.cnpg.io", Version: "v1", Resource: "clusters"}:                           "ClusterList",
+			{Group: "telemetry.gabrosys.github.io", Version: "v1alpha1", Resource: "telemetryexporters"}: "TelemetryExporterList",
+			{Version: "v1", Resource: "configmaps"}:                                                      "ConfigMapList",
+		}
+		client = dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrs,
+			enabledCluster(map[string]any{}), exporter(map[string]any{
+				"exporter": map[string]any{"endpoint": "http://c:4318"},
+				"envFrom":  map[string]any{"configMap": map[string]any{"name": "envcm"}},
+			}))
+	})
+
+	snapshot := func() (*kubesource.Source, func() error) {
+		src, err := kubesource.New(kubesource.Options{
+			Namespace: "ns", Cluster: "pg", APIServer: "https://x", TokenDir: GinkgoT().TempDir(),
+		})
+		Expect(err).NotTo(HaveOccurred())
+		w, errs := kubesource.SnapshotWatcher(client)
+		src.Begin(ctx, w)
+		return src, errs
+	}
+
+	It("reads every referenced object once and treats a 404 as a missing object", func() {
+		src, errs := snapshot()
+		Expect(errs()).To(Succeed())
+		_, _, err := src.Settings()
+		Expect(err).NotTo(HaveOccurred())
+		_, err = src.ReadFile("configmap/envcm/k")
+		Expect(err).To(MatchError(fs.ErrNotExist))
+	})
+
+	It("reports a 403 as ErrDenied", func() {
+		client.PrependReactor("get", "configmaps", func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "configmaps"}, "envcm", errForbidden)
+		})
+		src, errs := snapshot()
+		Expect(errs()).To(Succeed())
+		_, err := src.ReadFile("configmap/envcm/k")
+		Expect(err).To(MatchError(sources.ErrDenied))
+		_, _, err = src.Settings()
+		Expect(err).To(MatchError(sources.ErrDenied))
+	})
+
+	It("collects any other error", func() {
+		client.PrependReactor("get", "configmaps", func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewInternalError(errForbidden)
+		})
+		src, errs := snapshot()
+		Expect(errs()).To(MatchError(ContainSubstring("configmaps envcm")))
+		_, err := src.ReadFile("configmap/envcm/k")
+		Expect(err).To(HaveOccurred())
+		Expect(err).NotTo(MatchError(fs.ErrNotExist))
 	})
 })

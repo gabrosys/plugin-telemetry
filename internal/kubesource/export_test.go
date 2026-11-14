@@ -31,3 +31,8 @@ func (s *Source) WaitForToken(ctx context.Context) bool { return s.waitForToken(
 func NewHandler(set func(*unstructured.Unstructured), fail func(error)) Handler {
 	return handler{set: set, fail: fail}
 }
+
+// SnapshotWatcher is the one-shot getter Snapshot runs, with the errors it collected.
+func SnapshotWatcher(client dynamic.Interface) (Watcher, func() error) {
+	return snapshotWatcher(client)
+}

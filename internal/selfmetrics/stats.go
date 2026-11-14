@@ -20,6 +20,7 @@ const (
 	OutcomeTimeout Outcome = "timeout"
 	OutcomeSkipped Outcome = "skipped"
 	OutcomeCapped  Outcome = "capped"
+	OutcomeDenied  Outcome = "denied"
 )
 
 // errorTypeRejected is the error.type of data points the backend rejected.
@@ -76,6 +77,8 @@ type Stats struct {
 	loads map[loadKey]int64
 	dups  map[string]int64
 
+	checks map[string]bool
+
 	generation uint64
 	hash       string
 	configSet  bool
@@ -98,6 +101,7 @@ func NewStats() *Stats {
 		dropped:     map[dropKey]int64{},
 		loads:       map[loadKey]int64{},
 		dups:        map[string]int64{},
+		checks:      map[string]bool{},
 		exports:     map[Outcome]int64{},
 		exported:    map[pointKey]int64{},
 	}
@@ -154,16 +158,19 @@ func (s *Stats) Series(n int) {
 	s.series, s.seriesSet = n, true
 }
 
-// ConfigLoad records one configuration load and the duplicate queries it found.
-func (s *Stats) ConfigLoad(source string, ok bool, duplicates int) {
-	outcome := OutcomeOK
-	if !ok {
-		outcome = OutcomeError
-	}
+// ConfigLoad records one configuration load, whose outcome is ok, error or denied, and the duplicate queries it found.
+func (s *Stats) ConfigLoad(source string, outcome Outcome, duplicates int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.loads[loadKey{source, outcome}]++
 	s.dups[source] += int64(duplicates)
+}
+
+// SetChecks replaces the live checks of the last facts round; a check not in checks stops being reported.
+func (s *Stats) SetChecks(checks map[string]bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.checks = maps.Clone(checks)
 }
 
 // ConfigGeneration records the active configuration generation and hash.
@@ -319,6 +326,14 @@ func (s *Stats) points(name string) ([]point, bool) {
 				attribute.String("generation", strconv.FormatUint(s.generation, 10)),
 				attribute.String("hash", s.hash),
 			}})
+		}
+	case "cnpg_otel_check":
+		for k, v := range s.checks {
+			value := 0.0
+			if v {
+				value = 1
+			}
+			out = append(out, point{value, []attribute.KeyValue{attribute.String("check", k)}})
 		}
 	case "cnpg_otel_exports_total":
 		for k, v := range s.exports {

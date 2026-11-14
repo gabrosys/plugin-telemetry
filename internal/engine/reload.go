@@ -99,7 +99,11 @@ func (r *replanner) reload(ctx context.Context) error {
 		}
 		return fmt.Errorf("load settings: %w", err)
 	}
-	r.stats.ConfigLoad(r.cfg.Name(), err == nil, 0)
+	settingsOutcome := selfmetrics.OutcomeOK
+	if err != nil {
+		settingsOutcome = selfmetrics.OutcomeError
+	}
+	r.stats.ConfigLoad(r.cfg.Name(), settingsOutcome, 0)
 	if err != nil {
 		r.digest, r.digestFiles = hex.EncodeToString(h.Sum(nil)), nil
 		return fmt.Errorf("load settings: %w", err)
@@ -131,7 +135,7 @@ func (r *replanner) reload(ctx context.Context) error {
 // recordLoad counts and logs the outcome of each source.
 func (r *replanner) recordLoad(logger log.Logger, res sources.Result) {
 	for _, st := range res.Status {
-		r.stats.ConfigLoad(st.Source, st.Outcome == sources.OutcomeOK, len(st.Duplicates))
+		r.stats.ConfigLoad(st.Source, loadOutcome(st.Outcome), len(st.Duplicates))
 		switch st.Outcome {
 		case sources.OutcomeMissing:
 			logger.Warning("query source missing", "source", st.Source, "error", fmt.Sprint(st.Err))
@@ -145,6 +149,18 @@ func (r *replanner) recordLoad(logger log.Logger, res sources.Result) {
 		if len(st.Duplicates) > 0 {
 			logger.Warning("query source overrides earlier queries", "source", st.Source, "queries", st.Duplicates)
 		}
+	}
+}
+
+// loadOutcome maps the outcome of a source to the self-metric outcome: ok, denied, or error.
+func loadOutcome(o string) selfmetrics.Outcome {
+	switch o {
+	case sources.OutcomeOK:
+		return selfmetrics.OutcomeOK
+	case sources.OutcomeDenied:
+		return selfmetrics.OutcomeDenied
+	default:
+		return selfmetrics.OutcomeError
 	}
 }
 

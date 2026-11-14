@@ -29,6 +29,7 @@ var _ = Describe("Catalogue", func() {
 			{"cnpg_otel_config_loads_total", "counter", "{load}", []string{"source", "outcome"}},
 			{"cnpg_otel_config_duplicate_queries_total", "counter", "{query}", []string{"source"}},
 			{"cnpg_otel_config_info", "gauge", "", []string{"generation", "hash"}},
+			{"cnpg_otel_check", "gauge", "", []string{"check"}},
 			{"cnpg_otel_exports_total", "counter", "{export}", []string{"outcome"}},
 			{"cnpg_otel_last_export_success_timestamp_seconds", "gauge", "s", nil},
 			{

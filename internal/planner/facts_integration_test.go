@@ -47,6 +47,47 @@ var _ = Describe("GatherFacts", func() {
 		Expect(f.Databases).To(Equal([]string{"app", "postgres"}))
 	})
 
+	gather := func(ctx SpecContext) planner.Facts {
+		GinkgoHelper()
+		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1, time.Minute,
+			clocktesting.NewFakePassiveClock(time.Now()))
+		DeferCleanup(pool.Close)
+		conn, release, err := pool.Acquire(ctx, "postgres")
+		Expect(err).NotTo(HaveOccurred())
+		defer release(false)
+		f, err := planner.GatherFacts(ctx, conn)
+		Expect(err).NotTo(HaveOccurred())
+		return f
+	}
+
+	It("gathers the five checks as the monitoring role", func(ctx SpecContext) {
+		Expect(gather(ctx).Checks).To(Equal(map[string]bool{
+			"pg_monitor":          true,
+			"read_only":           true,
+			"track_io_timing":     false,
+			"track_wal_io_timing": false,
+			"track_functions":     false,
+		}))
+	})
+
+	It("reports the settings that are on", func(ctx SpecContext) {
+		role := pgtest.MonitorUser
+		Expect(server.Exec(ctx, "ALTER ROLE "+role+" SET track_io_timing = on")).To(Succeed())
+		Expect(server.Exec(ctx, "ALTER ROLE "+role+" SET track_wal_io_timing = on")).To(Succeed())
+		Expect(server.Exec(ctx, "ALTER ROLE "+role+" SET track_functions = 'pl'")).To(Succeed())
+		DeferCleanup(func(ctx SpecContext) {
+			Expect(server.Exec(ctx, "ALTER ROLE "+role+" RESET ALL")).To(Succeed())
+		})
+
+		Expect(gather(ctx).Checks).To(Equal(map[string]bool{
+			"pg_monitor":          true,
+			"read_only":           true,
+			"track_io_timing":     true,
+			"track_wal_io_timing": true,
+			"track_functions":     true,
+		}))
+	})
+
 	It("returns a wrapped error when the context is cancelled", func(ctx SpecContext) {
 		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1, time.Minute,
 			clocktesting.NewFakePassiveClock(time.Now()))

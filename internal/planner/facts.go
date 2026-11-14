@@ -17,6 +17,8 @@ type Facts struct {
 	Version    semver.Version
 	InRecovery bool
 	Databases  []string // allow connections, not templates, CONNECT granted; sorted
+	// Checks are pg_monitor, read_only, track_io_timing, track_wal_io_timing and track_functions.
+	Checks map[string]bool
 }
 
 // ParseVersionNum converts server_version_num to a version as CloudNativePG does:
@@ -34,8 +36,16 @@ const databasesQuery = `SELECT datname, pg_catalog.has_database_privilege(datnam
 		 FROM pg_catalog.pg_database
 		 WHERE datallowconn AND NOT datistemplate`
 
-// GatherFacts reads the server version, the recovery state and the connectable databases in one
-// read-only transaction on conn, which must be connected to the default database.
+// checksQuery reads the live checks; current_setting returns the on/off settings as 'on' or 'off',
+// and track_functions as none, pl or all.
+const checksQuery = `SELECT pg_catalog.pg_has_role(current_user, 'pg_monitor', 'MEMBER'),
+		pg_catalog.current_setting('default_transaction_read_only') = 'on',
+		pg_catalog.current_setting('track_io_timing') = 'on',
+		pg_catalog.current_setting('track_wal_io_timing') = 'on',
+		pg_catalog.current_setting('track_functions') <> 'none'`
+
+// GatherFacts reads the server version, the recovery state, the live checks and the connectable
+// databases in one read-only transaction on conn, which must be connected to the default database.
 func GatherFacts(ctx context.Context, conn *pgx.Conn) (facts Facts, err error) {
 	tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
@@ -59,6 +69,18 @@ func GatherFacts(ctx context.Context, conn *pgx.Conn) (facts Facts, err error) {
 	var inRecovery bool
 	if err := tx.QueryRow(ctx, "SELECT pg_catalog.pg_is_in_recovery()").Scan(&inRecovery); err != nil {
 		return Facts{}, fmt.Errorf("check recovery state: %w", err)
+	}
+
+	var monitor, readOnly, ioTiming, walIOTiming, functions bool
+	if err := tx.QueryRow(ctx, checksQuery).Scan(&monitor, &readOnly, &ioTiming, &walIOTiming, &functions); err != nil {
+		return Facts{}, fmt.Errorf("read the checks: %w", err)
+	}
+	checks := map[string]bool{
+		"pg_monitor":          monitor,
+		"read_only":           readOnly,
+		"track_io_timing":     ioTiming,
+		"track_wal_io_timing": walIOTiming,
+		"track_functions":     functions,
 	}
 
 	rows, err := tx.Query(ctx, databasesQuery)
@@ -86,5 +108,5 @@ func GatherFacts(ctx context.Context, conn *pgx.Conn) (facts Facts, err error) {
 	}
 
 	sort.Strings(databases)
-	return Facts{Version: version, InRecovery: inRecovery, Databases: databases}, nil
+	return Facts{Version: version, InRecovery: inRecovery, Databases: databases, Checks: checks}, nil
 }

@@ -1,7 +1,7 @@
 - name: cnpg_otel_query_runs_total
   instrument: counter
   unit: "{run}"
-  description: Query runs by outcome (ok, error, timeout, skipped, capped).
+  description: Query runs by outcome (ok, error, timeout, skipped, capped, denied).
   attributes: [query, database, outcome]
 - name: cnpg_otel_query_last_duration_seconds
   instrument: gauge
@@ -35,7 +35,7 @@
 - name: cnpg_otel_config_loads_total
   instrument: counter
   unit: "{load}"
-  description: Configuration loads by source and outcome (ok, error).
+  description: Configuration loads by source and outcome (ok, error, denied).
   attributes: [source, outcome]
 - name: cnpg_otel_config_duplicate_queries_total
   instrument: counter
@@ -47,6 +47,11 @@
   unit: ""
   description: Always 1; the active configuration generation and hash are attributes.
   attributes: [generation, hash]
+- name: cnpg_otel_check
+  instrument: gauge
+  unit: ""
+  description: 1 if a live check holds, 0 otherwise, from the last facts round (pg_monitor, read_only, track_io_timing, track_wal_io_timing, track_functions).
+  attributes: [check]
 - name: cnpg_otel_exports_total
   instrument: counter
   unit: "{export}"

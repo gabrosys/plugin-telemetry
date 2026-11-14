@@ -20,6 +20,8 @@ import (
 	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/gabrosys/plugin-telemetry/internal/engine"
@@ -225,6 +227,38 @@ var _ = Describe("An in-memory Config", func() {
 
 			res := sources.NewLoader(cfg.ReadFile, []string{"/mem/queries.yaml"}).Load()
 			Expect(res.Status[1].Outcome).To(Equal(sources.OutcomeDenied))
+		})
+
+		It("counts a denied source load as cnpg_otel_config_loads_total{outcome=\"denied\"}", func(ctx SpecContext) {
+			stats := selfmetrics.NewStats()
+			reader := sdkmetric.NewManualReader()
+			provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader), sdkmetric.WithView(selfmetrics.Views()...))
+			DeferCleanup(provider.Shutdown)
+			Expect(selfmetrics.Register(provider.Meter("test"), stats)).To(Succeed())
+			r = engine.NewReplanner(cfg, stats, snapshot.New(0), func(p planner.Plan) { plans = append(plans, p) })
+
+			Expect(r.Reload(ctx)).To(Succeed())
+			cfg.set(func() { cfg.fileErrs["/mem/queries.yaml"] = sources.ErrDenied })
+			Expect(r.Reload(ctx)).To(Succeed())
+
+			var rm metricdata.ResourceMetrics
+			Expect(reader.Collect(ctx, &rm)).To(Succeed())
+			got := map[string]int64{}
+			for _, sm := range rm.ScopeMetrics {
+				for _, m := range sm.Metrics {
+					sum, ok := m.Data.(metricdata.Sum[int64])
+					if m.Name != "cnpg_otel_config_loads_total" || !ok {
+						continue
+					}
+					for _, dp := range sum.DataPoints {
+						source, _ := dp.Attributes.Value("source")
+						outcome, _ := dp.Attributes.Value("outcome")
+						got[source.AsString()+"/"+outcome.AsString()] = dp.Value
+					}
+				}
+			}
+			Expect(got).To(HaveKeyWithValue("/mem/queries.yaml/denied", int64(1)))
+			Expect(got).To(HaveKeyWithValue("/mem/queries.yaml/ok", int64(1)))
 		})
 	})
 

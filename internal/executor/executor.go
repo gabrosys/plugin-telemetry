@@ -34,12 +34,13 @@ const (
 
 	sqlstateQueryCanceled = "57014"
 	sqlstateLockNotAvail  = "55P03"
+	sqlstateInsufficient  = "42501"
 )
 
 // Result is the outcome of one Run.
 type Result struct {
 	Job     planner.Job
-	Outcome selfmetrics.Outcome // ok, error, timeout, capped
+	Outcome selfmetrics.Outcome // ok, error, timeout, capped, denied
 	Samples []queries.Sample    // nil unless ok
 	WouldBe int                 // capped: series counted before giving up
 	Dropped map[queries.DropReason]int
@@ -65,11 +66,17 @@ func New(pool *pg.Pool, limits settings.Limits, server func() *semver.Version, c
 	return &Executor{pool: pool, limits: limits, server: server, clk: clk, cancel: cancelStatement}
 }
 
-// Classify maps an error to an outcome: SQLSTATE 57014 or 55P03, or a context deadline, is timeout.
+// Classify maps an error to an outcome: SQLSTATE 57014 or 55P03, or a context deadline, is timeout;
+// SQLSTATE 42501 is denied.
 func Classify(err error) selfmetrics.Outcome {
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && (pgErr.Code == sqlstateQueryCanceled || pgErr.Code == sqlstateLockNotAvail) {
-		return selfmetrics.OutcomeTimeout
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case sqlstateQueryCanceled, sqlstateLockNotAvail:
+			return selfmetrics.OutcomeTimeout
+		case sqlstateInsufficient:
+			return selfmetrics.OutcomeDenied
+		}
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return selfmetrics.OutcomeTimeout

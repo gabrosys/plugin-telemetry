@@ -73,8 +73,9 @@ var _ = Describe("Stats", func() {
 		stats.SeriesDropped("q", "app", "cap", 3)
 		stats.QueryInterval("q", 30*time.Second)
 		stats.Series(42)
-		stats.ConfigLoad("file", true, 2)
+		stats.ConfigLoad("file", selfmetrics.OutcomeOK, 2)
 		stats.ConfigGeneration(7, "abc")
+		stats.SetChecks(map[string]bool{"pg_monitor": true})
 		export := selfmetrics.ExportRecord{
 			Outcome: selfmetrics.OutcomeOK, Duration: 20 * time.Millisecond, At: at, Points: 10,
 			ComponentType: "otlp_grpc_metric_exporter", ServerAddress: "collector", ServerPort: 4317,
@@ -150,11 +151,42 @@ var _ = Describe("Stats", func() {
 		Expect(points(got["cnpg_otel_series"])).To(Equal(map[string]float64{"": 42}))
 	})
 
+	It("counts a denied load under outcome=denied", func() {
+		stats.ConfigLoad("configmap", selfmetrics.OutcomeDenied, 0)
+		stats.ConfigLoad("configmap", selfmetrics.OutcomeDenied, 0)
+
+		Expect(points(collect()["cnpg_otel_config_loads_total"])).To(Equal(map[string]float64{
+			"outcome=denied,source=configmap": 2,
+		}))
+	})
+
+	It("counts a run that was denied under outcome=denied", func() {
+		stats.QueryRun("q", "app", selfmetrics.OutcomeDenied, time.Second, at)
+
+		got := collect()
+		Expect(points(got["cnpg_otel_query_runs_total"])).To(Equal(map[string]float64{
+			"database=app,outcome=denied,query=q": 1,
+		}))
+		Expect(got).NotTo(HaveKey("cnpg_otel_query_last_success_timestamp_seconds"))
+	})
+
+	It("exports cnpg_otel_check{check} as 1 or 0 after each facts round and stops exporting a check that is gone", func() {
+		Expect(collect()).NotTo(HaveKey("cnpg_otel_check"))
+
+		stats.SetChecks(map[string]bool{"pg_monitor": true, "read_only": false, "track_io_timing": true})
+		Expect(points(collect()["cnpg_otel_check"])).To(Equal(map[string]float64{
+			"check=pg_monitor": 1, "check=read_only": 0, "check=track_io_timing": 1,
+		}))
+
+		stats.SetChecks(map[string]bool{"pg_monitor": false})
+		Expect(points(collect()["cnpg_otel_check"])).To(Equal(map[string]float64{"check=pg_monitor": 0}))
+	})
+
 	It("counts a reload error under outcome=error", func() {
-		stats.ConfigLoad("file", true, 0)
-		stats.ConfigLoad("file", false, 0)
-		stats.ConfigLoad("file", false, 0)
-		stats.ConfigLoad("configmap", true, 3)
+		stats.ConfigLoad("file", selfmetrics.OutcomeOK, 0)
+		stats.ConfigLoad("file", selfmetrics.OutcomeError, 0)
+		stats.ConfigLoad("file", selfmetrics.OutcomeError, 0)
+		stats.ConfigLoad("configmap", selfmetrics.OutcomeOK, 3)
 		stats.ConfigGeneration(12, "deadbeef")
 
 		got := collect()
@@ -303,7 +335,7 @@ var _ = Describe("Stats", func() {
 			stats.QueryInterval(q, time.Minute)
 		}
 		stats.Series(9)
-		stats.ConfigLoad("file", true, 0)
+		stats.ConfigLoad("file", selfmetrics.OutcomeOK, 0)
 
 		stats.Retain(map[selfmetrics.QueryDatabase]bool{{Query: "kept", Database: "app"}: true})
 

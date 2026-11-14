@@ -199,6 +199,16 @@ var _ = Describe("Executor", func() {
 		Expect(pgErr.Code).To(Equal("25006"))
 	})
 
+	It("records a run that fails with SQLSTATE 42501 as outcome denied", func(ctx SpecContext) {
+		res := exec.Run(ctx, jobFor("SELECT 'a' AS datname, 1 AS value FROM pg_authid LIMIT 1"))
+		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeDenied), "error: %v", res.Err)
+		var pgErr *pgconn.PgError
+		Expect(errors.As(res.Err, &pgErr)).To(BeTrue(), "error: %v", res.Err)
+		Expect(pgErr.Code).To(Equal("42501"))
+		Expect(res.Samples).To(BeNil())
+		Expect(res.ConnectionLost).To(BeFalse())
+	})
+
 	It("times out a slow query with statement_timeout", func(ctx SpecContext) {
 		pid := jobFor("SELECT 'a' AS datname, pg_backend_pid() AS value")
 		first := exec.Run(ctx, pid)
@@ -383,12 +393,12 @@ var _ = Describe("Executor", func() {
 		Expect(next.Samples[0].Value).NotTo(Equal(first.Samples[0].Value))
 	})
 
-	It("reports a database that refuses the connection as an error, then as backoff", func(ctx SpecContext) {
+	It("reports a database that refuses the connection as denied, then as a backoff error", func(ctx SpecContext) {
 		job := jobFor("SELECT 'a' AS datname, 1 AS value")
 		job.Database = "noconnect"
 
 		res := exec.Run(ctx, job)
-		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeError))
+		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeDenied))
 		Expect(res.Err).NotTo(MatchError(pg.ErrBackoff))
 
 		res = exec.Run(ctx, job)

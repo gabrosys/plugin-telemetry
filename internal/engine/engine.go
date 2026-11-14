@@ -596,7 +596,7 @@ func (e *engine) record(ctx context.Context, res executor.Result) {
 		case selfmetrics.OutcomeCapped:
 			e.store.Delete(key)
 			e.stats.QueryCapped(job.Query, job.Database, res.WouldBe)
-		case selfmetrics.OutcomeError, selfmetrics.OutcomeTimeout, selfmetrics.OutcomeSkipped:
+		case selfmetrics.OutcomeError, selfmetrics.OutcomeTimeout, selfmetrics.OutcomeSkipped, selfmetrics.OutcomeDenied:
 			e.store.Delete(key)
 			if res.Err != nil {
 				e.errs.Failed(logger, job.Query, job.Database, res.Err)
@@ -681,6 +681,7 @@ func (e *engine) factsRound(ctx context.Context, timed bool) {
 		logger.Info("gathered facts again", "database", s.Postgres.Database)
 	}
 	e.setUp(true)
+	e.stats.SetChecks(facts.Checks)
 	v := facts.Version
 	e.server.Store(&v)
 	e.plan.setFacts(ctx, facts)

@@ -103,6 +103,20 @@ var _ = Describe("RowSamples", func() {
 		Expect(dropped).To(Equal(map[queries.DropReason]int{queries.DropLabel: 1}))
 	})
 
+	It("drops the row when a label value is not valid UTF-8, as text or as bytes", func() {
+		def := rowDef("    - l: {usage: LABEL}\n    - v: {usage: GAUGE}\n")
+		for _, value := range []any{"caf\xe9", []byte("caf\xe9")} {
+			samples, dropped := def.RowSamples([]string{"l", "v"}, []any{value, 1.0}, nil, 0)
+			Expect(samples).To(BeEmpty(), "%q", value)
+			Expect(dropped).To(Equal(map[queries.DropReason]int{queries.DropLabel: 1}), "%q", value)
+		}
+
+		samples, dropped := def.RowSamples([]string{"l", "v"}, []any{"café", 1.0}, nil, 0)
+		Expect(dropped).To(BeEmpty())
+		Expect(samples).To(HaveLen(1))
+		Expect(samples[0].Labels).To(Equal([]queries.Label{{Key: "l", Value: "café"}}))
+	})
+
 	It("drops the row when a label exceeds maxLabelValueLength", func() {
 		def := rowDef("    - l: {usage: LABEL}\n    - v: {usage: GAUGE}\n")
 		long := strings.Repeat("x", 5)

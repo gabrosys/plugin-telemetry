@@ -325,6 +325,31 @@ var _ = Describe("Executor", func() {
 		Expect(res.Dropped).To(HaveKeyWithValue(queries.DropDuplicate, 2))
 	})
 
+	It("drops a row whose label is not UTF-8 in a LATIN1 database and keeps the others", func(ctx SpecContext) {
+		Expect(server.Exec(ctx, "CREATE DATABASE latin1 TEMPLATE template0 ENCODING 'LATIN1' LC_COLLATE 'C' LC_CTYPE 'C'")).To(Succeed())
+		DeferCleanup(func(ctx SpecContext) { Expect(server.Exec(ctx, "DROP DATABASE latin1 WITH (FORCE)")).To(Succeed()) })
+		for _, stmt := range []string{
+			"CREATE TABLE labels (name text, value int)",
+			// chr(233) is é, the single byte 0xE9 in LATIN1.
+			"INSERT INTO labels VALUES ('plain', 1), ('caf' || chr(233), 2), ('other', 3)",
+			"GRANT SELECT ON labels TO " + pgtest.MonitorUser,
+		} {
+			Expect(server.ExecIn(ctx, "latin1", stmt)).To(Succeed())
+		}
+
+		job := jobFor("SELECT name AS datname, value FROM labels ORDER BY value")
+		job.Database = "latin1"
+		res := exec.Run(ctx, job)
+		Expect(res.Err).NotTo(HaveOccurred())
+		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeOK))
+		Expect(res.Dropped).To(Equal(map[queries.DropReason]int{queries.DropLabel: 1}))
+		var names []string
+		for _, sample := range res.Samples {
+			names = append(names, sample.Labels[0].Value)
+		}
+		Expect(names).To(Equal([]string{"plain", "other"}))
+	})
+
 	It("reports a column mismatch as an error", func(ctx SpecContext) {
 		res := exec.Run(ctx, jobFor("SELECT 'a' AS datname, 1 AS value, 2 AS extra"))
 		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeError))

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"unicode/utf8"
 
 	"github.com/Masterminds/semver/v3"
 )
@@ -113,7 +114,8 @@ func (d *Definition) RowSamples(
 	return samples, dropped
 }
 
-// rowLabels reads the label columns by name, sorted by key.
+// rowLabels reads the label columns by name, sorted by key. A value that is not valid UTF-8
+// cannot be exported, so it drops the row.
 func (d *Definition) rowLabels(byName map[string]any, maxLength int) ([]Label, DropReason) {
 	var labels []Label
 	for _, name := range d.Labels {
@@ -122,7 +124,7 @@ func (d *Definition) rowLabels(byName map[string]any, maxLength int) ([]Label, D
 			return nil, DropLabel
 		}
 		text, ok := toString(raw)
-		if !ok {
+		if !ok || !utf8.ValidString(text) {
 			return nil, DropLabel
 		}
 		if maxLength > 0 && len(text) > maxLength {

@@ -84,9 +84,14 @@ func terminate(ctx context.Context, c *testcontainers.DockerContainer) error {
 	return nil
 }
 
-// Exec runs one SQL statement as postgres over the container's socket.
+// Exec runs one SQL statement as postgres in database postgres over the container's socket.
 func (p *Postgres) Exec(ctx context.Context, sql string) error {
-	return p.run(ctx, "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-h", socketDir, "-U", "postgres", "-d", "postgres", "-c", sql)
+	return p.ExecIn(ctx, "postgres", sql)
+}
+
+// ExecIn runs one SQL statement as postgres in database over the container's socket.
+func (p *Postgres) ExecIn(ctx context.Context, database, sql string) error {
+	return p.run(ctx, "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-h", socketDir, "-U", "postgres", "-d", database, "-c", sql)
 }
 
 // MonitorConfig returns the settings of the monitoring role, its password in a file under dir.

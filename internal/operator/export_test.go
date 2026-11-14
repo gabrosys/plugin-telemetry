@@ -8,3 +8,9 @@ var (
 	NewScheme      = newScheme
 	ManagerOptions = managerOptions
 )
+
+// Exposed for controller_test.go.
+var (
+	SpecChanged         = specChanged
+	ExportersToClusters = exportersToClusters
+)

@@ -9,6 +9,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"k8s.io/client-go/rest"
 
+	"github.com/gabrosys/plugin-telemetry/internal/identity"
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
 )
 
@@ -40,6 +41,12 @@ func newOperatorCommand() *cobra.Command {
 				return fmt.Errorf("build manager: %w", err)
 			}
 
+			ensurer := &identity.Ensurer{Reader: mgr.GetCache(), Writer: mgr.GetClient()}
+			controller := &operator.IdentityController{Client: mgr.GetClient(), Identity: ensurer}
+			if err := controller.SetupWithManager(mgr); err != nil {
+				return fmt.Errorf("register identity controller: %w", err)
+			}
+
 			ctx := cmd.Context()
 			store := operator.NewImageStore()
 			g, gctx := errgroup.WithContext(ctx)
@@ -55,10 +62,14 @@ func newOperatorCommand() *cobra.Command {
 			})
 			g.Go(func() error {
 				return operator.Run(gctx, opts, store, operator.Deps{
-					Cache:      mgr.GetCache(),
-					Client:     mgr.GetClient(),
-					Reconciler: &operator.Reconciler{},
-					Status:     &operator.Status{},
+					Cache:  mgr.GetCache(),
+					Client: mgr.GetClient(),
+					Reconciler: &operator.Reconciler{
+						Identity:  ensurer,
+						Exporters: mgr.GetCache(),
+						Timeout:   operator.DefaultPreTimeout,
+					},
+					Status: &operator.Status{},
 				})
 			})
 

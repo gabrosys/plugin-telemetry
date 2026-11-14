@@ -18,6 +18,7 @@ type Key struct{ Query, Database string }
 
 // Point is one series ready to export.
 type Point struct {
+	Key                 Key // set by Points
 	Metric, Description string
 	Kind                queries.Kind
 	Labels              []queries.Label
@@ -200,6 +201,7 @@ func (s *Store) Points() (points []Point, duplicates map[Key]int) {
 				continue
 			}
 			seen[id] = struct{}{}
+			p.Key = k
 			p.Labels = slices.Clone(p.Labels)
 			p.Histogram = cloneHistogram(p.Histogram)
 			points = append(points, p)

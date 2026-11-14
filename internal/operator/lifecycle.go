@@ -17,7 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/gabrosys/plugin-telemetry/internal/metadata"
+	"github.com/gabrosys/plugin-telemetry/internal/clusterconfig"
 	"github.com/gabrosys/plugin-telemetry/internal/podpatch"
 )
 
@@ -170,11 +170,5 @@ func (l *Lifecycle) patch(
 }
 
 func ourPlugin(cluster *apiv1.Cluster) (apiv1.PluginConfiguration, bool) {
-	for _, p := range cluster.Spec.Plugins {
-		if p.Name == metadata.PluginName && (p.Enabled == nil || *p.Enabled) {
-			return p, true
-		}
-	}
-
-	return apiv1.PluginConfiguration{}, false
+	return clusterconfig.EnabledPlugin(cluster)
 }

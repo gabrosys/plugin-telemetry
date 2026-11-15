@@ -8,19 +8,22 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
-const operationDuration = "otel.sdk.exporter.operation.duration"
+const (
+	operationDuration = "otel.sdk.exporter.operation.duration"
+	// HookDuration is the plugin's hook duration histogram.
+	HookDuration = "cnpg_otel_plugin_hook_duration_seconds"
+)
 
 // contextForRecord is the context for histogram recordings; Export has no caller context.
 var contextForRecord = context.Background()
 
-// Views returns the views a MeterProvider needs for the catalogue: the operation
-// duration histogram has no bucket boundaries, which an instrument option cannot express.
+// Views returns the views a MeterProvider needs for the catalogue: the duration
+// histograms have no bucket boundaries, which an instrument option cannot express.
 func Views() []sdkmetric.View {
+	single := sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{Boundaries: []float64{}}}
 	return []sdkmetric.View{
-		sdkmetric.NewView(
-			sdkmetric.Instrument{Name: operationDuration},
-			sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{Boundaries: []float64{}}},
-		),
+		sdkmetric.NewView(sdkmetric.Instrument{Name: operationDuration}, single),
+		sdkmetric.NewView(sdkmetric.Instrument{Name: HookDuration}, single),
 	}
 }
 
@@ -35,7 +38,7 @@ type observed struct {
 func Register(m metric.Meter, s *Stats) error {
 	var obs []observed
 	var instruments []metric.Observable
-	for _, def := range Catalogue() {
+	for _, def := range ByComponent(ComponentEngine) {
 		switch Instrument(def.Instrument) {
 		case InstrumentCounter:
 			c, err := m.Int64ObservableCounter(def.Name, metric.WithUnit(def.Unit), metric.WithDescription(def.Description))

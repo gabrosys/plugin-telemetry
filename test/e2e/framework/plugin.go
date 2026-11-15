@@ -13,7 +13,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -79,6 +79,17 @@ func PasswordCluster(namespace, name, image, role, passwordSecret string) *apiv1
 		"host all " + role + " ::1/128 scram-sha-256",
 		"host all " + role + " all reject",
 	}
+
+	return cluster
+}
+
+// WithExporter sets the plugin's exporter parameter, the TelemetryExporter the Cluster uses.
+func WithExporter(cluster *apiv1.Cluster, exporter string) *apiv1.Cluster {
+	plugin := &cluster.Spec.Plugins[0]
+	if plugin.Parameters == nil {
+		plugin.Parameters = map[string]string{}
+	}
+	plugin.Parameters["exporter"] = exporter
 
 	return cluster
 }
@@ -175,20 +186,15 @@ func PluginPods(ctx context.Context, c client.Client) ([]string, error) {
 
 // HookCalls returns the lifecycle hook calls the plugin Pod logged after since.
 func HookCalls(ctx context.Context, cfg *rest.Config, pod string, since time.Time) ([]HookCall, error) {
-	cs, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("create clientset: %w", err)
-	}
-
 	// SinceTime has second precision; ParseHookCalls drops the earlier lines.
 	sinceTime := metav1.NewTime(since)
-	logs, err := cs.CoreV1().Pods(operatorNamespace).
-		GetLogs(pod, &corev1.PodLogOptions{SinceTime: &sinceTime}).DoRaw(ctx)
+	logs, err := ContainerLogs(ctx, cfg, types.NamespacedName{Namespace: operatorNamespace, Name: pod}, "",
+		&corev1.PodLogOptions{SinceTime: &sinceTime})
 	if err != nil {
-		return nil, fmt.Errorf("get logs of pod %s/%s: %w", operatorNamespace, pod, err)
+		return nil, err
 	}
 
-	calls, err := ParseHookCalls(string(logs), since)
+	calls, err := ParseHookCalls(logs, since)
 	if err != nil {
 		return nil, fmt.Errorf("logs of pod %s/%s: %w", operatorNamespace, pod, err)
 	}

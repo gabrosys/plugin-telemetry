@@ -23,7 +23,8 @@ var _ = Describe("Classify", func() {
 		Entry("wrapped SQLSTATE 57014", fmt.Errorf("query: %w", &pgconn.PgError{Code: "57014"}), selfmetrics.OutcomeTimeout),
 		Entry("context deadline", context.DeadlineExceeded, selfmetrics.OutcomeTimeout),
 		Entry("wrapped context deadline", fmt.Errorf("query: %w", context.DeadlineExceeded), selfmetrics.OutcomeTimeout),
-		Entry("insufficient privilege, SQLSTATE 42501", &pgconn.PgError{Code: "42501"}, selfmetrics.OutcomeError),
+		Entry("insufficient privilege, SQLSTATE 42501", &pgconn.PgError{Code: "42501"}, selfmetrics.OutcomeDenied),
+		Entry("wrapped SQLSTATE 42501", fmt.Errorf("run query: %w", &pgconn.PgError{Code: "42501"}), selfmetrics.OutcomeDenied),
 		Entry("cancelled context", context.Canceled, selfmetrics.OutcomeError),
 		Entry("a plain error", errors.New("boom"), selfmetrics.OutcomeError),
 	)

@@ -1,0 +1,80 @@
+package engine
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/gabrosys/plugin-telemetry/internal/settings"
+	"github.com/gabrosys/plugin-telemetry/internal/sources"
+)
+
+// ErrNoConfiguration is what Config.Settings wraps when there is nothing to run.
+var ErrNoConfiguration = errors.New("no configuration")
+
+// Config is where the engine reads its settings and the files they name.
+type Config interface {
+	// Name labels the settings in logs and in the source attribute: the file path, or "kubernetes".
+	Name() string
+	// Settings reads and validates the settings; the bytes identify what they came from and enter
+	// the reload digest. An error wrapping ErrNoConfiguration means there is nothing to run.
+	Settings() (settings.Settings, []byte, error)
+	// ReadFile reads a file the settings name: fs.ErrNotExist when missing, sources.ErrDenied on a 403.
+	ReadFile(name string) ([]byte, error)
+	// Watch calls notify, debounced, after any change to the settings or to files, and returns nil when ctx ends.
+	Watch(ctx context.Context, files []string, notify func(), opts ...sources.WatchOption) error
+}
+
+// fileConfig reads the settings from a YAML file and every other file from the file system.
+type fileConfig struct{ path string }
+
+// FileConfig returns the Config that reads the settings file at path and the files it names from disk.
+func FileConfig(path string) Config { return fileConfig{path: path} }
+
+func (c fileConfig) Name() string { return c.path }
+
+// Settings returns the bytes of the file even when they do not parse, so a later edit changes the digest.
+func (c fileConfig) Settings() (settings.Settings, []byte, error) {
+	data, err := os.ReadFile(c.path)
+	if err != nil {
+		return settings.Settings{}, nil, fmt.Errorf("read settings: %w", err)
+	}
+	dir, err := filepath.Abs(filepath.Dir(c.path))
+	if err != nil {
+		return settings.Settings{}, data, fmt.Errorf("resolve settings directory: %w", err)
+	}
+	s, err := settings.Parse(data, dir)
+	if err != nil {
+		return settings.Settings{}, data, fmt.Errorf("settings %s: %w", c.path, err)
+	}
+	return s, data, nil
+}
+
+func (fileConfig) ReadFile(name string) ([]byte, error) {
+	return os.ReadFile(name) //nolint:gosec,wrapcheck // paths come from the operator's settings; the os error names the file
+}
+
+// Watch also watches the settings file.
+func (c fileConfig) Watch(ctx context.Context, files []string, notify func(), opts ...sources.WatchOption) error {
+	if err := sources.Watch(ctx, append([]string{c.path}, files...), watchDebounce, notify, opts...); err != nil {
+		return fmt.Errorf("watch files: %w", err)
+	}
+	return nil
+}
+
+// sensitiveConfig is implemented by a Config whose files may hold secret data.
+type sensitiveConfig interface {
+	// Sensitive reports whether the named file holds secret data.
+	Sensitive(name string) bool
+}
+
+// LoaderOptions returns the sources.Loader options that follow from cfg.
+func LoaderOptions(cfg Config) []sources.LoaderOption {
+	if s, ok := cfg.(sensitiveConfig); ok {
+		return []sources.LoaderOption{sources.WithSensitive(s.Sensitive)}
+	}
+
+	return nil
+}

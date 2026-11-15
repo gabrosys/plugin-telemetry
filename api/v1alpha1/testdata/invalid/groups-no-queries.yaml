@@ -1,0 +1,13 @@
+# want: spec.metrics.groups[0].queries: Invalid value: 0: spec.metrics.groups[0].queries in body should have at least 1 items
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: TelemetryExporter
+metadata:
+  name: default
+  namespace: app
+spec:
+  exporter:
+    endpoint: https://collector:4318
+  metrics:
+    groups:
+    - name: fast
+      queries: []

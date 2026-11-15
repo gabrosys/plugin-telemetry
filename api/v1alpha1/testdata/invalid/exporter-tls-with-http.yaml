@@ -1,0 +1,11 @@
+# want: tls requires an https:// endpoint
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: TelemetryExporter
+metadata:
+  name: default
+  namespace: app
+spec:
+  exporter:
+    endpoint: http://collector:4318
+    tls:
+      serverName: collector

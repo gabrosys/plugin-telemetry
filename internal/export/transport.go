@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -17,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
+	"github.com/gabrosys/plugin-telemetry/internal/sources"
 )
 
 // material is what Reload re-reads from the files named in the settings.
@@ -28,14 +28,14 @@ type material struct {
 }
 
 // loadMaterial reads the headers file and, for TLS, the system roots, the CA file and the client key pair.
-func loadMaterial(s settings.Exporter, secure bool) (material, error) {
+func loadMaterial(s settings.Exporter, secure bool, read sources.ReadFile) (material, error) {
 	m := material{headers: map[string]string{}}
 	if s.HeadersFile != "" {
-		data, err := os.ReadFile(s.HeadersFile)
+		data, err := read(s.HeadersFile)
 		if err != nil {
 			return m, fmt.Errorf("read headers file: %w", err)
 		}
-		if m.headers, err = parseHeaders(string(data)); err != nil {
+		if m.headers, err = ParseHeaders(string(data)); err != nil {
 			return m, fmt.Errorf("parse headers file %s: %w", s.HeadersFile, err)
 		}
 	}
@@ -48,7 +48,7 @@ func loadMaterial(s settings.Exporter, secure bool) (material, error) {
 		return m, fmt.Errorf("load system roots: %w", err)
 	}
 	if s.TLS.CAFile != "" {
-		if m.caPEM, err = os.ReadFile(s.TLS.CAFile); err != nil {
+		if m.caPEM, err = read(s.TLS.CAFile); err != nil {
 			return m, fmt.Errorf("read ca file: %w", err)
 		}
 		if !roots.AppendCertsFromPEM(m.caPEM) {
@@ -57,7 +57,15 @@ func loadMaterial(s settings.Exporter, secure bool) (material, error) {
 	}
 	m.roots = roots
 	if s.TLS.CertFile != "" {
-		pair, err := tls.LoadX509KeyPair(s.TLS.CertFile, s.TLS.KeyFile)
+		certPEM, err := read(s.TLS.CertFile)
+		if err != nil {
+			return m, fmt.Errorf("read client certificate: %w", err)
+		}
+		keyPEM, err := read(s.TLS.KeyFile)
+		if err != nil {
+			return m, fmt.Errorf("read client key: %w", err)
+		}
+		pair, err := tls.X509KeyPair(certPEM, keyPEM)
 		if err != nil {
 			return m, fmt.Errorf("load client certificate: %w", err)
 		}
@@ -66,11 +74,11 @@ func loadMaterial(s settings.Exporter, secure bool) (material, error) {
 	return m, nil
 }
 
-// parseHeaders reads the OTEL_EXPORTER_OTLP_HEADERS format, "k=v,k2=v2" with percent-encoded
+// ParseHeaders reads the OTEL_EXPORTER_OTLP_HEADERS format, "k=v,k2=v2" with percent-encoded
 // values, as otlpmetrichttp v1.47.0 internal/envconfig/envconfig.go:159-190 does, but fails on a
 // bad entry. Keys and values must be valid gRPC metadata (grpc v1.85.0 internal/metadata/metadata.go:90-144),
 // which HTTP also accepts. Errors give the entry's position, never its content.
-func parseHeaders(s string) (map[string]string, error) {
+func ParseHeaders(s string) (map[string]string, error) {
 	out := map[string]string{}
 	s = strings.TrimSpace(s)
 	if s == "" {

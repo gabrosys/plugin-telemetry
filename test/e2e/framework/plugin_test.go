@@ -90,6 +90,24 @@ var _ = Describe("PasswordCluster", func() {
 	})
 })
 
+var _ = Describe("WithExporter", func() {
+	It("names the exporter next to the parameters the mode needs", func() {
+		peer := framework.WithExporter(framework.PeerCluster("ns", "peer", "img"), "otel")
+		Expect(peer.Spec.Plugins[0].Parameters).To(Equal(map[string]string{"exporter": "otel"}))
+
+		pw := framework.WithExporter(framework.PasswordCluster("ns", "pw", "img", "otel_monitor", "otel-monitor"), "otel")
+		Expect(pw.Spec.Plugins[0].Parameters).To(Equal(map[string]string{ //nolint:gosec // a Secret name, not a credential
+			"auth":           "password",
+			"passwordSecret": "otel-monitor",
+			"exporter":       "otel",
+		}))
+	})
+
+	It("leaves a Cluster built without it alone", func() {
+		Expect(framework.PeerCluster("ns", "peer", "img").Spec.Plugins[0].Parameters).To(BeEmpty())
+	})
+})
+
 var _ = Describe("RolloutComplete", func() {
 	rolledOut := func() *appsv1.Deployment {
 		d := &appsv1.Deployment{}

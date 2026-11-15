@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
+	"maps"
 	"slices"
 	"sort"
 	"strconv"
@@ -19,6 +19,7 @@ import (
 
 	"github.com/gabrosys/plugin-telemetry/internal/engine"
 	"github.com/gabrosys/plugin-telemetry/internal/executor"
+	"github.com/gabrosys/plugin-telemetry/internal/export"
 	"github.com/gabrosys/plugin-telemetry/internal/featuregate"
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
@@ -37,24 +38,25 @@ const (
 
 // config is a loaded configuration: the settings, the merged sources and their definitions.
 type config struct {
+	read     sources.ReadFile
 	settings settings.Settings
 	result   sources.Result
 	defs     []queries.Definition // in the order of result.Entries
 }
 
-func loadConfig(path string) (*config, error) {
-	s, err := settings.Load(path)
+func loadConfig(cfg engine.Config) (*config, error) {
+	s, _, err := cfg.Settings()
 	if err != nil {
 		return nil, fmt.Errorf("load settings: %w", err)
 	}
-	res := sources.NewLoader(s.Sources).Load()
+	res := sources.NewLoader(cfg.ReadFile, s.Sources, engine.LoaderOptions(cfg)...).Load()
 	opts := queries.Options{MaxLabelsPerSeries: s.Limits.MaxLabelsPerSeries}
 	defs := make([]queries.Definition, 0, len(res.Entries))
 	for _, e := range res.Entries {
 		defs = append(defs, queries.Define(e.Key, e.Query, opts))
 	}
 
-	return &config{settings: s, result: res, defs: defs}, nil
+	return &config{read: cfg.ReadFile, settings: s, result: res, defs: defs}, nil
 }
 
 func (c *config) keys() []string {
@@ -75,11 +77,12 @@ func newValidateCommand(flags *instanceFlags) *cobra.Command {
 			if _, err := flags.registry(); err != nil {
 				return err
 			}
-			if err := flags.requireConfig(); err != nil {
+			open, err := flags.open()
+			if err != nil {
 				return err
 			}
 
-			return validate(cmd.OutOrStdout(), flags.config)
+			return validate(cmd.Context(), cmd.OutOrStdout(), open)
 		},
 	}
 }
@@ -95,7 +98,7 @@ func finding(w io.Writer, level, source, query, message string) error {
 	return nil
 }
 
-func validate(w io.Writer, path string) error {
+func validate(ctx context.Context, w io.Writer, open func(context.Context) (engine.Config, error)) error {
 	errCount := 0
 	report := func(level, source, query, message string) error {
 		if level == "error" {
@@ -105,7 +108,7 @@ func validate(w io.Writer, path string) error {
 		return finding(w, level, source, query, message)
 	}
 
-	c, err := loadConfig(path)
+	c, err := openConfig(ctx, open)
 	if err != nil {
 		if rerr := report("error", absent, absent, err.Error()); rerr != nil {
 			return rerr
@@ -118,7 +121,11 @@ func validate(w io.Writer, path string) error {
 		if st.Outcome == sources.OutcomeOK {
 			continue
 		}
-		if err := report("error", st.Source, absent, fmt.Sprint(st.Err)); err != nil {
+		level := "error"
+		if st.Outcome == sources.OutcomeMissing {
+			level = "warning"
+		}
+		if err := report(level, st.Source, absent, fmt.Sprint(st.Err)); err != nil {
 			return err
 		}
 	}
@@ -147,9 +154,22 @@ func validate(w io.Writer, path string) error {
 	return nil
 }
 
+// openConfig opens the configuration and loads it.
+func openConfig(ctx context.Context, open func(context.Context) (engine.Config, error)) (*config, error) {
+	cfg, err := open(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return loadConfig(cfg)
+}
+
 // connect opens a pool and gathers the facts from the default database. The caller closes the pool.
-func connect(ctx context.Context, s settings.Settings) (*pg.Pool, planner.Facts, error) {
-	pool := pg.NewPool(engine.PostgresConfig(s), s.Postgres.MaxConnections, poolIdle, clock.RealClock{},
+func connect(ctx context.Context, c *config) (*pg.Pool, planner.Facts, error) {
+	s := c.settings
+	pc := engine.PostgresConfig(s)
+	pc.ReadFile = c.read
+	pool := pg.NewPool(pc, s.Postgres.MaxConnections, poolIdle, clock.RealClock{},
 		pg.WithLogger(log.FromContext(ctx).GetLogger()))
 	ctx, cancel := context.WithTimeout(ctx, connectTimeout+2*s.Limits.QueryTimeout)
 	defer cancel()
@@ -177,22 +197,23 @@ func newTestCommand(flags *instanceFlags) *cobra.Command {
 			if _, err := flags.registry(); err != nil {
 				return err
 			}
-			if err := flags.requireConfig(); err != nil {
+			open, err := flags.open()
+			if err != nil {
 				return err
 			}
 
-			return runTest(cmd.Context(), cmd.OutOrStdout(), flags.config)
+			return runTest(cmd.Context(), cmd.OutOrStdout(), open)
 		},
 	}
 }
 
-func runTest(ctx context.Context, w io.Writer, path string) error {
-	c, err := loadConfig(path)
+func runTest(ctx context.Context, w io.Writer, open func(context.Context) (engine.Config, error)) error {
+	c, err := openConfig(ctx, open)
 	if err != nil {
 		return err
 	}
 	clearEnv(ctx)
-	pool, facts, err := connect(ctx, c.settings)
+	pool, facts, err := connect(ctx, c)
 	if err != nil {
 		return err
 	}
@@ -322,11 +343,12 @@ func newPrintConfigCommand(flags *instanceFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := flags.requireConfig(); err != nil {
+			open, err := flags.open()
+			if err != nil {
 				return err
 			}
 
-			return printConfig(cmd.Context(), cmd.OutOrStdout(), flags.config, gates, offline)
+			return printConfig(cmd.Context(), cmd.OutOrStdout(), open, gates, offline)
 		},
 	}
 	cmd.Flags().BoolVar(&offline, "offline", false, "do not connect: print the queries that need no facts to be skipped")
@@ -334,8 +356,8 @@ func newPrintConfigCommand(flags *instanceFlags) *cobra.Command {
 	return cmd
 }
 
-func printConfig(ctx context.Context, w io.Writer, path string, gates *featuregate.Registry, offline bool) error {
-	c, err := loadConfig(path)
+func printConfig(ctx context.Context, w io.Writer, open func(context.Context) (engine.Config, error), gates *featuregate.Registry, offline bool) error {
+	c, err := openConfig(ctx, open)
 	if err != nil {
 		return err
 	}
@@ -354,7 +376,7 @@ func printConfig(ctx context.Context, w io.Writer, path string, gates *featurega
 		clearEnv(ctx)
 		var pool *pg.Pool
 		var facts planner.Facts
-		if pool, facts, connectErr = connect(ctx, c.settings); connectErr == nil {
+		if pool, facts, connectErr = connect(ctx, c); connectErr == nil {
 			pool.Close()
 			b.WriteString("# plan\n")
 			b.WriteString(livePlan(planner.Build(c.defs, c.settings, facts)))
@@ -381,7 +403,7 @@ func describe(c *config, gates *featuregate.Registry) (string, error) {
 
 	if f := c.settings.Exporter.HeadersFile; f != "" {
 		b.WriteString("# headers\n")
-		keys, err := headerKeys(f)
+		keys, err := headerKeys(c.read, f)
 		if err != nil {
 			fmt.Fprintf(&b, "unreadable: %v\n", err)
 		}
@@ -407,21 +429,19 @@ func describe(c *config, gates *featuregate.Registry) (string, error) {
 	return b.String(), nil
 }
 
-// headerKeys returns the sorted keys of the OTEL_EXPORTER_OTLP_HEADERS-format file; values are dropped.
-func headerKeys(file string) ([]string, error) {
-	data, err := os.ReadFile(file) //nolint:gosec // the path comes from the operator's settings
+// headerKeys returns the sorted keys of the headers file when the exporter's parser accepts all of it;
+// otherwise the parser's error, which names the entry by position only.
+func headerKeys(read sources.ReadFile, file string) ([]string, error) {
+	data, err := read(file)
 	if err != nil {
 		return nil, fmt.Errorf("read headers file: %w", err)
 	}
-	var keys []string
-	for _, pair := range strings.Split(strings.TrimSpace(string(data)), ",") {
-		if k, _, ok := strings.Cut(pair, "="); ok {
-			keys = append(keys, strings.TrimSpace(k))
-		}
+	headers, err := export.ParseHeaders(string(data))
+	if err != nil {
+		return nil, fmt.Errorf("parse headers file: %w", err)
 	}
-	slices.Sort(keys)
 
-	return slices.Compact(keys), nil
+	return slices.Sorted(maps.Keys(headers)), nil
 }
 
 func livePlan(p planner.Plan) string {

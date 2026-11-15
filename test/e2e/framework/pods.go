@@ -104,17 +104,32 @@ func RunPod(ctx context.Context, c client.Client, cfg *rest.Config, pod *corev1.
 		return "", fmt.Errorf("wait for pod %s to end (phase %q): %w", key, phase, err)
 	}
 
+	logs, err := ContainerLogs(ctx, cfg, key, "", &corev1.PodLogOptions{})
+	if err != nil {
+		return "", err
+	}
+
+	if phase == corev1.PodFailed {
+		return logs, fmt.Errorf("pod %s: %w", key, ErrPodFailed)
+	}
+
+	return logs, nil
+}
+
+// ContainerLogs returns a container's logs; container may be empty for a Pod with one container.
+func ContainerLogs(
+	ctx context.Context, cfg *rest.Config, pod types.NamespacedName, container string, opts *corev1.PodLogOptions,
+) (string, error) {
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return "", fmt.Errorf("create clientset: %w", err)
 	}
-	logs, err := cs.CoreV1().Pods(key.Namespace).GetLogs(key.Name, &corev1.PodLogOptions{}).DoRaw(ctx)
-	if err != nil {
-		return "", fmt.Errorf("get logs of pod %s: %w", key, err)
-	}
 
-	if phase == corev1.PodFailed {
-		return string(logs), fmt.Errorf("pod %s: %w", key, ErrPodFailed)
+	o := opts.DeepCopy()
+	o.Container = container
+	logs, err := cs.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, o).DoRaw(ctx)
+	if err != nil {
+		return "", fmt.Errorf("get logs of pod %s container %q: %w", pod, container, err)
 	}
 
 	return string(logs), nil

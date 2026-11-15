@@ -5,19 +5,21 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net"
 	"os"
+	"strings"
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 	"k8s.io/utils/clock"
 
 	"github.com/gabrosys/plugin-telemetry/internal/engine"
 	"github.com/gabrosys/plugin-telemetry/internal/export"
 	"github.com/gabrosys/plugin-telemetry/internal/featuregate"
+	"github.com/gabrosys/plugin-telemetry/internal/kubesource"
 	"github.com/gabrosys/plugin-telemetry/internal/memlimit"
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
@@ -46,12 +48,66 @@ func (f *instanceFlags) registry() (*featuregate.Registry, error) {
 	return r, nil
 }
 
-// requireConfig fails when --config is not set.
-func (f *instanceFlags) requireConfig() error {
-	if f.config == "" {
-		return errors.New("--config is required")
+// kubeSource is the Kubernetes-backed engine configuration and the loop that keeps it current.
+type kubeSource interface {
+	engine.Config
+	Start(ctx context.Context) error
+}
+
+// newKubeSource and snapshotKubeSource build the Kubernetes source; specs replace them.
+var (
+	newKubeSource = func(o kubesource.Options) (kubeSource, error) {
+		src, err := kubesource.New(o)
+		if err != nil {
+			return nil, fmt.Errorf("new kubernetes source: %w", err)
+		}
+		return src, nil
 	}
-	return nil
+	snapshotKubeSource = func(ctx context.Context, o kubesource.Options) (engine.Config, error) {
+		src, err := kubesource.Snapshot(ctx, o)
+		if err != nil {
+			return nil, fmt.Errorf("kubernetes snapshot: %w", err)
+		}
+		return src, nil
+	}
+)
+
+// kubeOptions builds the Kubernetes source options from the Pod environment and names the variables that are unset.
+func kubeOptions(getenv func(string) string) (kubesource.Options, error) {
+	var missing []string
+	value := func(name string) string {
+		v := getenv(name)
+		if v == "" {
+			missing = append(missing, name)
+		}
+		return v
+	}
+	o := kubesource.Options{
+		Namespace: value("NAMESPACE"),
+		Cluster:   value("CLUSTER_NAME"),
+		TokenDir:  metadata.SidecarTokenDir,
+	}
+	host, port := value("KUBERNETES_SERVICE_HOST"), value("KUBERNETES_SERVICE_PORT")
+	if len(missing) > 0 {
+		return kubesource.Options{}, fmt.Errorf("environment variable not set: %s", strings.Join(missing, ", "))
+	}
+	o.APIServer = "https://" + net.JoinHostPort(host, port)
+
+	return o, nil
+}
+
+// open returns the configuration the tools read: the --config file, or a snapshot of the Kubernetes objects.
+// The environment is checked here, before anything is read.
+func (f *instanceFlags) open() (func(context.Context) (engine.Config, error), error) {
+	if f.config != "" {
+		return func(context.Context) (engine.Config, error) { return engine.FileConfig(f.config), nil }, nil
+	}
+	o, err := kubeOptions(os.Getenv)
+	if err != nil {
+		return nil, err
+	}
+
+	return func(ctx context.Context) (engine.Config, error) { return snapshotKubeSource(ctx, o) }, nil
 }
 
 // setMemoryLimit applies the memory limit; specs replace it.
@@ -70,31 +126,30 @@ func newInstanceCommand() *cobra.Command {
 			}
 			ctx := cmd.Context()
 			logger := log.FromContext(ctx)
-			if flags.config == "" {
-				logger.Info("starting instance", "version", version.Version)
-				<-ctx.Done()
+			logger.Info("starting instance", "version", version.Version)
+			if flags.config != "" {
+				if err := runEngine(ctx, engine.FileConfig(flags.config), gates, nil); err != nil {
+					return fmt.Errorf("run the engine: %w", err)
+				}
 
 				return nil
 			}
 
-			clearEnv(ctx)
-			if limit, err := setMemoryLimit(os.ReadFile, os.Getenv); err != nil {
-				logger.Info("memory limit not set", "error", err.Error())
-			} else {
-				logger.Info("memory limit", "bytes", limit)
-			}
-			rnd, err := newRand()
+			// In Kubernetes mode the sidecar logs its own problems and idles; exiting would restart the container.
+			o, err := kubeOptions(os.Getenv)
 			if err != nil {
-				return err
+				logger.Info("the Kubernetes source is not configured", "error", err.Error())
+				<-ctx.Done()
+
+				return nil
 			}
-			if err := engine.Run(ctx, engine.Options{
-				ConfigPath: flags.config,
-				Gates:      gates,
-				Clock:      clock.RealClock{},
-				Rand:       rnd,
-				Getenv:     os.Getenv,
-			}); err != nil {
-				return fmt.Errorf("run the engine: %w", err)
+			src, err := newKubeSource(o)
+			if err == nil {
+				err = runEngine(ctx, src, gates, src.Start)
+			}
+			if err != nil {
+				logger.Error(err, "the metrics engine stopped")
+				<-ctx.Done()
 			}
 
 			return nil
@@ -104,6 +159,35 @@ func newInstanceCommand() *cobra.Command {
 	cmd.AddCommand(newPreflightCommand(), newValidateCommand(&flags), newTestCommand(&flags), newPrintConfigCommand(&flags))
 
 	return cmd
+}
+
+// runEngine clears the environment, sets the memory limit and runs the engine on cfg; background, when
+// set, runs beside it and either ending stops both.
+func runEngine(ctx context.Context, cfg engine.Config, gates *featuregate.Registry, background func(context.Context) error) error {
+	logger := log.FromContext(ctx)
+	clearEnv(ctx)
+	if limit, err := setMemoryLimit(os.ReadFile, os.Getenv); err != nil {
+		logger.Info("memory limit not set", "error", err.Error())
+	} else {
+		logger.Info("memory limit", "bytes", limit)
+	}
+	rnd, err := newRand()
+	if err != nil {
+		return err
+	}
+	opts := engine.Options{Config: cfg, Gates: gates, Clock: clock.RealClock{}, Rand: rnd, Getenv: os.Getenv}
+	if background == nil {
+		return engine.Run(ctx, opts) //nolint:wrapcheck // the caller adds the context
+	}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error { return background(gctx) })
+	g.Go(func() error { return engine.Run(gctx, opts) })
+	if err := g.Wait(); err != nil {
+		return fmt.Errorf("run the sidecar: %w", err)
+	}
+
+	return nil
 }
 
 // newRand returns a generator seeded from crypto/rand.

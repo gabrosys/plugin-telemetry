@@ -106,11 +106,6 @@ var _ = Describe("instance --config with an unreadable memory limit", func() {
 })
 
 var _ = Describe("instance validate", func() {
-	It("requires --config", func() {
-		_, err := execute(context.Background(), "instance", "validate")
-		Expect(err).To(MatchError(ContainSubstring("config")))
-	})
-
 	It("prints warnings and succeeds", func() {
 		out, err := execute(context.Background(), "instance", "validate", "--config", testdata("engine-valid.yaml"))
 		Expect(err).NotTo(HaveOccurred())
@@ -126,10 +121,11 @@ var _ = Describe("instance validate", func() {
 		Expect(out).To(ContainSubstring("error " + broken + " -: "))
 	})
 
-	It("fails on a source that does not exist", func() {
+	It("reports a source that does not exist as a warning and succeeds", func() {
 		out, err := execute(context.Background(), "instance", "validate", "--config", testdata("engine-missing.yaml"))
-		Expect(err).To(HaveOccurred())
-		Expect(out).To(ContainSubstring("error " + testdata("queries-absent.yaml") + " -: "))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out).To(ContainSubstring("warning " + testdata("queries-absent.yaml") + " -: "))
+		Expect(out).NotTo(ContainSubstring("error "))
 	})
 
 	It("fails on invalid settings", func() {

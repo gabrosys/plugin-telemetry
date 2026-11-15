@@ -30,9 +30,9 @@ const WatchDebounce = watchDebounce
 // Replanner is the load and planning core without a watcher, a pool or an exporter.
 type Replanner struct{ r *replanner }
 
-// NewReplanner returns a Replanner for the settings file at path; update receives every new plan.
-func NewReplanner(path string, stats *selfmetrics.Stats, store *snapshot.Store, update func(planner.Plan)) *Replanner {
-	return &Replanner{r: newReplanner(path, stats, store, &errorLog{}, update, noComponents{})}
+// NewReplanner returns a Replanner for cfg; update receives every new plan.
+func NewReplanner(cfg Config, stats *selfmetrics.Stats, store *snapshot.Store, update func(planner.Plan)) *Replanner {
+	return &Replanner{r: newReplanner(cfg, stats, store, &errorLog{}, update, noComponents{})}
 }
 
 // Reload loads the settings and the sources and replans when they changed.
@@ -49,7 +49,7 @@ func (noComponents) apply(context.Context, *configuration, *configuration) error
 
 // EarlyFactsAfter records res for its job, planned, and reports whether that asks for an early facts round.
 func EarlyFactsAfter(ctx context.Context, res executor.Result) (bool, error) {
-	e, err := newEngine(ctx, Options{ConfigPath: "engine.yaml"})
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")})
 	if err != nil {
 		return false, err
 	}
@@ -88,7 +88,7 @@ func (e *engine) collect(ctx context.Context, name string) (metricdata.Metrics, 
 // CollectorUp records one facts round per entry of rounds, true for a success, and returns
 // cnpg_collector_up as the engine reports it for cluster "c", and whether it is reported at all.
 func CollectorUp(ctx context.Context, rounds ...bool) (metricdata.Metrics, bool, error) {
-	e, err := newEngine(ctx, Options{ConfigPath: "engine.yaml"})
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")})
 	if err != nil {
 		return metricdata.Metrics{}, false, err
 	}
@@ -112,7 +112,7 @@ func unreachable() settings.Settings {
 // RunWithBrokenBookkeeping runs job n times through the scheduler's RunFunc with bookkeeping that
 // panics, and returns the runs counted with outcome error.
 func RunWithBrokenBookkeeping(ctx context.Context, job planner.Job, n int) (int64, error) {
-	e, err := newEngine(ctx, Options{ConfigPath: "engine.yaml"})
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")})
 	if err != nil {
 		return 0, err
 	}
@@ -142,7 +142,7 @@ type Pools struct{ e *engine }
 
 // NewPools returns Pools over a new engine.
 func NewPools(ctx context.Context) (*Pools, error) {
-	e, err := newEngine(ctx, Options{ConfigPath: "engine.yaml"})
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")})
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +168,7 @@ func (p *Pools) Close(ctx context.Context) error { return p.e.mp.Shutdown(ctx) }
 
 // WatchSwapNotifies watches first, then second, and reports whether the swap asked for a look at the files.
 func WatchSwapNotifies(ctx context.Context, first, second []string) (bool, error) {
-	e, err := newEngine(ctx, Options{ConfigPath: "engine.yaml"})
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")})
 	if err != nil {
 		return false, err
 	}
@@ -209,7 +209,7 @@ type FactsRounds struct {
 // NewFactsRounds returns FactsRounds after a first configuration with the planning cycle planInterval.
 func NewFactsRounds(ctx context.Context, planInterval time.Duration) (*FactsRounds, error) {
 	clk := clocktesting.NewFakeClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
-	e, err := newEngine(ctx, Options{ConfigPath: "engine.yaml", Clock: clk})
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml"), Clock: clk})
 	if err != nil {
 		return nil, err
 	}

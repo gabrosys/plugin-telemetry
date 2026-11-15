@@ -1,0 +1,416 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
+  name: telemetryexporters.telemetry.gabrosys.github.io
+spec:
+  group: telemetry.gabrosys.github.io
+  names:
+    kind: TelemetryExporter
+    listKind: TelemetryExporterList
+    plural: telemetryexporters
+    shortNames:
+    - texp
+    singular: telemetryexporter
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.exporter.endpoint
+      name: Endpoint
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          TelemetryExporter says where and how the plugin sidecar exports telemetry for the Clusters in its
+          namespace. One TelemetryExporter can serve every Cluster in the namespace; a Cluster picks it with the
+          plugin parameter "exporter", and uses the one named default when the parameter is not set.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              Spec holds the exporter settings. It sets exporter.endpoint, or envFrom with an
+              OTEL_EXPORTER_OTLP_ENDPOINT key.
+            properties:
+              envFrom:
+                description: |-
+                  EnvFrom names a ConfigMap and a Secret whose OTEL_EXPORTER_OTLP_* and OTEL_RESOURCE_ATTRIBUTES
+                  keys are read as settings.
+                properties:
+                  configMap:
+                    description: ConfigMap is a ConfigMap in this namespace.
+                    properties:
+                      name:
+                        description: Name is the object's name.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  secret:
+                    description: Secret is a Secret in this namespace.
+                    properties:
+                      name:
+                        description: Name is the object's name.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: set at least one of configMap or secret
+                  rule: has(self.configMap) || has(self.secret)
+              exporter:
+                description: Exporter is the OTLP connection every signal shares.
+                properties:
+                  compression:
+                    description: Compression is gzip or none.
+                    enum:
+                    - gzip
+                    - none
+                    type: string
+                  endpoint:
+                    description: |-
+                      Endpoint is the base URL of the collector, such as https://collector:4318. The signal's path is
+                      appended for http/protobuf. It has a host, and no user info, query or fragment.
+                    maxLength: 2048
+                    type: string
+                  headers:
+                    description: Headers is a Secret key holding request headers in
+                      the OTEL_EXPORTER_OTLP_HEADERS format.
+                    properties:
+                      key:
+                        description: Key is the key in the object's data.
+                        minLength: 1
+                        type: string
+                      name:
+                        description: Name is the object's name.
+                        minLength: 1
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  protocol:
+                    description: 'Protocol is the OTLP transport: http/protobuf or
+                      grpc.'
+                    enum:
+                    - http/protobuf
+                    - grpc
+                    type: string
+                  timeout:
+                    description: |-
+                      Timeout is the time one export attempt may take, such as 10s. At least 1s, and at most half of
+                      spec.metrics.interval, which is 30s when not set.
+                    maxLength: 32
+                    type: string
+                    x-kubernetes-validations:
+                    - message: timeout must be at least 1s
+                      rule: duration(self) >= duration('1s')
+                  tls:
+                    description: TLS sets the TLS options. It needs an https:// endpoint.
+                    properties:
+                      ca:
+                        description: CA is the certificate authority bundle that signs
+                          the collector's certificate.
+                        properties:
+                          configMap:
+                            description: ConfigMap is a key of a ConfigMap in this
+                              namespace.
+                            properties:
+                              key:
+                                description: Key is the key in the object's data.
+                                minLength: 1
+                                type: string
+                              name:
+                                description: Name is the object's name.
+                                minLength: 1
+                                type: string
+                            required:
+                            - key
+                            - name
+                            type: object
+                          secret:
+                            description: Secret is a key of a Secret in this namespace.
+                            properties:
+                              key:
+                                description: Key is the key in the object's data.
+                                minLength: 1
+                                type: string
+                              name:
+                                description: Name is the object's name.
+                                minLength: 1
+                                type: string
+                            required:
+                            - key
+                            - name
+                            type: object
+                        type: object
+                        x-kubernetes-validations:
+                        - message: set exactly one of secret or configMap
+                          rule: has(self.secret) != has(self.configMap)
+                      clientCertificate:
+                        description: ClientCertificate is a kubernetes.io/tls Secret
+                          with the client certificate, for mutual TLS.
+                        properties:
+                          name:
+                            description: Name is the object's name.
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      minVersion:
+                        description: 'MinVersion is the lowest TLS version to accept:
+                          1.2 or 1.3.'
+                        enum:
+                        - "1.2"
+                        - "1.3"
+                        type: string
+                      serverName:
+                        description: ServerName is the name to check in the collector's
+                          certificate.
+                        type: string
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - fieldPath: .endpoint
+                  message: endpoint must be a base http(s) URL with a host, and no
+                    user info, query or fragment
+                  rule: '!has(self.endpoint) || self.endpoint.matches(r''^https?://[^@/?#\s]+(/[^?#\s]*)?$'')'
+                - message: tls requires an https:// endpoint
+                  rule: '!has(self.tls) || !has(self.endpoint) || self.endpoint.startsWith(''https://'')'
+              metrics:
+                description: Metrics holds the metrics settings.
+                properties:
+                  defaultInterval:
+                    description: DefaultInterval is how often a query runs when no
+                      group sets its own. At least 1s.
+                    maxLength: 32
+                    type: string
+                    x-kubernetes-validations:
+                    - message: defaultInterval must be at least 1s
+                      rule: duration(self) >= duration('1s')
+                  exclude:
+                    description: Exclude removes queries, metrics and databases from
+                      collection.
+                    properties:
+                      databases:
+                        description: Databases lists database names to skip. A name
+                          may be a Go path.Match pattern.
+                        items:
+                          type: string
+                        maxItems: 64
+                        type: array
+                        x-kubernetes-list-type: set
+                      metrics:
+                        description: Metrics lists metric names to drop. A name may
+                          be a Go path.Match pattern.
+                        items:
+                          type: string
+                        maxItems: 64
+                        type: array
+                        x-kubernetes-list-type: set
+                      queries:
+                        description: Queries lists query names never planned, so their
+                          SQL never runs. A name may be a Go path.Match pattern.
+                        items:
+                          type: string
+                        maxItems: 64
+                        type: array
+                        x-kubernetes-list-type: set
+                    type: object
+                  groups:
+                    description: Groups run sets of queries at their own interval.
+                    items:
+                      description: QueryGroup runs a set of queries at its own interval.
+                      properties:
+                        interval:
+                          description: Interval is how often the group's queries run.
+                            At least 1s. The default is spec.metrics.defaultInterval.
+                          maxLength: 32
+                          type: string
+                          x-kubernetes-validations:
+                          - message: interval must be at least 1s
+                            rule: duration(self) >= duration('1s')
+                        name:
+                          description: Name identifies the group.
+                          minLength: 1
+                          type: string
+                        queries:
+                          description: Queries lists query names or Go path.Match
+                            patterns, such as pg_stat_*.
+                          items:
+                            type: string
+                          maxItems: 64
+                          minItems: 1
+                          type: array
+                      required:
+                      - name
+                      - queries
+                      type: object
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  interval:
+                    description: Interval is how often metrics are exported, such
+                      as 30s. At least 1s.
+                    maxLength: 32
+                    type: string
+                    x-kubernetes-validations:
+                    - message: interval must be at least 1s
+                      rule: duration(self) >= duration('1s')
+                  limits:
+                    description: Limits bounds what the queries may cost. Each limit
+                      has a default in the sidecar.
+                    properties:
+                      lockTimeout:
+                        description: LockTimeout is the time a query waits for a lock.
+                          More than zero.
+                        maxLength: 32
+                        type: string
+                        x-kubernetes-validations:
+                        - message: lockTimeout must be more than 0s
+                          rule: duration(self) > duration('0s')
+                      maxConnections:
+                        description: MaxConnections is the most database connections
+                          the sidecar opens.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxDatabases:
+                        description: MaxDatabases is the most databases a query runs
+                          in.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxLabelValueLength:
+                        description: MaxLabelValueLength is the longest label value
+                          kept.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxLabelsPerSeries:
+                        description: MaxLabelsPerSeries is the most labels a series
+                          may have.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxRowsPerQuery:
+                        description: MaxRowsPerQuery is the most rows read from one
+                          query.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxSeriesPerQuery:
+                        description: MaxSeriesPerQuery is the most series one query
+                          may produce.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxSeriesTotal:
+                        description: MaxSeriesTotal is the most series all queries
+                          may produce together.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      queryTimeout:
+                        description: QueryTimeout is the time one query may run. At
+                          least 100ms.
+                        maxLength: 32
+                        type: string
+                        x-kubernetes-validations:
+                        - message: queryTimeout must be at least 100ms
+                          rule: duration(self) >= duration('100ms')
+                    type: object
+                  maxPointsPerRequest:
+                    description: MaxPointsPerRequest caps the data points in one export
+                      request.
+                    format: int32
+                    maximum: 100000
+                    minimum: 1
+                    type: integer
+                  planInterval:
+                    description: PlanInterval is how often the sidecar re-reads the
+                      query sources and plans the queries. At least 1s.
+                    maxLength: 32
+                    type: string
+                    x-kubernetes-validations:
+                    - message: planInterval must be at least 1s
+                      rule: duration(self) >= duration('1s')
+                  querySets:
+                    description: QuerySets lists the MetricQuerySet names in this
+                      namespace to load.
+                    items:
+                      maxLength: 253
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                      type: string
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: set
+                  useClusterMonitoring:
+                    description: |-
+                      UseClusterMonitoring reads the queries of the Cluster's spec.monitoring ConfigMaps and Secrets,
+                      as CloudNativePG does. The default is true.
+                    type: boolean
+                type: object
+              resourceAttributes:
+                additionalProperties:
+                  type: string
+                description: ResourceAttributes adds fixed attributes to every resource.
+                maxProperties: 32
+                type: object
+              resourceLabels:
+                description: |-
+                  ResourceLabels lists Cluster label keys to copy into the resource attributes. The instance role
+                  label is not allowed, because it changes at switchover.
+                items:
+                  maxLength: 317
+                  pattern: ^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$
+                  type: string
+                maxItems: 32
+                type: array
+                x-kubernetes-list-type: set
+                x-kubernetes-validations:
+                - message: resourceLabels must not include cnpg.io/instanceRole, which
+                    changes at switchover
+                  rule: '!self.exists(l, l == ''cnpg.io/instanceRole'')'
+            type: object
+            x-kubernetes-validations:
+            - message: set exporter.endpoint or envFrom
+              rule: (has(self.envFrom) && (has(self.envFrom.configMap) || has(self.envFrom.secret)))
+                || (has(self.exporter) && has(self.exporter.endpoint))
+            - message: exporter.timeout times 2 must not exceed metrics.interval
+              rule: '!has(self.exporter) || !has(self.exporter.timeout) || !has(self.metrics)
+                || !has(self.metrics.interval) || duration(self.exporter.timeout).getMilliseconds()
+                * 2 <= duration(self.metrics.interval).getMilliseconds()'
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}

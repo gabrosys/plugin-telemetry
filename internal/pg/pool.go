@@ -54,6 +54,7 @@ type idleConn struct {
 type backoff struct {
 	failures int
 	retryAt  time.Time
+	last     error // the connect error that started the wait, without the connection string
 }
 
 // PoolOption configures a Pool.
@@ -119,8 +120,9 @@ func (p *Pool) acquire(ctx context.Context, database string, withBackoff bool) (
 		}
 
 		if b := p.failed[database]; withBackoff && b != nil && p.clk.Now().Before(b.retryAt) {
+			last := b.last
 			p.mu.Unlock()
-			return nil, nil, fmt.Errorf("database %s: %w", database, ErrBackoff)
+			return nil, nil, fmt.Errorf("database %s: %w: %w", database, ErrBackoff, last)
 		}
 
 		var evicted *idleConn
@@ -169,6 +171,13 @@ func (p *Pool) takeIdleLocked(database string) *pgx.Conn {
 
 func (p *Pool) dial(ctx context.Context, database string) (*pgx.Conn, func(bool), error) {
 	conn, err := p.connect(ctx, database)
+	if err != nil {
+		// ConnectError.Config holds the password; keep only the cause.
+		var ce *pgconn.ConnectError
+		if errors.As(err, &ce) {
+			err = ce.Unwrap()
+		}
+	}
 
 	p.mu.Lock()
 	if err != nil {
@@ -182,13 +191,9 @@ func (p *Pool) dial(ctx context.Context, database string) (*pgx.Conn, func(bool)
 			}
 			b.retryAt = p.clk.Now().Add(backoffDelay(b.failures, p.maxBackoff))
 			b.failures++
+			b.last = err
 		}
 		p.mu.Unlock()
-		// ConnectError.Config holds the password; keep only the cause.
-		var ce *pgconn.ConnectError
-		if errors.As(err, &ce) {
-			err = ce.Unwrap()
-		}
 		return nil, nil, fmt.Errorf("connect to database %s as %s: %w", database, p.cfg.User, err)
 	}
 	delete(p.failed, database)

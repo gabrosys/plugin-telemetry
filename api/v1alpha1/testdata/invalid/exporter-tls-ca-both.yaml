@@ -1,0 +1,13 @@
+# want: set exactly one of secret or configMap
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: TelemetryExporter
+metadata:
+  name: default
+  namespace: app
+spec:
+  exporter:
+    endpoint: https://collector:4318
+    tls:
+      ca:
+        secret: {name: ca, key: ca.crt}
+        configMap: {name: ca, key: ca.crt}

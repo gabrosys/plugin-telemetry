@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: added-queries
+data:
+  queries: |
+    e2e_added:
+      query: "SELECT 3 AS three"
+      metrics:
+        - three:
+            usage: GAUGE
+            description: Always 3
+    e2e_added_later:
+      query: "SELECT 4 AS four"
+      metrics:
+        - four:
+            usage: GAUGE
+            description: Always 4

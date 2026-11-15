@@ -1,0 +1,13 @@
+# want: spec.queries.q.cache_seconds in body should be greater than or equal to 0
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: MetricQuerySet
+metadata:
+  name: extra
+  namespace: app
+spec:
+  queries:
+    q:
+      query: SELECT 1 AS a
+      cache_seconds: -1
+      metrics:
+      - a: {usage: GAUGE}

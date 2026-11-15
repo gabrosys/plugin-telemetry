@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	"github.com/cloudnative-pg/cnpg-i-machinery/pkg/pluginhelper/decoder"
@@ -17,7 +18,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/gabrosys/plugin-telemetry/internal/metadata"
+	"github.com/gabrosys/plugin-telemetry/internal/clusterconfig"
 	"github.com/gabrosys/plugin-telemetry/internal/podpatch"
 )
 
@@ -42,6 +43,8 @@ type Lifecycle struct {
 	lifecycle.UnimplementedOperatorLifecycleServer
 	// Images supplies the sidecar image.
 	Images ImageSource
+	// Metrics records the hook calls; nil records nothing.
+	Metrics *PluginMetrics
 }
 
 // GetCapabilities hooks Pod creation and evaluation.
@@ -67,28 +70,47 @@ func (*Lifecycle) GetCapabilities(
 func (l *Lifecycle) LifecycleHook(
 	ctx context.Context, req *lifecycle.OperatorLifecycleRequest,
 ) (*lifecycle.OperatorLifecycleResponse, error) {
+	start := time.Now()
+	resp, outcome, err := l.handle(ctx, req)
+	if operation, ok := lifecycleOperations[req.GetOperationType().GetType()]; ok {
+		l.Metrics.Hook(serviceLifecycle, operation, outcome, time.Since(start)) //nolint:contextcheck // Hook takes no context
+	}
+
+	return resp, err
+}
+
+// lifecycleOperations names the operations the plugin declares, for the hook metrics.
+var lifecycleOperations = map[lifecycle.OperatorOperationType_Type]string{
+	lifecycle.OperatorOperationType_TYPE_CREATE:   operationCreate,
+	lifecycle.OperatorOperationType_TYPE_EVALUATE: operationEvaluate,
+}
+
+// handle serves one request and returns the outcome of the call, outcomeError when it fails.
+func (l *Lifecycle) handle(
+	ctx context.Context, req *lifecycle.OperatorLifecycleRequest,
+) (*lifecycle.OperatorLifecycleResponse, string, error) {
 	logger := log.FromContext(ctx)
 
 	cluster, err := decoder.DecodeClusterLenient(req.GetClusterDefinition())
 	if err != nil {
-		return nil, invalidArgument(logger, "decode cluster", err)
+		return nil, outcomeError, invalidArgument(logger, "decode cluster", err)
 	}
 
 	logger = logger.WithValues("namespace", cluster.Namespace, "cluster", cluster.Name)
 
 	kind, err := object.GetKind(req.GetObjectDefinition())
 	if err != nil {
-		return nil, invalidArgument(logger, "get object kind", err)
+		return nil, outcomeError, invalidArgument(logger, "get object kind", err)
 	}
 
 	var meta metav1.PartialObjectMetadata
 	if err := json.Unmarshal(req.GetObjectDefinition(), &meta); err != nil {
-		return nil, invalidArgument(logger, "decode object metadata", err)
+		return nil, outcomeError, invalidArgument(logger, "decode object metadata", err)
 	}
 
 	patch, outcome, err := l.hook(logger, cluster, kind, req.GetObjectDefinition())
 	if err != nil {
-		return nil, err
+		return nil, outcomeError, err
 	}
 
 	logger.Info("lifecycle hook",
@@ -96,7 +118,7 @@ func (l *Lifecycle) LifecycleHook(
 		"pod", meta.Name,
 		"outcome", outcome)
 
-	return &lifecycle.OperatorLifecycleResponse{JsonPatch: patch}, nil
+	return &lifecycle.OperatorLifecycleResponse{JsonPatch: patch}, outcome, nil
 }
 
 // invalidArgument logs err at error level and returns it as an InvalidArgument status.
@@ -170,11 +192,5 @@ func (l *Lifecycle) patch(
 }
 
 func ourPlugin(cluster *apiv1.Cluster) (apiv1.PluginConfiguration, bool) {
-	for _, p := range cluster.Spec.Plugins {
-		if p.Name == metadata.PluginName && (p.Enabled == nil || *p.Enabled) {
-			return p, true
-		}
-	}
-
-	return apiv1.PluginConfiguration{}, false
+	return clusterconfig.EnabledPlugin(cluster)
 }

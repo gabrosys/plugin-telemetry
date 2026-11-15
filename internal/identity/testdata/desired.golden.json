@@ -1,0 +1,182 @@
+{
+  "ServiceAccount": {
+    "metadata": {
+      "name": "pg-telemetry",
+      "namespace": "ns",
+      "labels": {
+        "app.kubernetes.io/managed-by": "plugin-telemetry",
+        "telemetry.gabrosys.github.io/cluster": "pg"
+      },
+      "ownerReferences": [
+        {
+          "apiVersion": "postgresql.cnpg.io/v1",
+          "kind": "Cluster",
+          "name": "pg",
+          "uid": "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+          "controller": true,
+          "blockOwnerDeletion": false
+        }
+      ]
+    }
+  },
+  "Role": {
+    "metadata": {
+      "name": "pg-telemetry",
+      "namespace": "ns",
+      "labels": {
+        "app.kubernetes.io/managed-by": "plugin-telemetry",
+        "telemetry.gabrosys.github.io/cluster": "pg"
+      },
+      "ownerReferences": [
+        {
+          "apiVersion": "postgresql.cnpg.io/v1",
+          "kind": "Cluster",
+          "name": "pg",
+          "uid": "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+          "controller": true,
+          "blockOwnerDeletion": false
+        }
+      ]
+    },
+    "rules": [
+      {
+        "verbs": [
+          "get",
+          "list",
+          "watch"
+        ],
+        "apiGroups": [
+          "postgresql.cnpg.io"
+        ],
+        "resources": [
+          "clusters"
+        ],
+        "resourceNames": [
+          "pg"
+        ]
+      },
+      {
+        "verbs": [
+          "get",
+          "list",
+          "watch"
+        ],
+        "apiGroups": [
+          "telemetry.gabrosys.github.io"
+        ],
+        "resources": [
+          "telemetryexporters"
+        ],
+        "resourceNames": [
+          "default"
+        ]
+      },
+      {
+        "verbs": [
+          "get",
+          "list",
+          "watch"
+        ],
+        "apiGroups": [
+          "telemetry.gabrosys.github.io"
+        ],
+        "resources": [
+          "metricquerysets"
+        ],
+        "resourceNames": [
+          "core",
+          "extra"
+        ]
+      },
+      {
+        "verbs": [
+          "get",
+          "list",
+          "watch"
+        ],
+        "apiGroups": [
+          ""
+        ],
+        "resources": [
+          "configmaps"
+        ],
+        "resourceNames": [
+          "cnpg-default-monitoring",
+          "collector-ca"
+        ]
+      },
+      {
+        "verbs": [
+          "get",
+          "list",
+          "watch"
+        ],
+        "apiGroups": [
+          ""
+        ],
+        "resources": [
+          "secrets"
+        ],
+        "resourceNames": [
+          "collector-headers"
+        ]
+      }
+    ]
+  },
+  "RoleBinding": {
+    "metadata": {
+      "name": "pg-telemetry",
+      "namespace": "ns",
+      "labels": {
+        "app.kubernetes.io/managed-by": "plugin-telemetry",
+        "telemetry.gabrosys.github.io/cluster": "pg"
+      },
+      "ownerReferences": [
+        {
+          "apiVersion": "postgresql.cnpg.io/v1",
+          "kind": "Cluster",
+          "name": "pg",
+          "uid": "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+          "controller": true,
+          "blockOwnerDeletion": false
+        }
+      ]
+    },
+    "subjects": [
+      {
+        "kind": "ServiceAccount",
+        "name": "pg-telemetry",
+        "namespace": "ns"
+      }
+    ],
+    "roleRef": {
+      "apiGroup": "rbac.authorization.k8s.io",
+      "kind": "Role",
+      "name": "pg-telemetry"
+    }
+  },
+  "Token": {
+    "metadata": {
+      "name": "pg-telemetry-token",
+      "namespace": "ns",
+      "labels": {
+        "app.kubernetes.io/managed-by": "plugin-telemetry",
+        "telemetry.gabrosys.github.io/cluster": "pg"
+      },
+      "annotations": {
+        "kubernetes.io/service-account.name": "pg-telemetry"
+      },
+      "ownerReferences": [
+        {
+          "apiVersion": "postgresql.cnpg.io/v1",
+          "kind": "Cluster",
+          "name": "pg",
+          "uid": "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+          "controller": true,
+          "blockOwnerDeletion": false
+        }
+      ]
+    },
+    "type": "kubernetes.io/service-account-token"
+  }
+}

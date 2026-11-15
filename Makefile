@@ -14,6 +14,7 @@ GOARCH := $(shell $(GO) env GOARCH)
 
 GOLANGCI_LINT_VERSION := v2.15.0
 GOVULNCHECK_VERSION := v1.9.0
+CONTROLLER_GEN_VERSION := v0.23.0
 ACTIONLINT_VERSION := v1.7.12
 KIND_VERSION := v0.33.0
 KUBECTL_VERSION := v1.37.2
@@ -31,9 +32,12 @@ KIND_CLUSTER ?= plugin-telemetry
 CNPG_VERSION ?= v1.30.1
 POSTGRES_IMAGE ?= ghcr.io/cloudnative-pg/postgresql:18.7-system-trixie@sha256:5a5dfbde88d5909fd4938189c141f53fb153f53c519f14907dce9e7c04baa153
 COLLECTOR_IMAGE ?= otel/opentelemetry-collector:0.165.0@sha256:34b24b740c3c88d3467740e8642a397c13898ef76d7295c5425164c482ed1b73
-E2E_SUITES := smoke spikes admission engine
+E2E_SUITES := smoke spikes admission engine plugin
 KIND_E2E_SUITES := $(filter-out engine,$(E2E_SUITES))
 E2E_TARGETS := $(addprefix e2e-,$(KIND_E2E_SUITES))
+# go test -timeout of a kind e2e suite: E2E_GO_TEST_TIMEOUT_<suite> when set, else E2E_GO_TEST_TIMEOUT.
+E2E_GO_TEST_TIMEOUT := 30m
+E2E_GO_TEST_TIMEOUT_plugin := 50m
 
 DEV_ENV := KIND=$(KIND) KUBECTL=$(KUBECTL) CMCTL=$(CMCTL) KIND_CLUSTER=$(KIND_CLUSTER) KIND_NODE_IMAGE=$(KIND_NODE_IMAGE) \
 	CNPG_VERSION=$(CNPG_VERSION) CERT_MANAGER_VERSION=$(CERT_MANAGER_VERSION)
@@ -62,8 +66,9 @@ test-integration: ## Run the tests that need Docker (PostgreSQL in a container)
 	POSTGRES_IMAGE=$(POSTGRES_IMAGE) $(GO) test -race -count=1 -tags integration ./...
 
 .PHONY: generate
-generate: ## Regenerate docs/self-metrics.md
+generate: ## Regenerate docs/self-metrics.md, the deepcopy code and the CRDs
 	$(GO) run ./internal/selfmetrics/gen > docs/self-metrics.md
+	$(GO) run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION) object crd:allowDangerousTypes=true paths=./api/... output:crd:dir=config/crd
 
 .PHONY: image
 image: ## Build the image for the local platform and load it into Docker
@@ -85,22 +90,25 @@ dev-down: $(KIND) ## Delete the kind environment
 	$(DEV_ENV) hack/dev-env.sh down
 
 .PHONY: kind-load
-kind-load: $(KIND) ## Load the image into kind and record its digest reference in bin/image-ref
+kind-load: $(KIND) ## Load the plugin image into kind, pull the collector image on its nodes and record the plugin digest reference in bin/image-ref
 	$(KIND) load docker-image $(IMG) --name $(KIND_CLUSTER)
+	for node in $$($(KIND) get nodes --name $(KIND_CLUSTER)); do docker exec $$node crictl pull $(COLLECTOR_IMAGE) || exit 1; done
 	KIND=$(KIND) hack/kind-image-ref.sh $(KIND_CLUSTER) $(IMG) > $(BIN)/image-ref
 
 .PHONY: deploy
 deploy: $(KUBECTL) ## Deploy the plugin to the kind environment (after image and kind-load)
 	@test -s $(BIN)/image-ref || { echo "run make image kind-load first" >&2; exit 1; }
-	KUBECTL=$(KUBECTL) KIND_CLUSTER=$(KIND_CLUSTER) BIN=$(BIN) hack/deploy.sh "$$(cat $(BIN)/image-ref)"
+	KUBECTL=$(KUBECTL) KIND_CLUSTER=$(KIND_CLUSTER) BIN=$(BIN) COLLECTOR_IMAGE=$(COLLECTOR_IMAGE) POSTGRES_IMAGE=$(POSTGRES_IMAGE) \
+		hack/deploy.sh "$$(cat $(BIN)/image-ref)"
 
 .PHONY: $(E2E_TARGETS)
 $(E2E_TARGETS): e2e-%: dev-up
 	E2E_KUBE_CONTEXT=kind-$(KIND_CLUSTER) CNPG_VERSION=$(CNPG_VERSION) POSTGRES_IMAGE=$(POSTGRES_IMAGE) \
-		$(GO) test -tags e2e -count=1 -timeout 30m -v ./test/e2e/$*/... -ginkgo.v
+		$(GO) test -tags e2e -count=1 -timeout $(or $(E2E_GO_TEST_TIMEOUT_$*),$(E2E_GO_TEST_TIMEOUT)) -v ./test/e2e/$*/... -ginkgo.v
 
 e2e-spikes: image kind-load deploy
 e2e-admission: image kind-load deploy
+e2e-plugin: image kind-load deploy
 
 .PHONY: e2e-engine
 e2e-engine: build ## Run the engine e2e suite with Docker, without kind

@@ -133,11 +133,11 @@ func (f *fixture) run() {
 	f.done = make(chan error, 1)
 	go func() {
 		f.done <- engine.Run(ctx, engine.Options{
-			ConfigPath: f.config,
-			Gates:      featuregate.NewRegistry(),
-			Clock:      clock.RealClock{},
-			Rand:       rand.New(rand.NewPCG(1, 2)), //nolint:gosec // seeded jitter for the test
-			Getenv:     func(string) string { return "" },
+			Config: engine.FileConfig(f.config),
+			Gates:  featuregate.NewRegistry(),
+			Clock:  clock.RealClock{},
+			Rand:   rand.New(rand.NewPCG(1, 2)), //nolint:gosec // seeded jitter for the test
+			Getenv: func(string) string { return "" },
 		})
 	}()
 	DeferCleanup(func() {
@@ -280,6 +280,18 @@ var _ = Describe("Run", Ordered, func() {
 		req := f.srv.Requests()[0]
 		Expect(attrMap(req.Metrics.GetResourceMetrics()[0].GetResource().GetAttributes())).To(And(
 			HaveKeyWithValue("service.name", "it"), HaveKeyWithValue("service.namespace", "ns")))
+	})
+
+	It("exports cnpg_otel_check for the monitoring role after the facts round", func() {
+		Eventually(func(g Gomega) {
+			for check, want := range map[string]float64{
+				"pg_monitor": 1, "read_only": 1, "track_io_timing": 0, "track_wal_io_timing": 0, "track_functions": 0,
+			} {
+				got, ok := last(f.srv, "cnpg_otel_check", map[string]string{"check": check})
+				g.Expect(ok).To(BeTrue(), check)
+				g.Expect(got).To(Equal(want), check)
+			}
+		}).WithTimeout(30 * time.Second).WithPolling(250 * time.Millisecond).Should(Succeed())
 	})
 
 	It("exports a query appended to a source file within debounce + interval + export interval", func() {

@@ -7,10 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"slices"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
+
+	"go.yaml.in/yaml/v4"
 
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
 )
@@ -21,7 +24,16 @@ const (
 	OutcomeOK      = "ok"
 	OutcomeMissing = "missing"
 	OutcomeInvalid = "invalid"
+	// OutcomeDenied marks a source the reader was not allowed to read; like OutcomeInvalid, it keeps the last good version.
+	OutcomeDenied = "denied"
 )
+
+// ErrDenied is what a ReadFile wraps when the source forbids the read, such as an HTTP 403.
+var ErrDenied = errors.New("permission denied")
+
+// ReadFile returns the content of the named file: an error wrapping fs.ErrNotExist when it is missing,
+// one wrapping ErrDenied when the read is forbidden.
+type ReadFile func(name string) ([]byte, error)
 
 // Entry is one query after merging.
 type Entry struct {
@@ -33,9 +45,9 @@ type Entry struct {
 // Status is the outcome of loading one source.
 type Status struct {
 	Source        string
-	Outcome       string // "ok", "missing", "invalid"
+	Outcome       string // "ok", "missing", "invalid", "denied"
 	Err           error
-	UsingPrevious bool     // invalid now, its last good version is in force
+	UsingPrevious bool     // invalid or denied now, its last good version is in force
 	Duplicates    []string // keys this source overwrote from an earlier source, sorted
 }
 
@@ -48,19 +60,36 @@ type Result struct {
 
 // Loader loads the builtin query and the files, remembering each file's last good version.
 type Loader struct {
-	files []string
+	read      ReadFile
+	files     []string
+	sensitive func(name string) bool // nil: no source is sensitive
 
 	mu       sync.Mutex // guards previous
 	previous map[string]queries.UserQueries
 }
 
-// NewLoader returns a Loader for files, which are read in order after the builtin query.
-func NewLoader(files []string) *Loader {
-	return &Loader{files: slices.Clone(files), previous: map[string]queries.UserQueries{}}
+// LoaderOption configures a Loader.
+type LoaderOption func(*Loader)
+
+// WithSensitive marks the sources for which isSensitive returns true as holding secret data: a parse
+// error of such a source names the source and the line, and quotes none of its content.
+func WithSensitive(isSensitive func(name string) bool) LoaderOption {
+	return func(l *Loader) { l.sensitive = isSensitive }
+}
+
+// NewLoader returns a Loader that reads files with read, in order after the builtin query.
+func NewLoader(read ReadFile, files []string, opts ...LoaderOption) *Loader {
+	l := &Loader{read: read, files: slices.Clone(files), previous: map[string]queries.UserQueries{}}
+	for _, o := range opts {
+		o(l)
+	}
+
+	return l
 }
 
 // Load reads the builtin query, then each file in order. A later source overwrites an earlier key.
-// A missing file, or one that has never parsed, is skipped; one that stops parsing keeps its last good version.
+// A missing file, or one that has never parsed or been readable, is skipped; one that stops parsing or
+// becomes unreadable keeps its last good version.
 func (l *Loader) Load() Result {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -84,11 +113,15 @@ func (l *Loader) Load() Result {
 	for _, file := range l.files {
 		st := Status{Source: file}
 
-		content, err := os.ReadFile(file) //nolint:gosec // path comes from operator settings
+		content, err := l.read(file)
 		if err != nil {
-			st.Outcome = OutcomeMissing
 			st.Err = fmt.Errorf("read %s: %w", file, err)
-			if !errors.Is(err, fs.ErrNotExist) {
+			switch {
+			case errors.Is(err, fs.ErrNotExist):
+				st.Outcome = OutcomeMissing
+			case errors.Is(err, ErrDenied):
+				st.Outcome = OutcomeDenied
+			default:
 				st.Outcome = OutcomeInvalid
 			}
 			merge(file, l.previousFor(&st, file), st)
@@ -99,6 +132,9 @@ func (l *Loader) Load() Result {
 		parsed, err := queries.Parse(content)
 		if err != nil {
 			st.Outcome = OutcomeInvalid
+			if l.sensitive != nil && l.sensitive(file) {
+				err = redactedParseError(err)
+			}
 			st.Err = fmt.Errorf("load %s: %w", file, err)
 			merge(file, l.previousFor(&st, file), st)
 
@@ -119,9 +155,9 @@ func (l *Loader) Load() Result {
 	return Result{Entries: entries, Status: statuses, Hash: hashEntries(entries)}
 }
 
-// previousFor returns the last good queries of an invalid, non-missing file and flags the status.
+// previousFor returns the last good queries of an invalid or denied file and flags the status.
 func (l *Loader) previousFor(st *Status, file string) queries.UserQueries {
-	if st.Outcome != OutcomeInvalid {
+	if st.Outcome != OutcomeInvalid && st.Outcome != OutcomeDenied {
 		return nil
 	}
 
@@ -139,4 +175,30 @@ func hashEntries(entries []Entry) string {
 	sum := sha256.Sum256(fmt.Appendf(nil, "%#v", entries))
 
 	return hex.EncodeToString(sum[:])
+}
+
+// redactedParseError describes a YAML error by its line numbers only: the library's messages quote the
+// content they failed on.
+func redactedParseError(err error) error {
+	var lines []string
+	add := func(l int) {
+		if l > 0 {
+			lines = append(lines, strconv.Itoa(l))
+		}
+	}
+	var many *yaml.LoadErrors
+	var one *yaml.LoadError
+	switch {
+	case errors.As(err, &many):
+		for _, e := range many.Errors {
+			add(e.Mark.Line)
+		}
+	case errors.As(err, &one):
+		add(one.Mark.Line)
+	}
+	if len(lines) == 0 {
+		return errors.New("parse user queries: invalid YAML")
+	}
+
+	return fmt.Errorf("parse user queries: invalid YAML at line %s", strings.Join(lines, ", "))
 }

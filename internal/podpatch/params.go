@@ -19,6 +19,9 @@ const (
 	AuthPassword AuthMode = "password"
 )
 
+// DefaultExporter is the TelemetryExporter a Cluster uses when its plugin parameters name none.
+const DefaultExporter = "default"
+
 const (
 	defaultCPU    = "50m"
 	defaultMemory = "64Mi"
@@ -43,9 +46,11 @@ var (
 
 // Params are the plugin parameters that shape the Pod.
 type Params struct {
-	Auth   AuthMode
-	CPU    resource.Quantity
-	Memory resource.Quantity
+	Exporter       string // the TelemetryExporter name; Apply does not read it
+	Auth           AuthMode
+	PasswordSecret string // password mode only; Apply does not read it
+	CPU            resource.Quantity
+	Memory         resource.Quantity
 }
 
 // Result is the outcome of ParseParams.
@@ -62,9 +67,10 @@ type Result struct {
 // ErrInvalidParameters only for an invalid auth.
 func ParseParams(raw map[string]string) (Result, error) {
 	r := Result{Params: Params{
-		Auth:   AuthPeer,
-		CPU:    resource.MustParse(defaultCPU),
-		Memory: resource.MustParse(defaultMemory),
+		Exporter: DefaultExporter,
+		Auth:     AuthPeer,
+		CPU:      resource.MustParse(defaultCPU),
+		Memory:   resource.MustParse(defaultMemory),
 	}}
 
 	for key := range raw {
@@ -75,6 +81,11 @@ func ParseParams(raw map[string]string) (Result, error) {
 		}
 	}
 	slices.Sort(r.Ignored)
+
+	if v := raw[keyExporter]; v != "" {
+		r.Params.Exporter = v
+	}
+	r.Params.PasswordSecret = raw[keyPasswordSecret]
 
 	if v, ok := raw[keyAuth]; ok {
 		switch mode := AuthMode(v); mode {

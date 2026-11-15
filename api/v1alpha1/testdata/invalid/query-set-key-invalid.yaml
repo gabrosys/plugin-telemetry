@@ -1,0 +1,12 @@
+# want: query names must match
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: MetricQuerySet
+metadata:
+  name: extra
+  namespace: app
+spec:
+  queries:
+    bad-name:
+      query: SELECT 1 AS a
+      metrics:
+      - a: {usage: GAUGE}

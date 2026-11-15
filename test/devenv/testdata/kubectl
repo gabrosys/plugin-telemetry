@@ -34,6 +34,12 @@ case "$*" in
 		exit 1
 	fi
 	;;
+"apply --server-side --force-conflicts -k "*) ;;
+"wait --for=condition=Established "*)
+	[[ ! -e $state/crd-not-established ]]
+	;;
+"wait --for=condition=Ready certificate "*) ;;
+"annotate service -n cnpg-system plugin-telemetry "*) ;;
 "rollout status "*) ;;
 "get deployment cnpg-controller-manager "*)
 	echo "ghcr.io/cloudnative-pg/cloudnative-pg:fake"

@@ -22,7 +22,8 @@ type presence struct {
 	} `yaml:"exporter"`
 }
 
-func defaults() Settings {
+// Defaults returns the settings Load starts from; Cluster, the endpoint and the exporter timeout are not defaulted here.
+func Defaults() Settings {
 	return Settings{
 		Postgres: Postgres{
 			Host:           "/controller/run",
@@ -53,27 +54,47 @@ func defaults() Settings {
 	}
 }
 
-// Load reads a YAML file strictly (unknown keys are errors), applies defaults and validates.
-// Relative file paths in the file resolve against the file's directory.
+// DefaultExporterTimeout is the exporter timeout when none is set: the lower of 10s and half the interval.
+func DefaultExporterTimeout(interval time.Duration) time.Duration {
+	return min(10*time.Second, interval/2)
+}
+
+// Load reads a YAML file and parses it with Parse. Relative file paths in the file resolve against
+// the file's directory.
 func Load(path string) (Settings, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // the config path is an operator-supplied flag
 	if err != nil {
 		return Settings{}, fmt.Errorf("read settings: %w", err)
 	}
 
-	s := defaults()
+	abs, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		return Settings{}, fmt.Errorf("resolve settings directory: %w", err)
+	}
+
+	s, err := Parse(data, abs)
+	if err != nil {
+		return Settings{}, fmt.Errorf("settings %s: %w", path, err)
+	}
+	return s, nil
+}
+
+// Parse decodes YAML strictly (unknown keys are errors) over the defaults, resolves relative file paths
+// against dir and validates.
+func Parse(data []byte, dir string) (Settings, error) {
+	s := Defaults()
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(&s); err != nil && !errors.Is(err, io.EOF) {
-		return Settings{}, fmt.Errorf("parse settings %s: %w", path, err)
+		return Settings{}, fmt.Errorf("parse settings: %w", err)
 	}
 
 	var seen presence
 	if err := yaml.NewDecoder(bytes.NewReader(data)).Decode(&seen); err != nil && !errors.Is(err, io.EOF) {
-		return Settings{}, fmt.Errorf("parse settings %s: %w", path, err)
+		return Settings{}, fmt.Errorf("parse settings: %w", err)
 	}
 	if seen.Exporter.Timeout == nil {
-		s.Exporter.Timeout = min(10*time.Second, s.Exporter.Interval/2)
+		s.Exporter.Timeout = DefaultExporterTimeout(s.Exporter.Interval)
 	}
 	for i := range s.Groups {
 		if i < len(seen.Groups) && seen.Groups[i].Interval == nil {
@@ -81,14 +102,10 @@ func Load(path string) (Settings, error) {
 		}
 	}
 
-	abs, err := filepath.Abs(filepath.Dir(path))
-	if err != nil {
-		return Settings{}, fmt.Errorf("resolve settings directory: %w", err)
-	}
-	s.resolvePaths(abs)
+	s.resolvePaths(dir)
 
 	if err := s.Validate(); err != nil {
-		return Settings{}, fmt.Errorf("invalid settings %s: %w", path, err)
+		return Settings{}, fmt.Errorf("invalid settings: %w", err)
 	}
 	return s, nil
 }

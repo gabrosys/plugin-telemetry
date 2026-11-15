@@ -28,6 +28,8 @@ type Config struct {
 	QueryTimeout   time.Duration
 	LockTimeout    time.Duration
 	ConnectTimeout time.Duration
+	// ReadFile reads PasswordFile; nil means os.ReadFile.
+	ReadFile func(string) ([]byte, error)
 }
 
 var (
@@ -77,7 +79,11 @@ func ConnConfig(c Config, database string) (*pgx.ConnConfig, error) {
 
 	var password string
 	if c.PasswordFile != "" {
-		raw, err := os.ReadFile(c.PasswordFile)
+		read := c.ReadFile
+		if read == nil {
+			read = os.ReadFile
+		}
+		raw, err := read(c.PasswordFile)
 		if err != nil {
 			return nil, fmt.Errorf("read password file: %w", err)
 		}

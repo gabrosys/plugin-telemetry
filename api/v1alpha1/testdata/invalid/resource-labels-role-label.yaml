@@ -1,0 +1,10 @@
+# want: resourceLabels must not include cnpg.io/instanceRole
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: TelemetryExporter
+metadata:
+  name: default
+  namespace: app
+spec:
+  exporter:
+    endpoint: https://collector:4318
+  resourceLabels: [cnpg.io/instanceRole]

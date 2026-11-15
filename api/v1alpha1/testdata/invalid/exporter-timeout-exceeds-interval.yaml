@@ -1,0 +1,12 @@
+# want: exporter.timeout times 2 must not exceed metrics.interval
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: TelemetryExporter
+metadata:
+  name: default
+  namespace: app
+spec:
+  exporter:
+    endpoint: https://collector:4318
+    timeout: 6s
+  metrics:
+    interval: 10s

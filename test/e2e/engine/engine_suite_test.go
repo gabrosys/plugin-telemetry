@@ -23,7 +23,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/gabrosys/plugin-telemetry/test/e2e/engine"
+	"github.com/gabrosys/plugin-telemetry/test/e2e/otlp"
 	"github.com/gabrosys/plugin-telemetry/test/pgtest"
 )
 
@@ -133,7 +133,7 @@ func renderEngineConfig(c engineConfig) string {
 type collector struct {
 	container *testcontainers.DockerContainer
 	endpoint  string // the OTLP/HTTP metrics URL
-	lines     engine.Lines
+	lines     otlp.Lines
 }
 
 func startCollector(ctx context.Context, image string) (*collector, error) {
@@ -179,7 +179,7 @@ func terminate(ctx context.Context, c *testcontainers.DockerContainer) error {
 }
 
 // read copies the collector's output file and returns every line decoded so far.
-func (c *collector) read(ctx context.Context) ([]engine.Line, error) {
+func (c *collector) read(ctx context.Context) ([]otlp.Line, error) {
 	rc, err := c.container.CopyFileFromContainer(ctx, collectorOutput)
 	if err != nil {
 		return nil, fmt.Errorf("copy %s: %w", collectorOutput, err)
@@ -196,7 +196,7 @@ func (c *collector) read(ctx context.Context) ([]engine.Line, error) {
 
 // exported returns every line the collector has written, for a polled function; it stops the poll
 // at once when the engine has exited.
-func exported(ctx context.Context, g Gomega) []engine.Line {
+func exported(ctx context.Context, g Gomega) []otlp.Line {
 	select {
 	case <-proc.exited:
 		StopTrying("the engine exited").Wrap(proc.err).Now()

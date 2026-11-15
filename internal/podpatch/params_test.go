@@ -62,6 +62,25 @@ var _ = Describe("ParseParams", func() {
 		Expect(r.Defaulted[1]).To(MatchError(ContainSubstring("sidecarMemory")))
 	})
 
+	It("defaults the exporter to default and reads the exporter and password Secret", func() {
+		r, err := podpatch.ParseParams(nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(r.Params.Exporter).To(Equal(podpatch.DefaultExporter))
+		Expect(podpatch.DefaultExporter).To(Equal("default"))
+		Expect(r.Params.PasswordSecret).To(BeEmpty())
+
+		r, err = podpatch.ParseParams(map[string]string{"exporter": "prod", "auth": "password", "passwordSecret": "pw"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(r.Params.Exporter).To(Equal("prod"))
+		Expect(r.Params.PasswordSecret).To(Equal("pw"))
+	})
+
+	It("treats an empty exporter as the default", func() {
+		r, err := podpatch.ParseParams(map[string]string{"exporter": ""})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(r.Params.Exporter).To(Equal(podpatch.DefaultExporter))
+	})
+
 	DescribeTable("rejects",
 		func(raw map[string]string) {
 			_, err := podpatch.ParseParams(raw)

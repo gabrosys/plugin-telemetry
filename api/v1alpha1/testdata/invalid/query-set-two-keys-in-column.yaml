@@ -1,0 +1,13 @@
+# want: must have at most 1 item
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: MetricQuerySet
+metadata:
+  name: extra
+  namespace: app
+spec:
+  queries:
+    q:
+      query: SELECT 1 AS a, 2 AS b
+      metrics:
+      - a: {usage: GAUGE}
+        b: {usage: GAUGE}

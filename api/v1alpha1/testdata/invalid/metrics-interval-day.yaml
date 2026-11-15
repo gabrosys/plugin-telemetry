@@ -1,0 +1,11 @@
+# want: type conversion error from 'string' to 'google.protobuf.Duration'
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: TelemetryExporter
+metadata:
+  name: default
+  namespace: app
+spec:
+  exporter:
+    endpoint: https://collector:4318
+  metrics:
+    interval: 1d

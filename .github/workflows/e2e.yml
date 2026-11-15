@@ -6,7 +6,7 @@ on:
       suite:
         description: e2e suite to run
         type: choice
-        options: [smoke, spikes, admission, engine]
+        options: [smoke, spikes, admission, engine, plugin]
         default: smoke
 
 permissions: {}
@@ -16,7 +16,7 @@ jobs:
     name: e2e (${{ inputs.suite }}, CNPG ${{ matrix.cnpg }})
     if: inputs.suite != 'engine'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     permissions:
       contents: read
     strategy:

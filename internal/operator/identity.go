@@ -32,17 +32,23 @@ func (Identity) GetPluginMetadata(context.Context, *identity.GetPluginMetadataRe
 	}, nil
 }
 
-// GetPluginCapabilities declares the lifecycle service.
+// GetPluginCapabilities declares the lifecycle, reconciler hooks and operator services.
 func (Identity) GetPluginCapabilities(context.Context, *identity.GetPluginCapabilitiesRequest) (*identity.GetPluginCapabilitiesResponse, error) {
-	return &identity.GetPluginCapabilitiesResponse{
-		Capabilities: []*identity.PluginCapability{{
+	types := []identity.PluginCapability_Service_Type{
+		identity.PluginCapability_Service_TYPE_LIFECYCLE_SERVICE,
+		identity.PluginCapability_Service_TYPE_RECONCILER_HOOKS,
+		identity.PluginCapability_Service_TYPE_OPERATOR_SERVICE,
+	}
+	capabilities := make([]*identity.PluginCapability, 0, len(types))
+	for _, t := range types {
+		capabilities = append(capabilities, &identity.PluginCapability{
 			Type: &identity.PluginCapability_Service_{
-				Service: &identity.PluginCapability_Service{
-					Type: identity.PluginCapability_Service_TYPE_LIFECYCLE_SERVICE,
-				},
+				Service: &identity.PluginCapability_Service{Type: t},
 			},
-		}},
-	}, nil
+		})
+	}
+
+	return &identity.GetPluginCapabilitiesResponse{Capabilities: capabilities}, nil
 }
 
 // Probe reports the plugin as ready.

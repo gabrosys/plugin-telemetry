@@ -9,6 +9,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/gabrosys/plugin-telemetry/api/v1alpha1"
 )
 
 // NewClients returns a client and REST config for kubeContext.
@@ -27,6 +29,10 @@ func NewClients(kubeContext string) (client.Client, *rest.Config, error) {
 	}
 	if err := apiv1.AddToScheme(scheme); err != nil {
 		return nil, nil, fmt.Errorf("register CNPG types: %w", err)
+	}
+
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		return nil, nil, fmt.Errorf("register telemetry types: %w", err)
 	}
 
 	c, err := client.New(cfg, client.Options{Scheme: scheme})

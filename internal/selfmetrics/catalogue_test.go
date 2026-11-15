@@ -3,6 +3,7 @@ package selfmetrics_test
 import (
 	"bytes"
 	"os"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -29,6 +30,7 @@ var _ = Describe("Catalogue", func() {
 			{"cnpg_otel_config_loads_total", "counter", "{load}", []string{"source", "outcome"}},
 			{"cnpg_otel_config_duplicate_queries_total", "counter", "{query}", []string{"source"}},
 			{"cnpg_otel_config_info", "gauge", "", []string{"generation", "hash"}},
+			{"cnpg_otel_check", "gauge", "", []string{"check"}},
 			{"cnpg_otel_exports_total", "counter", "{export}", []string{"outcome"}},
 			{"cnpg_otel_last_export_success_timestamp_seconds", "gauge", "s", nil},
 			{
@@ -46,7 +48,7 @@ var _ = Describe("Catalogue", func() {
 
 		got := make([]row, 0, len(want))
 		seen := map[string]bool{}
-		for _, m := range selfmetrics.Catalogue() {
+		for _, m := range selfmetrics.ByComponent(selfmetrics.ComponentEngine) {
 			got = append(got, row{m.Name, m.Instrument, m.Unit, m.Attributes})
 			Expect(seen).NotTo(HaveKey(m.Name))
 			seen[m.Name] = true
@@ -55,10 +57,55 @@ var _ = Describe("Catalogue", func() {
 		Expect(got).To(Equal(want))
 	})
 
+	It("has the plugin rows", func() {
+		type row struct {
+			name, instrument, unit string
+			attributes             []string
+		}
+		var got []row
+		for _, m := range selfmetrics.ByComponent(selfmetrics.ComponentPlugin) {
+			got = append(got, row{m.Name, m.Instrument, m.Unit, m.Attributes})
+			Expect(m.Description).NotTo(BeEmpty(), m.Name)
+		}
+		Expect(got).To(Equal([]row{
+			{"cnpg_otel_plugin_hook_calls_total", "counter", "{call}", []string{"service", "operation", "outcome"}},
+			{"cnpg_otel_plugin_hook_duration_seconds", "histogram", "s", []string{"service", "operation"}},
+			{"cnpg_otel_plugin_identity_reconciles_total", "counter", "{reconcile}", []string{"outcome"}},
+		}))
+	})
+
+	It("gives every metric a known component", func() {
+		for _, m := range selfmetrics.Catalogue() {
+			Expect(m.Component).To(BeElementOf(selfmetrics.ComponentEngine, selfmetrics.ComponentPlugin), m.Name)
+		}
+	})
+
+	It("generates a plugin section in docs/self-metrics.md", func() {
+		doc, err := os.ReadFile(goldenPath)
+		Expect(err).NotTo(HaveOccurred())
+		text := string(doc)
+		Expect(text).To(ContainSubstring("## Engine"))
+		Expect(text).To(ContainSubstring("## Plugin"))
+		Expect(text).To(ContainSubstring("| `cnpg_otel_plugin_hook_calls_total` | counter | `{call}` | `service`, `operation`, `outcome` |"))
+		Expect(strings.Index(text, "## Plugin")).To(BeNumerically("<", strings.Index(text, "cnpg_otel_plugin_hook_calls_total")))
+		Expect(strings.Index(text, "## Engine")).To(BeNumerically("<", strings.Index(text, "cnpg_otel_query_runs_total")))
+	})
+
 	It("leaves the unit cell empty for a metric without a unit", func() {
 		var buf bytes.Buffer
-		Expect(selfmetrics.Render(&buf, []selfmetrics.Metric{{Name: "m", Instrument: "gauge", Description: "d"}})).To(Succeed())
+		Expect(selfmetrics.Render(&buf, []selfmetrics.Metric{{Name: "m", Component: selfmetrics.ComponentEngine, Instrument: "gauge", Description: "d"}})).To(Succeed())
 		Expect(buf.String()).To(HaveSuffix("| `m` | gauge |  |  | d |\n"))
+	})
+
+	It("documents denied and cnpg_otel_check in docs/self-metrics.md", func() {
+		doc, err := os.ReadFile(goldenPath)
+		Expect(err).NotTo(HaveOccurred())
+		text := string(doc)
+		Expect(text).To(ContainSubstring("Query runs by outcome (ok, error, timeout, skipped, capped, denied)."))
+		Expect(text).To(ContainSubstring("Configuration loads by source and outcome (ok, error, denied)."))
+		Expect(text).To(ContainSubstring("| `cnpg_otel_check` | gauge |  | `check` |"))
+		Expect(text).To(ContainSubstring("pg_monitor, read_only, track_io_timing, track_wal_io_timing, track_functions"))
+		Expect(text).To(ContainSubstring("session of the engine itself"))
 	})
 
 	It("renders the committed markdown", func() {

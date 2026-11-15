@@ -1,0 +1,9 @@
+# want: endpoint must be a base http(s) URL
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: TelemetryExporter
+metadata:
+  name: default
+  namespace: app
+spec:
+  exporter:
+    endpoint: https://user:secret@collector:4318

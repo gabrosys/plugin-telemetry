@@ -4,6 +4,7 @@ package kubesource
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -514,7 +515,8 @@ func (s *Source) ReadFile(name string) ([]byte, error) {
 // Sensitive reports whether the virtual file holds Secret data.
 func (*Source) Sensitive(name string) bool { return strings.HasPrefix(name, "secret/") }
 
-// Settings builds the settings from the watched Cluster, exporter and the objects they name.
+// Settings builds the settings from the watched Cluster, exporter and the objects they name. The
+// bytes are the built settings as JSON, which only the engine's digest reads.
 func (s *Source) Settings() (settings.Settings, []byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -523,16 +525,16 @@ func (s *Source) Settings() (settings.Settings, []byte, error) {
 	if err != nil {
 		return settings.Settings{}, nil, err
 	}
-	data, err := canonical(in)
-	if err != nil {
-		return settings.Settings{}, nil, err
-	}
 	built, warnings, err := clusterconfig.Build(in)
 	if err != nil {
-		return settings.Settings{}, data, fmt.Errorf("settings: %w", err)
+		return settings.Settings{}, nil, fmt.Errorf("settings: %w", err)
 	}
 	for _, w := range warnings {
 		s.log.Info("settings warning", "warning", w)
+	}
+	data, err := json.Marshal(built)
+	if err != nil {
+		return settings.Settings{}, nil, fmt.Errorf("encode settings: %w", err)
 	}
 
 	return built, data, nil

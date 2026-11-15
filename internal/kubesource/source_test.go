@@ -217,7 +217,9 @@ var _ = Describe("Source", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(after).To(Equal(before))
 
-			fw.set("clusters", "pg", enabledCluster(map[string]any{"sidecarCPU": "100m"}))
+			fw.set("telemetryexporters", "default", exporter(map[string]any{
+				"exporter": map[string]any{"endpoint": "http://other:4318"},
+			}))
 			_, changed, err := src.Settings()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(changed).NotTo(Equal(before))

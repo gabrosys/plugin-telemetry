@@ -42,7 +42,8 @@ type seriesState struct {
 type entry struct {
 	fingerprint string
 	observed    time.Time
-	points      []Point
+	points      []Point // nil after Fail
+	size        int     // the series of the last Put; the cap counts it, also after Fail
 	state       map[string]seriesState
 }
 
@@ -50,7 +51,7 @@ type entry struct {
 type Store struct {
 	mu             sync.RWMutex // covers every field below
 	maxSeriesTotal int
-	series         int
+	series         int // sum of entry sizes
 	entries        map[Key]*entry
 }
 
@@ -67,12 +68,17 @@ func (s *Store) SetMaxSeriesTotal(n int) {
 	s.maxSeriesTotal = n
 }
 
-// Series returns the number of series held.
+// Series returns the number of series exported: those of the entries that have not failed since their last Put.
 func (s *Store) Series() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return s.series
+	n := 0
+	for _, e := range s.entries {
+		n += len(e.points)
+	}
+
+	return n
 }
 
 // Put replaces the entry atomically, or returns ErrTotalCap and leaves it as it was.
@@ -83,7 +89,7 @@ func (s *Store) Put(k Key, fingerprint string, samples []queries.Sample, observe
 	old := s.entries[k]
 	oldSeries := 0
 	if old != nil {
-		oldSeries = len(old.points)
+		oldSeries = old.size
 	}
 	if s.maxSeriesTotal > 0 && s.series-oldSeries+len(samples) > s.maxSeriesTotal {
 		return ErrTotalCap
@@ -93,6 +99,7 @@ func (s *Store) Put(k Key, fingerprint string, samples []queries.Sample, observe
 		fingerprint: fingerprint,
 		observed:    observed,
 		points:      make([]Point, 0, len(samples)),
+		size:        len(samples),
 		state:       make(map[string]seriesState, len(samples)),
 	}
 	for _, sample := range samples {
@@ -111,7 +118,7 @@ func (s *Store) Put(k Key, fingerprint string, samples []queries.Sample, observe
 		e.points = append(e.points, p)
 	}
 
-	s.series += len(e.points) - oldSeries
+	s.series += e.size - oldSeries
 	s.entries[k] = e
 
 	return nil
@@ -147,14 +154,13 @@ func (e *entry) advance(old *entry, id string, sample queries.Sample, observed t
 	return st.start
 }
 
-// Delete removes the entry and its start times.
-func (s *Store) Delete(k Key) {
+// Fail stops exporting k's series and keeps its start times and its share of maxSeriesTotal until its next Put or a Retain that drops it.
+func (s *Store) Fail(k Key) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if e, ok := s.entries[k]; ok {
-		s.series -= len(e.points)
-		delete(s.entries, k)
+		e.points = nil
 	}
 }
 
@@ -165,7 +171,7 @@ func (s *Store) Retain(keep func(k Key, fingerprint string) bool) {
 
 	for k, e := range s.entries {
 		if !keep(k, e.fingerprint) {
-			s.series -= len(e.points)
+			s.series -= e.size
 			delete(s.entries, k)
 		}
 	}

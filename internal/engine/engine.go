@@ -543,20 +543,20 @@ func (e *engine) record(ctx context.Context, res executor.Result) {
 				e.errs.Succeeded(logger, job.Query, job.Database)
 			case errors.Is(err, snapshot.ErrTotalCap):
 				outcome = selfmetrics.OutcomeCapped
-				e.store.Delete(key)
+				e.store.Fail(key)
 				e.stats.QueryCapped(job.Query, job.Database, len(res.Samples))
 			default:
 				outcome = selfmetrics.OutcomeError
-				e.store.Delete(key)
+				e.store.Fail(key)
 				e.errs.Failed(logger, job.Query, job.Database, fmt.Errorf("store the result: %w", err))
 			}
 		case selfmetrics.OutcomeCapped:
-			e.store.Delete(key)
+			e.store.Fail(key)
 			e.stats.QueryCapped(job.Query, job.Database, res.WouldBe)
 		case selfmetrics.OutcomeSkipped:
 			// A run caught in a pool swap keeps the entry of the run before it.
 		case selfmetrics.OutcomeError, selfmetrics.OutcomeTimeout, selfmetrics.OutcomeDenied:
-			e.store.Delete(key)
+			e.store.Fail(key)
 			if res.Err != nil {
 				e.errs.Failed(logger, job.Query, job.Database, res.Err)
 			}

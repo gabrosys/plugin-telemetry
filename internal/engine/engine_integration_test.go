@@ -590,3 +590,52 @@ var _ = Describe("Run when PostgreSQL comes back after an outage", func() {
 		GinkgoWriter.Printf("cnpg_collector_up was 1 again %s after the restart\n", time.Since(back))
 	}, SpecTimeout(2*time.Minute))
 })
+
+const failingCounter = `start_probe:
+  query: SELECT n FROM start_probe_table
+  metrics:
+    - n:
+        usage: COUNTER
+        description: A counter whose table goes away.
+`
+
+var _ = Describe("Run when a counter's query fails", func() {
+	It("keeps a counter's start time across a failed run of its query", func(ctx SpecContext) {
+		Expect(server.Exec(ctx, "CREATE TABLE start_probe_table AS SELECT 10 AS n")).To(Succeed())
+		DeferCleanup(func(ctx SpecContext) {
+			Expect(server.Exec(ctx, "DROP TABLE IF EXISTS start_probe_table")).To(Succeed())
+		})
+		Expect(server.Exec(ctx, "GRANT SELECT ON start_probe_table TO "+pgtest.MonitorUser)).To(Succeed())
+
+		f := newFixture(time.Hour)
+		writeFile(filepath.Join(filepath.Dir(f.config), "default-queries.yaml"), "")
+		writeFile(f.extra, failingCounter)
+		writeFile(f.config, f.valid)
+		f.run()
+
+		var first []point
+		Eventually(func() []point {
+			first = points(f.srv, "cnpg_start_probe_n", time.Time{})
+			return first
+		}).WithTimeout(20 * time.Second).WithPolling(100 * time.Millisecond).ShouldNot(BeEmpty())
+		start := first[0].start
+		Expect(start).NotTo(BeZero())
+
+		Expect(server.Exec(ctx, "DROP TABLE start_probe_table")).To(Succeed())
+		failed := map[string]string{"query": "start_probe", "outcome": "error"}
+		Eventually(func(g Gomega) {
+			n, ok := last(f.srv, "cnpg_otel_query_runs_total", failed)
+			g.Expect(ok).To(BeTrue())
+			g.Expect(n).To(BeNumerically(">=", 1))
+		}).WithTimeout(20 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+
+		Expect(server.Exec(ctx, "CREATE TABLE start_probe_table AS SELECT 15 AS n")).To(Succeed())
+		Expect(server.Exec(ctx, "GRANT SELECT ON start_probe_table TO "+pgtest.MonitorUser)).To(Succeed())
+		Eventually(func() []float64 { return values(points(f.srv, "cnpg_start_probe_n", time.Time{})) }).
+			WithTimeout(20 * time.Second).WithPolling(100 * time.Millisecond).Should(ContainElement(15.0))
+
+		for _, p := range points(f.srv, "cnpg_start_probe_n", time.Time{}) {
+			Expect(p.start).To(Equal(start), "value %v", p.value)
+		}
+	}, SpecTimeout(2*time.Minute))
+})

@@ -125,13 +125,50 @@ var _ = Describe("Store", func() {
 		Expect(points[0].Start).To(Equal(at(30)))
 	})
 
-	It("forgets start times on Delete", func() {
-		Expect(s.Put(k1, "f", []queries.Sample{counter("c", 5)}, at(10))).To(Succeed())
-		s.Delete(k1)
+	It("stops exporting a failed key and keeps the start time of its counter", func() {
+		Expect(s.Put(k1, "f", []queries.Sample{counter("c", 10)}, at(10))).To(Succeed())
+		s.Fail(k1)
+		points, _ := s.Points()
+		Expect(points).To(BeEmpty())
 		Expect(s.Series()).To(BeZero())
 
-		Expect(s.Put(k1, "f", []queries.Sample{counter("c", 9)}, at(30))).To(Succeed())
+		Expect(s.Put(k1, "f", []queries.Sample{counter("c", 15)}, at(30))).To(Succeed())
+		Expect(only(s).Start).To(Equal(at(10)))
+	})
+
+	It("applies the reset rule against the last success after a failed run", func() {
+		Expect(s.Put(k1, "f", []queries.Sample{counter("c", 10)}, at(10))).To(Succeed())
+		Expect(s.Put(k1, "f", []queries.Sample{counter("c", 12)}, at(20))).To(Succeed())
+		s.Fail(k1)
+		Expect(s.Put(k1, "f", []queries.Sample{counter("c", 3)}, at(40))).To(Succeed())
+		Expect(only(s).Start).To(Equal(at(20)))
+	})
+
+	It("ignores a Fail of an unknown key", func() {
+		s.Fail(k1)
+		Expect(s.Series()).To(BeZero())
+	})
+
+	It("forgets a failed key when Retain drops it", func() {
+		Expect(s.Put(k1, "old", []queries.Sample{counter("c", 10)}, at(10))).To(Succeed())
+		s.Fail(k1)
+		s.Retain(func(snapshot.Key, string) bool { return false })
+
+		Expect(s.Put(k1, "old", []queries.Sample{counter("c", 15)}, at(30))).To(Succeed())
 		Expect(only(s).Start).To(Equal(at(30)))
+	})
+
+	It("keeps the share of a failed key in maxSeriesTotal until its next Put", func() {
+		s = snapshot.New(3)
+		Expect(s.Put(k1, "f", []queries.Sample{counter("a", 1), counter("b", 1), counter("c", 1)}, at(10))).To(Succeed())
+		s.Fail(k1)
+		Expect(s.Series()).To(BeZero())
+
+		Expect(s.Put(k2, "f", []queries.Sample{counter("d", 1)}, at(20))).To(MatchError(snapshot.ErrTotalCap))
+
+		Expect(s.Put(k1, "f", []queries.Sample{counter("a", 2)}, at(30))).To(Succeed())
+		Expect(s.Put(k2, "f", []queries.Sample{counter("d", 1)}, at(30))).To(Succeed())
+		Expect(s.Series()).To(Equal(2))
 	})
 
 	It("rejects a Put above maxSeriesTotal and keeps the previous entry", func() {
@@ -244,7 +281,7 @@ var _ = Describe("Store", func() {
 				for n := range 50 {
 					Expect(s.Put(k, "f", []queries.Sample{counter("c", float64(n))}, at(n))).To(Succeed())
 					if n%10 == 9 {
-						s.Delete(k)
+						s.Fail(k)
 					}
 				}
 			}()

@@ -422,6 +422,7 @@ type point struct {
 	attrs map[string]string
 	value float64
 	at    time.Time
+	start uint64 // StartTimeUnixNano
 }
 
 func attrMap(kvs []*commonpb.KeyValue) map[string]string {
@@ -457,7 +458,9 @@ func requestPoints(req otlptest.Request, name string) []point {
 				}
 				dps := append(m.GetGauge().GetDataPoints(), m.GetSum().GetDataPoints()...)
 				for _, dp := range dps {
-					out = append(out, point{attrs: attrMap(dp.GetAttributes()), value: numberValue(dp), at: req.Received})
+					out = append(out, point{
+						attrs: attrMap(dp.GetAttributes()), value: numberValue(dp), at: req.Received, start: dp.GetStartTimeUnixNano(),
+					})
 				}
 			}
 		}

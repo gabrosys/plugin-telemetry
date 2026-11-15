@@ -17,6 +17,7 @@ import (
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	"github.com/cloudnative-pg/machinery/pkg/log"
+	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -29,6 +30,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/clusterconfig"
 	"github.com/gabrosys/plugin-telemetry/internal/engine"
 	"github.com/gabrosys/plugin-telemetry/internal/podpatch"
+	"github.com/gabrosys/plugin-telemetry/internal/safe"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
 	"github.com/gabrosys/plugin-telemetry/internal/sources"
 )
@@ -36,7 +38,8 @@ import (
 const (
 	debounce       = time.Second
 	tokenPollTime  = 5 * time.Second
-	snapshotRounds = 3 // the Cluster; the exporter and the Cluster's references; the exporter's references
+	startRetry     = 5 * time.Second // the wait before a watch whose start panicked is started again
+	snapshotRounds = 3               // the Cluster; the exporter and the Cluster's references; the exporter's references
 )
 
 var errNotSynced = errors.New("watch has not synced")
@@ -198,32 +201,64 @@ func (s *Source) waitForToken(ctx context.Context) bool {
 	}
 }
 
-// run alone starts and stops the watches: it reconciles at start and on each replan, and stops every
-// watch when ctx ends.
+// run alone starts and stops the watches: it reconciles at start, on each replan and startRetry after a
+// watch start panicked, and stops every watch when ctx ends.
 func (s *Source) run(ctx context.Context, w watcher) {
 	s.mu.Lock()
 	s.log = log.FromContext(ctx)
 	s.mu.Unlock()
 
 	for {
-		s.reconcile(ctx, w)
+		var retry <-chan time.Time
+		if s.reconcile(ctx, w) {
+			retry = s.o.Clock.After(startRetry)
+		}
 		select {
 		case <-ctx.Done():
 			s.reconcile(ctx, nil)
 			return
 		case <-s.replan:
+		case <-retry:
 		}
 	}
 }
 
 // reconcile starts with w the watches the wanted set adds and stops those it drops; a nil w stops all.
-func (s *Source) reconcile(ctx context.Context, w watcher) {
+// It reports whether to run again later: a panic in it, or in a watch start, which then has no entry
+// so that the next reconcile starts it again.
+func (s *Source) reconcile(ctx context.Context, w watcher) (retry bool) {
+	logger := s.logger()
+	panicked := safe.Call(logger, "reconcile", func() {
+		stops, starts := s.diff(w)
+		for _, stop := range stops {
+			stop()
+		}
+		for k, e := range starts {
+			var stop func()
+			if safe.Call(logger, "start of the watch on "+string(k.kind)+" "+k.name, func() {
+				stop = w(ctx, resources[k.kind], s.o.Namespace, k.name, s.handler(k, e))
+			}) {
+				retry = true
+				s.forget(k, e)
+				continue
+			}
+			s.mu.Lock()
+			e.stop = stop
+			s.mu.Unlock()
+		}
+	})
+	return retry || panicked
+}
+
+// diff drops the entries the wanted set no longer has, returning their stops, and adds entries for the
+// watches to start.
+func (s *Source) diff(w watcher) (stops []func(), starts map[key]*entry) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	wanted := map[key]struct{}{}
 	if w != nil {
 		wanted = s.wantedLocked()
 	}
-	var stops []func()
 	for k, e := range s.entries {
 		if _, ok := wanted[k]; ok {
 			continue
@@ -233,7 +268,7 @@ func (s *Source) reconcile(ctx context.Context, w watcher) {
 		}
 		delete(s.entries, k)
 	}
-	starts := map[key]*entry{}
+	starts = map[key]*entry{}
 	for k := range wanted {
 		if _, ok := s.entries[k]; !ok {
 			e := &entry{}
@@ -241,17 +276,23 @@ func (s *Source) reconcile(ctx context.Context, w watcher) {
 			starts[k] = e
 		}
 	}
-	s.mu.Unlock()
+	return stops, starts
+}
 
-	for _, stop := range stops {
-		stop()
+// forget removes e, the entry of a watch that did not start.
+func (s *Source) forget(k key, e *entry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.entries[k] == e {
+		delete(s.entries, k)
 	}
-	for k, e := range starts {
-		stop := w(ctx, resources[k.kind], s.o.Namespace, k.name, s.handler(k, e))
-		s.mu.Lock()
-		e.stop = stop
-		s.mu.Unlock()
-	}
+}
+
+// logger returns the logger set by run or snapshot.
+func (s *Source) logger() logr.Logger {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.log.GetLogger()
 }
 
 // wantedLocked is the Cluster, the references of the newest Cluster and exporter, and lastGood. While
@@ -347,43 +388,53 @@ func (s *Source) objectLocked(k key) (*unstructured.Unstructured, error) {
 }
 
 // handler returns what a watch on k reports to; reports from a watch that was stopped are dropped.
-// Watch errors are only logged: the informer lists again and reports what it finds.
+// Watch errors are only logged: the informer lists again and reports what it finds. A panic in a
+// report is logged and the next report is handled.
 func (s *Source) handler(k key, e *entry) handler {
+	what := "report of the watch on " + string(k.kind) + " " + k.name
 	return handler{
 		set: func(obj *unstructured.Unstructured) {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			if s.entries[k] != e {
-				return
-			}
-			e.synced, e.obj, e.denied, e.lastErr = true, obj, nil, ""
-			s.wakeLocked()
-			if k.kind == kindCluster || k.kind == kindExporter {
-				s.askReplan()
-			}
+			safe.Call(s.logger(), what, func() { s.set(k, e, obj) })
 		},
 		fail: func(err error) {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			if s.entries[k] != e {
-				return
-			}
-			if errors.Is(err, sources.ErrDenied) {
-				e.lastErr = ""
-				if e.denied == nil {
-					s.log.Info("access to object denied", "kind", k.kind, "name", k.name)
-					s.wakeLocked()
-				}
-				e.denied = err
-				return
-			}
-			if err.Error() == e.lastErr {
-				return
-			}
-			e.lastErr = err.Error()
-			s.log.Error(err, "watch failed", "kind", k.kind, "name", k.name)
+			safe.Call(s.logger(), what, func() { s.fail(k, e, err) })
 		},
 	}
+}
+
+func (s *Source) set(k key, e *entry, obj *unstructured.Unstructured) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.entries[k] != e {
+		return
+	}
+	e.synced, e.obj, e.denied, e.lastErr = true, obj, nil, ""
+	s.wakeLocked()
+	if k.kind == kindCluster || k.kind == kindExporter {
+		s.askReplan()
+	}
+}
+
+func (s *Source) fail(k key, e *entry, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.entries[k] != e {
+		return
+	}
+	if errors.Is(err, sources.ErrDenied) {
+		e.lastErr = ""
+		if e.denied == nil {
+			s.log.Info("access to object denied", "kind", k.kind, "name", k.name)
+			s.wakeLocked()
+		}
+		e.denied = err
+		return
+	}
+	if err.Error() == e.lastErr {
+		return
+	}
+	e.lastErr = err.Error()
+	s.log.Error(err, "watch failed", "kind", k.kind, "name", k.name)
 }
 
 // askReplan wakes run without blocking; a pending request already covers this one.
@@ -456,8 +507,8 @@ func (s *Source) ReadFile(name string) ([]byte, error) {
 func (*Source) Sensitive(name string) bool { return strings.HasPrefix(name, "secret/") }
 
 // Settings builds the settings from the watched Cluster, exporter and the objects they name, and keeps
-// their references watched until settings that name others build or there is no configuration. The bytes are the built settings as
-// JSON, which only the engine's digest reads.
+// their references watched until settings that name others build or there is no configuration. The
+// bytes are the built settings as JSON, which only the engine's digest reads.
 func (s *Source) Settings() (settings.Settings, []byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

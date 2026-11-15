@@ -8,9 +8,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cloudnative-pg/machinery/pkg/log"
 	"k8s.io/utils/clock"
 
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
+	"github.com/gabrosys/plugin-telemetry/internal/safe"
 )
 
 const (
@@ -182,6 +184,7 @@ func (s *Scheduler) earliest(db string) *entry {
 
 func (s *Scheduler) work(ctx context.Context, db string, w *worker) {
 	defer s.wg.Done()
+	logger := log.FromContext(ctx).GetLogger()
 	for {
 		s.mu.Lock()
 		select {
@@ -219,14 +222,14 @@ func (s *Scheduler) work(ctx context.Context, db string, w *worker) {
 		s.mu.Unlock()
 
 		start := s.clk.Now()
-		s.run(ctx, j)
+		safe.Call(logger, "run of "+j.Query+" on "+j.Database, func() { s.run(ctx, j) })
 		end := s.clk.Now()
 		if ctx.Err() != nil {
 			s.exit(db)
 			return
 		}
 		if missed := s.reschedule(e, due, start, end); missed > 0 {
-			s.skip(j, missed)
+			safe.Call(logger, "skip of "+j.Query+" on "+j.Database, func() { s.skip(j, missed) })
 		}
 	}
 }

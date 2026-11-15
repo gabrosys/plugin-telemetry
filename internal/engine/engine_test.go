@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -185,22 +186,32 @@ var _ = Describe("A run caught in a pool swap", func() {
 })
 
 var _ = Describe("Run bookkeeping", func() {
-	It("survives a panic, logs it once and counts each run as an error", func(ctx SpecContext) {
-		var lines []string
-		logger := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{})
+	It("logs a bookkeeping panic with its stack and keeps running the job", func(ctx SpecContext) {
+		var (
+			mu    sync.Mutex // guards lines
+			lines []string
+		)
+		logger := funcr.New(func(_, args string) {
+			mu.Lock()
+			defer mu.Unlock()
+			lines = append(lines, args)
+		}, funcr.Options{})
 		job := planner.Job{Query: "backends", Database: "app", Fingerprint: "f"}
 
-		runs, err := engine.RunWithBrokenBookkeeping(ctrllog.IntoContext(ctx, logger), job, 3)
+		errorRuns, kept, err := engine.RunWithBrokenBookkeeping(ctrllog.IntoContext(ctx, logger), job, 3)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(runs).To(Equal(int64(3)))
+		Expect(errorRuns).To(BeZero())
+		Expect(kept).To(BeTrue())
+		mu.Lock()
+		defer mu.Unlock()
 		var panics []string
 		for _, l := range lines {
-			if strings.Contains(l, "panic") {
+			if strings.Contains(l, "recovered from a panic") {
 				panics = append(panics, l)
 			}
 		}
-		Expect(panics).To(HaveLen(1))
-		Expect(panics[0]).To(And(ContainSubstring(`"query"="backends"`), ContainSubstring(`"database"="app"`)))
+		Expect(panics).To(HaveLen(3))
+		Expect(panics[0]).To(And(ContainSubstring("run of backends on app"), ContainSubstring(`"stack"=`), ContainSubstring("panic:")))
 	})
 })
 

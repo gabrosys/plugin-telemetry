@@ -15,6 +15,7 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/cloudnative-pg/machinery/pkg/log"
+	"github.com/go-logr/logr"
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -28,6 +29,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
+	"github.com/gabrosys/plugin-telemetry/internal/safe"
 	"github.com/gabrosys/plugin-telemetry/internal/scheduler"
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
@@ -60,6 +62,9 @@ var ErrNilConfig = errors.New("no configuration given")
 
 // errWatchEnded stands for the error of a Watch that returned nil before the engine stopped.
 var errWatchEnded = errors.New("the watch ended before the engine stopped")
+
+// errWatchPanicked stands for the error of a Watch that panicked.
+var errWatchPanicked = errors.New("the watch panicked")
 
 // Options configure Run.
 type Options struct {
@@ -231,6 +236,7 @@ func (e *engine) newRand() *rand.Rand {
 // run is the control goroutine: it reacts to changes, facts rounds and failed runs until ctx ends.
 func (e *engine) run(ctx context.Context) {
 	logger := log.FromContext(ctx)
+	plain := logger.GetLogger()
 	logger.Info("starting the metrics engine", "config", e.cfg.Name(), "version", version.Version)
 
 	schedCtx, stopSched := context.WithCancel(ctx)
@@ -248,20 +254,32 @@ func (e *engine) run(ctx context.Context) {
 	}()
 	defer e.shutdown(ctx, stopSched, schedDone, watchDone)
 
-	e.onChange(ctx)
+	safe.Call(plain, "reload", func() { e.onChange(ctx) })
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-e.changed:
-			e.onChange(ctx)
+			safe.Call(plain, "reload", func() { e.onChange(ctx) })
 		case <-timerC(e.factsTimer):
-			e.factsRound(ctx, true)
+			e.timedFactsRound(ctx, plain)
 		case <-e.early:
-			e.onEarlyFacts(ctx)
+			safe.Call(plain, "early facts request", func() { e.onEarlyFacts(ctx) })
 		case <-timerC(e.earlyTimer):
-			e.factsRound(ctx, false)
+			safe.Call(plain, "early facts round", func() { e.factsRound(ctx, false) })
 		}
+	}
+}
+
+// timedFactsRound runs the facts round the timer drove. A round that panics counts as a failed one, so
+// the timer is armed again.
+func (e *engine) timedFactsRound(ctx context.Context, logger logr.Logger) {
+	if !safe.Call(logger, "facts round", func() { e.factsRound(ctx, true) }) {
+		return
+	}
+	if cur := e.plan.current; cur != nil {
+		e.factsFailures++
+		e.setFactsTimer(factsWait(e.factsFailures, cur.settings.PlanInterval))
 	}
 }
 
@@ -283,7 +301,10 @@ func (e *engine) watch(ctx context.Context) {
 		e.notify()
 	}
 	for {
-		err := e.cfg.Watch(ctx, files, notify)
+		var err error
+		if safe.Call(logger.GetLogger(), "watch the configuration", func() { err = e.cfg.Watch(ctx, files, notify) }) {
+			err = errWatchPanicked
+		}
 		if ctx.Err() != nil {
 			return
 		}
@@ -508,24 +529,7 @@ func (e *engine) runJob(ctx context.Context, job planner.Job) {
 	if r == nil {
 		return
 	}
-	res := r.exec.Run(ctx, job)
-	defer e.recoverRecord(ctx, res)
-	e.record(ctx, res)
-}
-
-// recoverRecord turns a panic in the bookkeeping of res into a failed run: logged once through
-// errorLog, counted with outcome error, its entry deleted.
-func (e *engine) recoverRecord(ctx context.Context, res executor.Result) {
-	p := recover()
-	if p == nil {
-		return
-	}
-	job := res.Job
-	err := fmt.Errorf("record the result: panic: %v", p)
-	e.errs.Failed(log.FromContext(ctx).GetLogger(), job.Query, job.Database, err)
-	e.store.Delete(snapshot.Key{Query: job.Query, Database: job.Database})
-	e.stats.QueryRun(job.Query, job.Database, selfmetrics.OutcomeError, res.Duration, res.Started)
-	e.stats.Series(e.store.Series())
+	e.record(ctx, r.exec.Run(ctx, job))
 }
 
 // record stores the result of a run that is still planned and counts it.

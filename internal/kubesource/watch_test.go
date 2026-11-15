@@ -98,6 +98,27 @@ var _ = Describe("the dynamic watcher", func() {
 		Expect(got.GetName()).To(Equal("c"))
 	})
 
+	It("recovers a panic in a handler and keeps reporting", func() {
+		var once sync.Once
+		panicked := make(chan struct{})
+		handler = kubesource.NewHandler(func(o *unstructured.Unstructured) {
+			once.Do(func() {
+				close(panicked)
+				panic("handler broke")
+			})
+			events <- o
+		}, func(err error) { failures <- err })
+		startWith("c")
+		Eventually(panicked).Should(BeClosed())
+		Consistently(events, "100ms").ShouldNot(Receive())
+
+		_, err := client.Resource(configMaps).Namespace("ns").Create(ctx, configMap("c", map[string]any{"k": "v"}), metaCreate())
+		Expect(err).NotTo(HaveOccurred())
+		var got *unstructured.Unstructured
+		Eventually(events).Should(Receive(&got))
+		Expect(got.GetName()).To(Equal("c"))
+	})
+
 	It("reports a 403 as ErrDenied", func() {
 		client.PrependReactor("list", "configmaps", func(clienttesting.Action) (bool, runtime.Object, error) {
 			return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "configmaps"}, "a", errForbidden)

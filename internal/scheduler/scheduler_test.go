@@ -29,9 +29,10 @@ type skipRecord struct {
 
 // harness wires a Scheduler to a fake clock and records every run and skip.
 type harness struct {
-	clk  *testingclock.FakeClock
-	s    *scheduler.Scheduler
-	hook func(ctx context.Context, job planner.Job)
+	clk      *testingclock.FakeClock
+	s        *scheduler.Scheduler
+	hook     func(ctx context.Context, job planner.Job)
+	skipHook func()
 
 	mu    sync.Mutex // guards runs and skips
 	runs  []runRecord
@@ -57,6 +58,9 @@ func newHarness() *harness {
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			h.skips = append(h.skips, skipRecord{job: job, missed: missed})
+			if h.skipHook != nil {
+				h.skipHook()
+			}
 		})
 	return h
 }
@@ -305,6 +309,38 @@ var _ = Describe("Scheduler", func() {
 		Expect(second.Sub(t0)).To(BeNumerically("<", 41*time.Second+q))
 		h.settle(1)
 		Expect(h.skipList()).To(HaveLen(1))
+	})
+
+	It("keeps every worker running after a RunFunc panics", func() {
+		h.hook = func(context.Context, planner.Job) { panic("run broke") }
+		h.s.Update(plan(job("a", "qa", 10*time.Second), job("b", "qb", 10*time.Second)))
+		h.start()
+		h.settle(2)
+
+		h.advance(32*time.Second, 100*time.Millisecond, 2)
+
+		Expect(h.runsOf("qa")).To(HaveLen(3))
+		Expect(h.runsOf("qb")).To(HaveLen(3))
+		Expect(h.s.WorkerCount()).To(Equal(2))
+	})
+
+	It("keeps the worker running after a SkipFunc panics", func() {
+		var calls int
+		h.hook = func(context.Context, planner.Job) {
+			calls++
+			if calls == 1 {
+				h.clk.Step(35 * time.Second)
+			}
+		}
+		h.skipHook = func() { panic("skip broke") }
+		h.s.Update(plan(job("a", "q", 10*time.Second)))
+		h.start()
+		h.settle(1)
+		h.stepUntilFired(100*time.Millisecond, 200)
+		Eventually(h.skipList).Should(HaveLen(1))
+
+		h.advance(15*time.Second, 100*time.Millisecond, 1)
+		Expect(h.runCount()).To(BeNumerically(">=", 2))
 	})
 
 	It("keeps the next due time of an unchanged job across Update, and starts changed and new jobs fresh", func() {

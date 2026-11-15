@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -12,6 +13,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/executor"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
+	"github.com/gabrosys/plugin-telemetry/internal/scheduler"
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
 	"github.com/gabrosys/plugin-telemetry/internal/snapshot"
@@ -37,12 +39,13 @@ func FactsWait(failures int, planInterval time.Duration) time.Duration {
 	return factsWait(failures, planInterval)
 }
 
-// RunWithBrokenBookkeeping runs job n times through the scheduler's RunFunc with bookkeeping that
-// panics, and returns the runs counted with outcome error.
-func RunWithBrokenBookkeeping(ctx context.Context, job planner.Job, n int) (int64, error) {
+// RunWithBrokenBookkeeping runs job n times through a scheduler over the engine's RunFunc with
+// bookkeeping that panics, and returns the runs counted with outcome error and whether the job's
+// snapshot entry is still there.
+func RunWithBrokenBookkeeping(ctx context.Context, job planner.Job, n int) (errorRuns int64, kept bool, err error) {
 	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, nil)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	s := settings.Settings{
 		Postgres: settings.Postgres{Host: "127.0.0.1", Port: 1, User: "u", Database: "app", MaxConnections: 2},
@@ -51,15 +54,38 @@ func RunWithBrokenBookkeeping(ctx context.Context, job planner.Job, n int) (int6
 	e.swapPool(ctx, s, time.Minute)
 	// record dereferences the replanner first, so a nil one makes it panic.
 	e.plan = nil
-	for range n {
-		e.runJob(ctx, job)
+	key := snapshot.Key{Query: job.Query, Database: job.Database}
+	sample := queries.Sample{Metric: "cnpg_" + job.Query + "_value", Kind: queries.KindGauge, Value: 1}
+	if err := e.store.Put(key, job.Fingerprint, []queries.Sample{sample}, time.Now()); err != nil {
+		return 0, false, errors.Join(err, e.mp.Shutdown(ctx))
 	}
 
-	runs, err := queryRuns(ctx, e, job, selfmetrics.OutcomeError)
+	rctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var runs atomic.Int32
+	e.sched = scheduler.New(e.clk, e.newRand(), func(c context.Context, j planner.Job) {
+		defer func() {
+			if int(runs.Add(1)) == n {
+				cancel()
+			}
+		}()
+		e.runJob(c, j)
+	}, func(planner.Job, int) {})
+	job.Interval = 10 * time.Millisecond
+	e.sched.Update(planner.Plan{Jobs: []planner.Job{job}})
+	if err := e.sched.Run(rctx); err != nil {
+		return 0, false, errors.Join(err, e.mp.Shutdown(ctx))
+	}
+
+	points, _ := e.store.Points()
+	for _, p := range points {
+		kept = kept || p.Key == key
+	}
+	errorRuns, err = queryRuns(ctx, e, job, selfmetrics.OutcomeError)
 	if r := e.setRunner(nil); r != nil {
 		r.pool.Close()
 	}
-	return runs, errors.Join(err, e.mp.Shutdown(ctx))
+	return errorRuns, kept, errors.Join(err, e.mp.Shutdown(ctx))
 }
 
 // RecordResult records res for its planned job, whose snapshot entry holds one sample, and reports

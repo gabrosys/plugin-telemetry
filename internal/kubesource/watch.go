@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/cloudnative-pg/machinery/pkg/log"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -14,6 +15,7 @@ import (
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/tools/cache"
 
+	"github.com/gabrosys/plugin-telemetry/internal/safe"
 	"github.com/gabrosys/plugin-telemetry/internal/sources"
 )
 
@@ -39,7 +41,8 @@ func dynamicWatcher(client dynamic.Interface) watcher {
 			published bool
 			last      *unstructured.Unstructured
 		)
-		publish := func() {
+		logger := log.FromContext(ctx).GetLogger()
+		report := func() {
 			if !informer.HasSynced() {
 				return
 			}
@@ -64,6 +67,8 @@ func dynamicWatcher(client dynamic.Interface) watcher {
 			published, last = true, obj
 			h.set(obj)
 		}
+		// The informer's listener goroutine crashes the process on a panic.
+		publish := func() { safe.Call(logger, "report of "+gvr.Resource+" "+name, report) }
 
 		if err := informer.SetWatchErrorHandlerWithContext(func(_ context.Context, _ *cache.Reflector, err error) {
 			if apierrors.IsForbidden(err) {
@@ -86,12 +91,12 @@ func dynamicWatcher(client dynamic.Interface) watcher {
 			return func() {}
 		}
 
-		go informer.RunWithContext(ctx)
-		go func() {
+		safe.Go(logger, "informer of "+gvr.Resource+" "+name, func() { informer.RunWithContext(ctx) })
+		safe.Go(logger, "first report of "+gvr.Resource+" "+name, func() {
 			if cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
 				publish()
 			}
-		}()
+		})
 
 		return cancel
 	}

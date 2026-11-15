@@ -22,12 +22,13 @@ import (
 
 // fakeKube is a Kubernetes source over the settings of a testdata file, with virtual file names.
 type fakeKube struct {
-	base    engine.Config
-	mutate  func(*settings.Settings)
-	files   map[string][]byte
-	mu      sync.Mutex
-	started int
-	reads   []string
+	base       engine.Config
+	mutate     func(*settings.Settings)
+	files      map[string][]byte
+	mu         sync.Mutex
+	started    int
+	panicStart bool // Start panics
+	reads      []string
 }
 
 func newFakeKube(config string, files map[string][]byte, mutate func(*settings.Settings)) *fakeKube {
@@ -78,6 +79,9 @@ func (f *fakeKube) Start(ctx context.Context) error {
 	f.mu.Lock()
 	f.started++
 	f.mu.Unlock()
+	if f.panicStart {
+		panic("source broke")
+	}
 	<-ctx.Done()
 	return nil
 }
@@ -148,6 +152,31 @@ var _ = Describe("instance in Kubernetes mode", func() {
 		src.mu.Lock()
 		defer src.mu.Unlock()
 		Expect(src.started).To(Equal(1))
+	})
+
+	It("idles instead of exiting when the Kubernetes source panics", func() {
+		setKubeEnv()
+		src := newFakeKube("engine-valid.yaml", nil, nil)
+		src.panicStart = true
+		useRun(src)
+		DeferCleanup(cli.SetMemlimit(func(func(string) ([]byte, error), func(string) string) (int64, error) { return 0, nil }))
+
+		logFile := filepath.Join(GinkgoT().TempDir(), "log.json")
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			_, err := execute(ctx, "--log-destination", logFile, "instance")
+			done <- err
+		}()
+		Eventually(func(g Gomega) {
+			raw, err := os.ReadFile(logFile) //nolint:gosec // a file the spec created
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(string(raw)).To(ContainSubstring("recovered from a panic"))
+			g.Expect(string(raw)).To(ContainSubstring("the metrics engine stopped"))
+		}).WithTimeout(10 * time.Second).Should(Succeed())
+		Consistently(done, 300*time.Millisecond).ShouldNot(Receive())
+		cancel()
+		Eventually(done, 20*time.Second).Should(Receive(BeNil()))
 	})
 
 	DescribeTable("logs the variable and idles instead of exiting when the environment is incomplete",

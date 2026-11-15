@@ -41,17 +41,19 @@ import (
 
 // memConfig is an engine.Config held in memory. Its paths exist nowhere on disk.
 type memConfig struct {
-	mu       sync.Mutex // guards every field below
-	doc      string
-	noConfig string // when set, Settings fails with ErrNoConfiguration for this reason
-	files    map[string]string
-	fileErrs map[string]error
-	reads    map[string]int
-	calls    int             // of Settings
-	watchErr []error         // returned at once by the next Watch calls, one each
-	watches  int             // Watch calls
-	watched  func() []string // the files Watch was given
-	notify   func()          // the notify Watch was given
+	mu          sync.Mutex // guards every field below
+	doc         string
+	noConfig    string // when set, Settings fails with ErrNoConfiguration for this reason
+	files       map[string]string
+	fileErrs    map[string]error
+	reads       map[string]int
+	calls       int             // of Settings
+	watchErr    []error         // returned at once by the next Watch calls, one each
+	panics      int             // the next Settings calls that panic
+	watchPanics int             // the next Watch calls that panic
+	watches     int             // Watch calls
+	watched     func() []string // the files Watch was given
+	notify      func()          // the notify Watch was given
 }
 
 func newMemConfig(doc string, files map[string]string) *memConfig {
@@ -64,6 +66,10 @@ func (c *memConfig) Settings() (settings.Settings, []byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls++
+	if c.panics > 0 {
+		c.panics--
+		panic("settings broke")
+	}
 	if c.noConfig != "" {
 		return settings.Settings{}, nil, fmt.Errorf("%w: %s", engine.ErrNoConfiguration, c.noConfig)
 	}
@@ -90,6 +96,11 @@ func (c *memConfig) ReadFile(name string) ([]byte, error) {
 func (c *memConfig) Watch(ctx context.Context, files func() []string, notify func()) error {
 	c.mu.Lock()
 	c.watches++
+	if c.watchPanics > 0 {
+		c.watchPanics--
+		defer c.mu.Unlock()
+		panic("watch broke badly")
+	}
 	if len(c.watchErr) > 0 {
 		err := c.watchErr[0]
 		c.watchErr = c.watchErr[1:]
@@ -675,6 +686,29 @@ var _ = Describe("An engine on an in-memory Config", func() {
 		h.clk.Step(4900 * time.Millisecond)
 		Consistently(h.cfg.watchCalls, 200*time.Millisecond).Should(Equal(1))
 		h.clk.Step(100 * time.Millisecond)
+		Eventually(h.cfg.watching).Should(BeTrue())
+		Expect(h.cfg.watchCalls()).To(Equal(2))
+	})
+
+	It("keeps handling events after a reload panics", func() {
+		h := run(func(url string) *memConfig {
+			c := newMemConfig(httpSettings(url), httpFiles())
+			c.panics = 1
+			return c
+		}, unreachable)
+		Eventually(func() int { return h.logged("recovered from a panic") }).Should(Equal(1))
+		h.reload()
+		Eventually(func() int { return h.logged(`"msg"="configuration applied"`) }).Should(Equal(1))
+	})
+
+	It("restarts a Watch that panics after 5 s", func() {
+		h := run(func(url string) *memConfig {
+			c := newMemConfig(httpSettings(url), httpFiles())
+			c.watchPanics = 1
+			return c
+		}, unreachable)
+		Eventually(func() int { return h.logged("recovered from a panic") }).Should(Equal(1))
+		h.clk.Step(5 * time.Second)
 		Eventually(h.cfg.watching).Should(BeTrue())
 		Expect(h.cfg.watchCalls()).To(Equal(2))
 	})

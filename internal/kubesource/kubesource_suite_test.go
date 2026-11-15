@@ -28,9 +28,12 @@ type fakeWatch struct{ h kubesource.Handler }
 type fakeWatcher struct {
 	mu       sync.Mutex
 	handlers map[string]*fakeWatch
+	panics   map[string]bool // the watches whose next start panics
 }
 
-func newFakeWatcher() *fakeWatcher { return &fakeWatcher{handlers: map[string]*fakeWatch{}} }
+func newFakeWatcher() *fakeWatcher {
+	return &fakeWatcher{handlers: map[string]*fakeWatch{}, panics: map[string]bool{}}
+}
 
 func watchKey(resource, name string) string { return resource + "/" + name }
 
@@ -41,6 +44,10 @@ func (f *fakeWatcher) watch(
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	k := watchKey(gvr.Resource, name)
+	if f.panics[k] {
+		delete(f.panics, k)
+		panic("watch start broke")
+	}
 	fw := &fakeWatch{h: h}
 	f.handlers[k] = fw
 	return func() {
@@ -50,6 +57,13 @@ func (f *fakeWatcher) watch(
 			delete(f.handlers, k)
 		}
 	}
+}
+
+// panicOnce makes the next start of the watch on resource/name panic.
+func (f *fakeWatcher) panicOnce(resource, name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.panics[watchKey(resource, name)] = true
 }
 
 // active returns the watched objects as "<resource>/<name>".

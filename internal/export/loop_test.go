@@ -28,11 +28,17 @@ type fixedProducer struct {
 	mu  sync.Mutex // guards n and err
 	n   int
 	err error
+
+	panics int // the next Produce calls that panic
 }
 
 func (p *fixedProducer) Produce(context.Context) ([]metricdata.ScopeMetrics, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.panics > 0 {
+		p.panics--
+		panic("producer broke")
+	}
 	return batch(p.n, 1).ScopeMetrics, p.err
 }
 
@@ -327,6 +333,27 @@ var _ = Describe("Loop", func() {
 		Expect(srv.Requests()).To(BeEmpty())
 		Expect(h.value("otel.sdk.exporter.operation.duration", componentAttrs(srv, attribute.String("error.type", "_OTHER"))...)).To(Equal(1.0))
 		Expect(h.value("otel.sdk.exporter.metric_data_point.exported", componentAttrs(srv, attribute.String("error.type", "_OTHER"))...)).To(BeZero())
+	})
+
+	It("counts a panicking tick as one failed export and exports at the next one", func() {
+		srv := newHTTPServer(nil)
+		h := newLoopHarness(1)
+		h.prod.mu.Lock()
+		h.prod.panics = 1
+		h.prod.mu.Unlock()
+		h.loop.SetExporter(context.Background(), httpExporter(srv), 10*time.Second, 1000)
+		h.start()
+
+		for i := 0; i < 10 && h.exports("error") == 0; i++ {
+			h.step(time.Second)
+		}
+		Expect(h.exports("error")).To(Equal(1.0))
+		Expect(srv.Requests()).To(BeEmpty())
+		Expect(h.value("otel.sdk.exporter.operation.duration", componentAttrs(srv, attribute.String("error.type", "_OTHER"))...)).To(Equal(1.0))
+
+		h.stepUntilRequest(srv, 11)
+		Expect(h.exports("error")).To(Equal(1.0))
+		Expect(h.exports("ok")).To(Equal(1.0))
 	})
 
 	It("switches to a new exporter at the next tick and shuts the old one down", func(ctx SpecContext) {

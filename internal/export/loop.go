@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	"k8s.io/utils/clock"
 
+	"github.com/gabrosys/plugin-telemetry/internal/safe"
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 )
 
@@ -112,7 +113,13 @@ func (l *Loop) Run(ctx context.Context) error {
 			}
 			cur = p
 		}
-		l.tick(ctx, cur, at)
+		started := l.clk.Now()
+		if safe.Call(log.FromContext(ctx).GetLogger(), "export tick", func() { l.tick(ctx, cur, at) }) {
+			rec := l.record(cur, selfmetrics.OutcomeError)
+			rec.Duration = l.clk.Since(started)
+			rec.ErrorType = errorTypeOther
+			l.stats.Export(rec) //nolint:contextcheck // Stats.Export takes no context
+		}
 
 		next = at.Add(cur.interval)
 		for end := l.clk.Now(); !next.After(end); next = next.Add(cur.interval) {

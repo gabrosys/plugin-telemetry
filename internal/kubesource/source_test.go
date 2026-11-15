@@ -259,6 +259,56 @@ var _ = Describe("Source", func() {
 		Consistently(clk.HasWaiters, "100ms").Should(BeFalse())
 	})
 
+	It("goes on reconciling after a watch start panics, and starts that watch again after 5 s", func() {
+		fw.panicOnce("configmaps", "mon-cm")
+		start()
+		fw.set("clusters", "pg", cluster(clusterOpts{
+			plugins:    []any{pluginEntry(map[string]any{}, nil)},
+			monitoring: map[string]any{"customQueriesConfigMap": []any{map[string]any{"name": "mon-cm", "key": "q.yaml"}}},
+		}))
+
+		watching("clusters/pg", "telemetryexporters/default")
+		Eventually(clk.HasWaiters).Should(BeTrue())
+		Expect(logs.String()).To(ContainSubstring("recovered from a panic"))
+		clk.Step(5 * time.Second)
+		watching("clusters/pg", "telemetryexporters/default", "configmaps/mon-cm")
+	})
+
+	It("keeps handling events after a handler panics", func() {
+		var (
+			mu    sync.Mutex // guards lines
+			lines []string
+			once  sync.Once
+		)
+		logger := funcr.New(func(_, args string) {
+			if strings.Contains(args, "watch failed") {
+				once.Do(func() { panic("log broke") })
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			lines = append(lines, args)
+		}, funcr.Options{})
+		ctx = logr.NewContext(ctx, logger)
+		start()
+
+		fw.fail("clusters", "pg", errors.New("first failure"))
+		Eventually(func() int {
+			mu.Lock()
+			defer mu.Unlock()
+			n := 0
+			for _, l := range lines {
+				if strings.Contains(l, "recovered from a panic") {
+					n++
+				}
+			}
+			return n
+		}).Should(Equal(1))
+
+		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+		fw.set("telemetryexporters", "default", exporter(nil))
+		Eventually(func() error { _, _, err := src.Settings(); return err }).Should(Succeed())
+	})
+
 	Describe("ReadFile", func() {
 		BeforeEach(func() {
 			start()

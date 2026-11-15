@@ -5,6 +5,7 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
+	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 	"k8s.io/utils/clock"
@@ -23,6 +25,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
 	"github.com/gabrosys/plugin-telemetry/internal/preflight"
+	"github.com/gabrosys/plugin-telemetry/internal/safe"
 	"github.com/gabrosys/plugin-telemetry/internal/version"
 )
 
@@ -158,13 +161,26 @@ func runEngine(ctx context.Context, cfg engine.Config, background func(context.C
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return background(gctx) })
-	g.Go(func() error { return engine.Run(gctx, opts) })
+	g.Go(guard(logger.GetLogger(), "the Kubernetes source", func() error { return background(gctx) }))
+	g.Go(guard(logger.GetLogger(), "the engine", func() error { return engine.Run(gctx, opts) }))
 	if err := g.Wait(); err != nil {
 		return fmt.Errorf("run the sidecar: %w", err)
 	}
 
 	return nil
+}
+
+// errPanicked is what guard returns for a function that panicked.
+var errPanicked = errors.New("panicked")
+
+// guard returns fn as an errgroup function that turns a panic into an error: errgroup doesn't recover.
+func guard(logger logr.Logger, what string, fn func() error) func() error {
+	return func() (err error) {
+		if safe.Call(logger, what, func() { err = fn() }) {
+			return fmt.Errorf("%s: %w", what, errPanicked)
+		}
+		return err
+	}
 }
 
 // newRand returns a generator seeded from crypto/rand.

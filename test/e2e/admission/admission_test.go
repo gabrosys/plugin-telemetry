@@ -234,7 +234,7 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 
 		Expect(c.Create(ctx, framework.NewCluster(ns, clusterName, env.PostgresImage))).To(Succeed())
 
-		grant(ctx, c, cfg, "", grantName, pluginSubject, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: identities, Verbs: writeVerbs})
+		grant(ctx, c, cfg, ns, grantName, pluginSubject, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: identities, Verbs: writeVerbs})
 
 		plugin, err = framework.Impersonate(cfg, pluginUser)
 		Expect(err).NotTo(HaveOccurred())
@@ -619,7 +619,7 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 
 	It("denies a Role with * verbs", func(ctx SpecContext) {
 		// RBAC refuses a * verb before admission unless the plugin may escalate.
-		grant(ctx, c, cfg, "", escalateGrantName, pluginSubject, rbacv1.PolicyRule{
+		grant(ctx, c, cfg, ns, escalateGrantName, pluginSubject, rbacv1.PolicyRule{
 			APIGroups: []string{rbacv1.GroupName}, Resources: []string{"roles"}, Verbs: []string{"escalate"},
 		})
 		role := &rbacv1.Role{ObjectMeta: meta(chainName), Rules: []rbacv1.PolicyRule{{

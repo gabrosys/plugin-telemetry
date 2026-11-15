@@ -29,6 +29,7 @@ data:
       file:
         path: /data/metrics.jsonl
         format: json
+        append: true
       debug:
         verbosity: basic
 

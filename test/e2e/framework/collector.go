@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,7 +25,6 @@ const (
 	collectorNamespace  = "telemetry-e2e"
 	collectorName       = "collector"
 	collectorReader     = "reader"
-	collectorContainer  = "collector"
 	collectorFile       = "/data/metrics.jsonl"
 	collectorReadyPoll  = 2 * time.Second
 	collectorReadyLimit = 3 * time.Minute
@@ -54,25 +54,28 @@ func CollectorReady(ctx context.Context, c client.Client) error {
 	return nil
 }
 
-// CollectorReader reads the file the collector's file exporter writes. Rotation is off, so each Pod has one file
-// and every line is read once.
+// CollectorReader reads the file the collector's file exporter writes. Rotation is off and the exporter appends,
+// so each Pod has one file that only grows and every line is read once.
 type CollectorReader struct {
 	cfg *rest.Config
 
-	mu      sync.Mutex // guards offsets and lines
-	offsets map[collectorRun]int
+	mu      sync.Mutex // guards cs, offsets and lines
+	cs      kubernetes.Interface
+	offsets map[types.UID]int
 	lines   []otlp.Line
-}
 
-// collectorRun names one run of a collector Pod: the exporter truncates its file when the container restarts.
-type collectorRun struct {
-	uid      types.UID
-	restarts int32
+	// pods lists the collector Pods and read returns a Pod's file from a byte offset; tests replace them.
+	pods func(ctx context.Context) ([]corev1.Pod, error)
+	read func(ctx context.Context, pod *corev1.Pod, offset int) (string, error)
 }
 
 // NewCollectorReader returns a reader of the collector Pods' files.
 func NewCollectorReader(cfg *rest.Config) *CollectorReader {
-	return &CollectorReader{cfg: cfg, offsets: map[collectorRun]int{}}
+	r := &CollectorReader{cfg: cfg, offsets: map[types.UID]int{}}
+	r.pods = r.listPods
+	r.read = r.tail
+
+	return r
 }
 
 // Since reads what each running collector Pod wrote since the last call and returns every line read so far whose
@@ -81,27 +84,29 @@ func (r *CollectorReader) Since(ctx context.Context, since time.Time) ([]otlp.Li
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	cs, err := kubernetes.NewForConfig(r.cfg)
+	pods, err := r.pods(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("create clientset: %w", err)
-	}
-	pods, err := cs.CoreV1().Pods(collectorNamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/name=" + collectorName,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list collector pods: %w", err)
+		return nil, err
 	}
 
 	running := 0
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+	for i := range pods {
+		pod := &pods[i]
+		if pod.Status.Phase != corev1.PodRunning {
 			continue
 		}
 		running++
-		if err := r.read(ctx, pod); err != nil {
+
+		out, err := r.read(ctx, pod, r.offsets[pod.UID])
+		if err != nil {
 			return nil, err
 		}
+		lines, consumed, err := otlp.Decode([]byte(out))
+		if err != nil {
+			return nil, fmt.Errorf("decode the collector file of %s: %w", pod.Name, err)
+		}
+		r.offsets[pod.UID] += consumed
+		r.lines = append(r.lines, lines...)
 	}
 	if running == 0 {
 		return nil, fmt.Errorf("%w in %s", ErrNoCollectorPod, collectorNamespace)
@@ -110,26 +115,41 @@ func (r *CollectorReader) Since(ctx context.Context, since time.Time) ([]otlp.Li
 	return otlp.Since(r.lines, since), nil
 }
 
-// read appends the lines the collector in pod wrote past the offset of its run.
-func (r *CollectorReader) read(ctx context.Context, pod *corev1.Pod) error {
-	run := collectorRun{uid: pod.UID}
-	for _, st := range pod.Status.ContainerStatuses {
-		if st.Name == collectorContainer {
-			run.restarts = st.RestartCount
+// clientset returns the clientset, built on first use; the caller holds r.mu.
+func (r *CollectorReader) clientset() (kubernetes.Interface, error) {
+	if r.cs == nil {
+		cs, err := kubernetes.NewForConfig(r.cfg)
+		if err != nil {
+			return nil, fmt.Errorf("create clientset: %w", err)
 		}
+		r.cs = cs
 	}
 
+	return r.cs, nil
+}
+
+func (r *CollectorReader) listPods(ctx context.Context) ([]corev1.Pod, error) {
+	cs, err := r.clientset()
+	if err != nil {
+		return nil, err
+	}
+	pods, err := cs.CoreV1().Pods(collectorNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/name=" + collectorName,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list collector pods: %w", err)
+	}
+
+	return pods.Items, nil
+}
+
+// tail returns the collector file of pod from byte offset.
+func (r *CollectorReader) tail(ctx context.Context, pod *corev1.Pod, offset int) (string, error) {
 	name := types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}
-	out, _, err := Exec(ctx, r.cfg, name, collectorReader, []string{"tail", "-c", "+" + strconv.Itoa(r.offsets[run]+1), collectorFile})
+	out, stderr, err := Exec(ctx, r.cfg, name, collectorReader, []string{"tail", "-c", "+" + strconv.Itoa(offset+1), collectorFile})
 	if err != nil {
-		return fmt.Errorf("read the collector file of %s: %w", name, err)
+		return "", fmt.Errorf("read the collector file of %s: %w: %s", name, err, strings.TrimSpace(stderr))
 	}
-	lines, consumed, err := otlp.Decode([]byte(out))
-	if err != nil {
-		return fmt.Errorf("decode the collector file of %s: %w", name, err)
-	}
-	r.offsets[run] += consumed
-	r.lines = append(r.lines, lines...)
 
-	return nil
+	return out, nil
 }

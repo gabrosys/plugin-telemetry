@@ -34,11 +34,12 @@ summary() {
 
 wait_reachable() {
 	local deadline=$((SECONDS + 30))
-	"$KIND" export kubeconfig --name "$KIND_CLUSTER" >/dev/null 2>&1 &&
+	if "$KIND" export kubeconfig --name "$KIND_CLUSTER" >/dev/null 2>&1; then
 		until kctl get --raw=/readyz >/dev/null 2>&1; do
 			((SECONDS < deadline)) || break
 			sleep 2
 		done
+	fi
 	kctl wait --for=condition=Ready node --all --timeout=120s >/dev/null 2>&1 ||
 		fail "cluster $KIND_CLUSTER is not reachable; run 'make dev-down' first"
 }
@@ -48,7 +49,9 @@ up() {
 	[[ $CNPG_VERSION =~ ^(main|v[0-9]+\.[0-9]+\.[0-9]+)$ ]] ||
 		usage "CNPG_VERSION must be main or vX.Y.Z, got '$CNPG_VERSION'"
 
-	if ! "$KIND" get clusters | grep -qx "$KIND_CLUSTER"; then
+	local clusters
+	clusters=$("$KIND" get clusters)
+	if ! grep -qx "$KIND_CLUSTER" <<<"$clusters"; then
 		"$KIND" create cluster --name "$KIND_CLUSTER" --image "$KIND_NODE_IMAGE" --wait 120s
 	fi
 	wait_reachable

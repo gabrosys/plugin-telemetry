@@ -38,6 +38,7 @@ E2E_TARGETS := $(addprefix e2e-,$(KIND_E2E_SUITES))
 # Ginkgo --timeout of a suite: E2E_TIMEOUT_<suite> when set, else 30m. E2E_PROCS_<suite> sets --procs (default 1).
 E2E_TIMEOUT_plugin := 50m
 E2E_TIMEOUT_engine := 20m
+E2E_PROCS_plugin := 3
 # Regex for ginkgo --focus; empty runs every spec.
 E2E_FOCUS ?=
 override E2E_FOCUS := $(value E2E_FOCUS)

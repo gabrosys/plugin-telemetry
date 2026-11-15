@@ -118,7 +118,6 @@ func itParity(target func() parityTarget) {
 		report := p.Markdown(fmt.Sprintf("Parity: CNPG %s, %s mode, primary %s", t.env.CNPGVersion, t.mode, primary))
 		path, err := writeReport(fmt.Sprintf("parity-%s-%s.md", t.env.CNPGVersion, t.mode), report)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(appendStepSummary(os.Getenv("GITHUB_STEP_SUMMARY"), report)).To(Succeed())
 		AddReportEntry("parity report", path)
 	}, SpecTimeout(parityAlignTimeout+2*time.Minute))
 }
@@ -167,25 +166,6 @@ func writeReport(name, report string) (string, error) {
 	}
 
 	return filepath.Join(dir, rel), nil
-}
-
-// appendStepSummary appends report to the file at path, creating it; an empty path does nothing.
-func appendStepSummary(path, report string) error {
-	if path == "" {
-		return nil
-	}
-	f, err := os.OpenFile(filepath.Clean(path), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // the runner names this file
-	if err != nil {
-		return fmt.Errorf("open the step summary: %w", err)
-	}
-	if _, err := f.WriteString(report + "\n"); err != nil {
-		return errors.Join(fmt.Errorf("append to the step summary: %w", err), f.Close())
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close the step summary: %w", err)
-	}
-
-	return nil
 }
 
 // repoRoot returns the closest directory above the working directory that holds go.mod.

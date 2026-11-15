@@ -99,12 +99,9 @@ func (e *Executor) Run(ctx context.Context, job planner.Job) (res Result) {
 		res.Duration = e.clk.Since(res.Started)
 	}()
 
-	ctx, cancel := context.WithTimeout(ctx, e.limits.QueryTimeout+deadlineGrace)
-	defer cancel()
-
-	if err := e.run(ctx, job, &res); err != nil {
+	if pastDeadline, err := e.run(ctx, job, &res); err != nil {
 		res.Outcome = Classify(err)
-		if res.Outcome != selfmetrics.OutcomeTimeout && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if res.Outcome != selfmetrics.OutcomeTimeout && pastDeadline {
 			res.Outcome = selfmetrics.OutcomeTimeout
 		}
 		res.Err = err
@@ -114,21 +111,25 @@ func (e *Executor) Run(ctx context.Context, job planner.Job) (res Result) {
 	return res
 }
 
-func (e *Executor) run(ctx context.Context, job planner.Job, res *Result) error {
+// run waits for a pool slot under ctx, then runs the job under a deadline that starts at the slot.
+// pastDeadline reports that this deadline had passed when run returned.
+func (e *Executor) run(ctx context.Context, job planner.Job, res *Result) (pastDeadline bool, err error) {
 	conn, release, err := e.pool.Acquire(ctx, job.Database)
 	if err != nil {
-		// Waiting for a slot past the run's deadline, or a closed pool, loses no connection.
-		res.ConnectionLost = ctx.Err() == nil && !errors.Is(err, pg.ErrPoolClosed)
-		return fmt.Errorf("acquire connection to %s: %w", job.Database, err)
+		// A cancelled wait, the backoff after a failed connect and a closed pool lose no connection.
+		res.ConnectionLost = ctx.Err() == nil && !errors.Is(err, pg.ErrBackoff) && !errors.Is(err, pg.ErrPoolClosed)
+		return false, fmt.Errorf("acquire connection to %s: %w", job.Database, err)
 	}
+	rctx, cancel := context.WithTimeout(ctx, e.limits.QueryTimeout+deadlineGrace)
+	defer cancel()
 	// A panic leaves broken true and ConnectionLost false.
 	broken := true
 	defer func() { release(broken) }()
 
-	discard, err := e.inTransaction(ctx, conn, job, res)
-	res.ConnectionLost = conn.IsClosed() || (err != nil && connectionFailed(ctx, conn, err))
+	discard, err := e.inTransaction(rctx, conn, job, res)
+	res.ConnectionLost = conn.IsClosed() || (err != nil && connectionFailed(rctx, conn, err))
 	broken = discard || res.ConnectionLost
-	return err
+	return errors.Is(rctx.Err(), context.DeadlineExceeded), err
 }
 
 // inTransaction runs the predicate and the query in one read-only transaction and commits it.

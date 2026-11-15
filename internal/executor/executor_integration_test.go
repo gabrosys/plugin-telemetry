@@ -379,6 +379,22 @@ var _ = Describe("Executor", func() {
 		Expect(ok.Err).NotTo(HaveOccurred())
 	})
 
+	It("starts a run's deadline once it has a pool slot", func(ctx SpecContext) {
+		l.QueryTimeout = 500 * time.Millisecond
+		cfg := server.MonitorConfig(GinkgoT().TempDir())
+		cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout
+		one := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()))
+		DeferCleanup(one.Close)
+
+		_, release, err := one.Acquire(ctx, "postgres")
+		Expect(err).NotTo(HaveOccurred())
+		held := time.AfterFunc(3*time.Second, func() { release(false) })
+		DeferCleanup(held.Stop)
+
+		res := newExecutor(one, l).Run(ctx, jobFor("SELECT 'a' AS datname, 1 AS value"))
+		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeOK), "error: %v", res.Err)
+	})
+
 	It("hands a broken connection back so the pool replaces it", func(ctx SpecContext) {
 		pid := jobFor("SELECT 'a' AS datname, pg_backend_pid() AS value")
 		first := exec.Run(ctx, pid)
@@ -430,7 +446,7 @@ var _ = Describe("Result.ConnectionLost", func() {
 		Expect(dead.ConnectionLost).To(BeTrue())
 	})
 
-	It("is set when no connection can be made, and during the backoff", func(ctx SpecContext) {
+	It("is set when no connection can be made, and not during the backoff that follows", func(ctx SpecContext) {
 		cfg := server.MonitorConfig(GinkgoT().TempDir())
 		Expect(os.WriteFile(cfg.PasswordFile, []byte("wrong\n"), 0o600)).To(Succeed())
 		cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout
@@ -447,7 +463,22 @@ var _ = Describe("Result.ConnectionLost", func() {
 		Expect(res.Err).To(MatchError(pg.ErrBackoff))
 		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeError))
 		Expect(res.Err.Error()).NotTo(ContainSubstring("wrong"))
+		Expect(res.ConnectionLost).To(BeFalse())
+	})
+
+	It("is set for the first refusal of a database that doesn't exist, not for the backoff after it", func(ctx SpecContext) {
+		job := jobFor("SELECT 'a' AS datname, 1 AS value")
+		job.Database = "nosuchdb"
+
+		res := exec.Run(ctx, job)
+		var pgErr *pgconn.PgError
+		Expect(errors.As(res.Err, &pgErr)).To(BeTrue(), "error: %v", res.Err)
+		Expect(pgErr.Code).To(Equal("3D000"))
 		Expect(res.ConnectionLost).To(BeTrue())
+
+		res = exec.Run(ctx, job)
+		Expect(res.Err).To(MatchError(pg.ErrBackoff))
+		Expect(res.ConnectionLost).To(BeFalse())
 	})
 
 	It("is not set for a column mismatch", func(ctx SpecContext) {

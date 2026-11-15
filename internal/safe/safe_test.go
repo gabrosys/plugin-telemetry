@@ -51,6 +51,32 @@ var _ = Describe("safe", func() {
 		Expect(logged()).To(BeEmpty())
 	})
 
+	It("Call logs a repeated panic of a site once, and again after the site returns normally", func() {
+		boom := func() { panic("repeat") }
+		Expect(safe.Call(logger, "site repeat", boom)).To(BeTrue())
+		Expect(safe.Call(logger, "site repeat", boom)).To(BeTrue())
+		Expect(logged()).To(HaveLen(1))
+
+		Expect(safe.Call(logger, "site repeat", func() {})).To(BeFalse())
+		Expect(safe.Call(logger, "site repeat", boom)).To(BeTrue())
+		Expect(logged()).To(HaveLen(2))
+	})
+
+	It("Call logs a panic of a site again when its text changes", func() {
+		Expect(safe.Call(logger, "site text", func() { panic("one") })).To(BeTrue())
+		Expect(safe.Call(logger, "site text", func() { panic("two") })).To(BeTrue())
+		Expect(logged()).To(HaveLen(2))
+	})
+
+	It("Call keeps the state of each site apart", func() {
+		boom := func() { panic("apart") }
+		Expect(safe.Call(logger, "site a", boom)).To(BeTrue())
+		Expect(safe.Call(logger, "site b", boom)).To(BeTrue())
+		Expect(safe.Call(logger, "site a", func() {})).To(BeFalse())
+		Expect(safe.Call(logger, "site b", boom)).To(BeTrue())
+		Expect(logged()).To(HaveLen(2))
+	})
+
 	It("Go recovers on its goroutine", func() {
 		safe.Go(logger, "the goroutine", func() { panic("boom") })
 

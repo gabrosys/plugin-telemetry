@@ -29,10 +29,12 @@ type fakeWatcher struct {
 	mu       sync.Mutex
 	handlers map[string]*fakeWatch
 	panics   map[string]bool // the watches whose next start panics
+	starts   map[string]int  // how often each watch was started
+	stops    map[string]bool // the watches whose stop panics
 }
 
 func newFakeWatcher() *fakeWatcher {
-	return &fakeWatcher{handlers: map[string]*fakeWatch{}, panics: map[string]bool{}}
+	return &fakeWatcher{handlers: map[string]*fakeWatch{}, panics: map[string]bool{}, starts: map[string]int{}, stops: map[string]bool{}}
 }
 
 func watchKey(resource, name string) string { return resource + "/" + name }
@@ -48,6 +50,7 @@ func (f *fakeWatcher) watch(
 		delete(f.panics, k)
 		panic("watch start broke")
 	}
+	f.starts[k]++
 	fw := &fakeWatch{h: h}
 	f.handlers[k] = fw
 	return func() {
@@ -55,6 +58,9 @@ func (f *fakeWatcher) watch(
 		defer f.mu.Unlock()
 		if f.handlers[k] == fw {
 			delete(f.handlers, k)
+		}
+		if f.stops[k] {
+			panic("watch stop broke")
 		}
 	}
 }
@@ -64,6 +70,20 @@ func (f *fakeWatcher) panicOnce(resource, name string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.panics[watchKey(resource, name)] = true
+}
+
+// panicOnStop makes the stop of the watch on resource/name panic.
+func (f *fakeWatcher) panicOnStop(resource, name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stops[watchKey(resource, name)] = true
+}
+
+// started returns how often the watch on resource/name was started.
+func (f *fakeWatcher) started(resource, name string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.starts[watchKey(resource, name)]
 }
 
 // active returns the watched objects as "<resource>/<name>".

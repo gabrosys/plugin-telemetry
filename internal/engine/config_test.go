@@ -701,6 +701,38 @@ var _ = Describe("An engine on an in-memory Config", func() {
 		Eventually(func() int { return h.logged(`"msg"="configuration applied"`) }).Should(Equal(1))
 	})
 
+	It("runs the next facts round after factsWait(1) when a round panics, and keeps handling events", func() {
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) },
+			func(_ context.Context, round int) (planner.Facts, error) {
+				if round == 0 {
+					panic("gather broke")
+				}
+				return memPrimary, nil
+			})
+		h.advance(func() bool { return h.logged("recovered from a panic") == 1 })
+		h.advance(func() bool { return len(h.roundTimes()) >= 2 })
+		rounds := h.roundTimes()
+		wait := engine.FactsWait(1, 30*time.Second)
+		Expect(rounds[1].Sub(rounds[0])).To(And(BeNumerically(">=", wait), BeNumerically("<", wait+200*time.Millisecond)))
+		h.advance(h.has("cnpg_collector_up", map[string]string{"cluster": "mem"}, 1))
+
+		n := h.cfg.settingsCalls()
+		h.reload()
+		Expect(h.cfg.settingsCalls()).To(BeNumerically(">", n))
+	})
+
+	It("sets cnpg_collector_up to 0 when a facts round panics", func() {
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) },
+			func(_ context.Context, round int) (planner.Facts, error) {
+				if round > 0 {
+					panic("gather broke")
+				}
+				return memPrimary, nil
+			})
+		h.advance(h.has("cnpg_collector_up", map[string]string{"cluster": "mem"}, 1))
+		h.advance(h.has("cnpg_collector_up", map[string]string{"cluster": "mem"}, 0))
+	})
+
 	It("restarts a Watch that panics after 5 s", func() {
 		h := run(func(url string) *memConfig {
 			c := newMemConfig(httpSettings(url), httpFiles())

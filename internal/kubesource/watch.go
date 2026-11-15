@@ -23,8 +23,9 @@ import (
 type watcher func(ctx context.Context, gvr schema.GroupVersionResource, namespace, name string, h handler) (stop func())
 
 type handler struct {
-	set  func(obj *unstructured.Unstructured) // after sync: the object, or nil when it doesn't exist
-	fail func(err error)                      // a watch error; a 403 is reported as wrapping sources.ErrDenied
+	set     func(obj *unstructured.Unstructured) // after sync: the object, or nil when it doesn't exist
+	fail    func(err error)                      // a watch error; a 403 is reported as wrapping sources.ErrDenied
+	crashed func()                               // the informer died: the watch is gone
 }
 
 // dynamicWatcher runs one informer per object, listing and watching with a metadata.name field selector,
@@ -64,8 +65,8 @@ func dynamicWatcher(client dynamic.Interface) watcher {
 			if published && obj == last {
 				return
 			}
-			published, last = true, obj
 			h.set(obj)
+			published, last = true, obj
 		}
 		// The informer's listener goroutine crashes the process on a panic.
 		publish := func() { safe.Call(logger, "report of "+gvr.Resource+" "+name, report) }
@@ -91,7 +92,14 @@ func dynamicWatcher(client dynamic.Interface) watcher {
 			return func() {}
 		}
 
-		safe.Go(logger, "informer of "+gvr.Resource+" "+name, func() { informer.RunWithContext(ctx) })
+		// A panic here is not injectable in a spec: the informer's own goroutines run client-go code, and
+		// ours only starts it. The Source side is spec'd through handler.crashed.
+		go func() {
+			if safe.Call(logger, "informer of "+gvr.Resource+" "+name, func() { informer.RunWithContext(ctx) }) {
+				cancel()
+				h.crashed()
+			}
+		}()
 		safe.Go(logger, "first report of "+gvr.Resource+" "+name, func() {
 			if cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
 				publish()

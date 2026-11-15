@@ -210,7 +210,7 @@ var _ = Describe("Run bookkeeping", func() {
 				panics = append(panics, l)
 			}
 		}
-		Expect(panics).To(HaveLen(3))
+		Expect(panics).To(HaveLen(1), "the same panic of a run is logged once")
 		Expect(panics[0]).To(And(ContainSubstring("run of backends on app"), ContainSubstring(`"stack"=`), ContainSubstring("panic:")))
 	})
 })

@@ -15,7 +15,6 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/cloudnative-pg/machinery/pkg/log"
-	"github.com/go-logr/logr"
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -262,24 +261,12 @@ func (e *engine) run(ctx context.Context) {
 		case <-e.changed:
 			safe.Call(plain, "reload", func() { e.onChange(ctx) })
 		case <-timerC(e.factsTimer):
-			e.timedFactsRound(ctx, plain)
+			e.factsRound(ctx, true)
 		case <-e.early:
 			safe.Call(plain, "early facts request", func() { e.onEarlyFacts(ctx) })
 		case <-timerC(e.earlyTimer):
-			safe.Call(plain, "early facts round", func() { e.factsRound(ctx, false) })
+			e.factsRound(ctx, false)
 		}
-	}
-}
-
-// timedFactsRound runs the facts round the timer drove. A round that panics counts as a failed one, so
-// the timer is armed again.
-func (e *engine) timedFactsRound(ctx context.Context, logger logr.Logger) {
-	if !safe.Call(logger, "facts round", func() { e.factsRound(ctx, true) }) {
-		return
-	}
-	if cur := e.plan.current; cur != nil {
-		e.factsFailures++
-		e.setFactsTimer(factsWait(e.factsFailures, cur.settings.PlanInterval))
 	}
 }
 
@@ -620,10 +607,23 @@ func (e *engine) onEarlyFacts(ctx context.Context) {
 	e.earlyTimer = e.clk.NewTimer(wait)
 }
 
-// factsRound gathers the facts, sets upMetric, closes idle connections, replans when the facts changed
+// factsRound runs one facts round. A round that panics counts as a failed one: upMetric is 0 and, when
+// the timer drove it, the timer is armed again with the backoff.
+func (e *engine) factsRound(ctx context.Context, timed bool) {
+	if !safe.Call(log.FromContext(ctx).GetLogger(), "facts round", func() { e.gatherRound(ctx, timed) }) {
+		return
+	}
+	e.setUp(false)
+	if cur := e.plan.current; timed && cur != nil {
+		e.factsFailures++
+		e.setFactsTimer(factsWait(e.factsFailures, cur.settings.PlanInterval))
+	}
+}
+
+// gatherRound gathers the facts, sets upMetric, closes idle connections, replans when the facts changed
 // and schedules the next round: a planning cycle after a success, sooner with backoff after a failure
 // of a round the timer drove (timed). A failed early round leaves the timer as it is.
-func (e *engine) factsRound(ctx context.Context, timed bool) {
+func (e *engine) gatherRound(ctx context.Context, timed bool) {
 	stopTimer(&e.earlyTimer)
 	cur := e.plan.current
 	if cur == nil || e.runner == nil {

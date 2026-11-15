@@ -110,9 +110,12 @@ var _ = Describe("the dynamic watcher", func() {
 		}, func(err error) { failures <- err })
 		startWith("c")
 		Eventually(panicked).Should(BeClosed())
-		Consistently(events, "100ms").ShouldNot(Receive())
 
-		_, err := client.Resource(configMaps).Namespace("ns").Create(ctx, configMap("c", map[string]any{"k": "v"}), metaCreate())
+		_, err := client.Resource(configMaps).Namespace("ns").Create(ctx, configMap("other", map[string]any{"k": "v"}), metaCreate())
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(events).Should(Receive(BeNil()), "the report that panicked is made again")
+
+		_, err = client.Resource(configMaps).Namespace("ns").Create(ctx, configMap("c", map[string]any{"k": "v"}), metaCreate())
 		Expect(err).NotTo(HaveOccurred())
 		var got *unstructured.Unstructured
 		Eventually(events).Should(Receive(&got))

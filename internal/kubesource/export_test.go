@@ -35,7 +35,10 @@ func DynamicWatcher(client dynamic.Interface) Watcher { return dynamicWatcher(cl
 // WaitForToken blocks until the token file exists or ctx ends.
 func (s *Source) WaitForToken(ctx context.Context) bool { return s.waitForToken(ctx) }
 
+// Crashed reports that the watch's informer died.
+func (h handler) Crashed() { h.crashed() }
+
 // NewHandler returns a handler that calls set and fail.
 func NewHandler(set func(*unstructured.Unstructured), fail func(error)) Handler {
-	return handler{set: set, fail: fail}
+	return handler{set: set, fail: fail, crashed: func() {}}
 }

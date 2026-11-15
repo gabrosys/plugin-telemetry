@@ -274,6 +274,34 @@ var _ = Describe("Source", func() {
 		watching("clusters/pg", "telemetryexporters/default", "configmaps/mon-cm")
 	})
 
+	It("still starts the new watches when a stop panics", func() {
+		withCM := func(name string) *unstructured.Unstructured {
+			return cluster(clusterOpts{
+				plugins:    []any{pluginEntry(map[string]any{}, nil)},
+				monitoring: map[string]any{"customQueriesConfigMap": []any{map[string]any{"name": name, "key": "q.yaml"}}},
+			})
+		}
+		start()
+		fw.set("clusters", "pg", withCM("old-cm"))
+		watching("clusters/pg", "telemetryexporters/default", "configmaps/old-cm")
+
+		fw.panicOnStop("configmaps", "old-cm")
+		fw.set("clusters", "pg", withCM("new-cm"))
+		watching("clusters/pg", "telemetryexporters/default", "configmaps/new-cm")
+	})
+
+	It("starts a watch again after 5 s when its informer died", func() {
+		start()
+		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+		watching("clusters/pg", "telemetryexporters/default")
+		Expect(fw.started("telemetryexporters", "default")).To(Equal(1))
+
+		fw.handler("telemetryexporters", "default").Crashed()
+		Eventually(clk.HasWaiters).Should(BeTrue())
+		clk.Step(5 * time.Second)
+		Eventually(func() int { return fw.started("telemetryexporters", "default") }).Should(Equal(2))
+	})
+
 	It("keeps handling events after a handler panics", func() {
 		var (
 			mu    sync.Mutex // guards lines

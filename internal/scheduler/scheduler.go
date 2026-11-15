@@ -156,6 +156,7 @@ func (s *Scheduler) spawn(db string) {
 	w := &worker{wake: make(chan struct{}, 1)}
 	s.workers[db] = w
 	s.wg.Add(1)
+	// Not safe.Go: work wraps each run and skip, and a dead worker would stall its database.
 	go s.work(s.ctx, db, w)
 }
 

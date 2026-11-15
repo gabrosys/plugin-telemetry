@@ -231,7 +231,8 @@ func (s *Source) reconcile(ctx context.Context, w watcher) (retry bool) {
 	panicked := safe.Call(logger, "reconcile", func() {
 		stops, starts := s.diff(w)
 		for _, stop := range stops {
-			stop()
+			// One stop that panics must not leave the others, or the starts, undone.
+			safe.Call(logger, "stop of a watch", stop)
 		}
 		for k, e := range starts {
 			var stop func()
@@ -399,7 +400,23 @@ func (s *Source) handler(k key, e *entry) handler {
 		fail: func(err error) {
 			safe.Call(s.logger(), what, func() { s.fail(k, e, err) })
 		},
+		crashed: func() { s.crashed(k, e) },
 	}
+}
+
+// crashed forgets the watch whose informer died and asks for a reconcile startRetry later, which starts it again.
+func (s *Source) crashed(k key, e *entry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.entries[k] != e {
+		return
+	}
+	delete(s.entries, k)
+	retry := s.o.Clock.After(startRetry)
+	go func() {
+		<-retry
+		s.askReplan()
+	}()
 }
 
 func (s *Source) set(k key, e *entry, obj *unstructured.Unstructured) {

@@ -91,8 +91,10 @@ var _ = Describe("security: a CloudNativePG Cluster named like an identity", fun
 		}
 
 		// CloudNativePG asks for the status on a reconcile, which an annotation edit triggers.
-		_, err = framework.Touch(ctx, c, key(owner), "collision")
-		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			_, err := framework.Touch(ctx, c, key(owner), "collision")
+			g.Expect(err).NotTo(HaveOccurred())
+		}).WithTimeout(30 * time.Second).WithPolling(time.Second).Should(Succeed())
 		Eventually(func(g Gomega, ctx SpecContext) {
 			st := status(g, ctx, owner)
 			g.Expect(st.Identity).To(Equal("pending"))

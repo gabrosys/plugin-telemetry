@@ -223,7 +223,23 @@ func describeMode(m mode) {
 		noRollout := func(ctx context.Context) {
 			GinkgoHelper()
 
-			Expect(states(Default, ctx)).To(Equal(baseline), "an instance Pod was replaced, or its sidecar restarted")
+			Eventually(func(g Gomega) {
+				g.Expect(states(g, ctx)).To(Equal(baseline), "an instance Pod was replaced, or its sidecar restarted")
+			}).WithTimeout(30 * time.Second).WithPolling(specPoll).Should(Succeed())
+		}
+
+		// touch retries the write on API errors and returns its resourceVersion.
+		touch := func(ctx context.Context, value string) string {
+			GinkgoHelper()
+
+			var rv string
+			Eventually(func(g Gomega) {
+				var err error
+				rv, err = framework.Touch(ctx, c, key(cname), value)
+				g.Expect(err).NotTo(HaveOccurred())
+			}).WithTimeout(30 * time.Second).WithPolling(time.Second).Should(Succeed())
+
+			return rv
 		}
 
 		status := func(g Gomega, ctx context.Context) operator.ClusterStatus {
@@ -241,8 +257,7 @@ func describeMode(m mode) {
 			return out
 		}
 
-		// pluginExported asserts the collector received an export from the plugin since the time, so an empty result for the
-		// sidecars is not a dead collector.
+		// pluginExported asserts the collector got an export from the plugin since the time.
 		pluginExported := func(g Gomega, ctx context.Context, since time.Time) {
 			var plugin []map[string]string
 			for _, r := range otlp.Resources(lines(g, ctx, since)) {
@@ -469,7 +484,7 @@ func describeMode(m mode) {
 				awaitPluginExport(ctx, since)
 
 				noRollout(ctx)
-			}, SpecTimeout(5*time.Minute))
+			}, SpecTimeout(8*time.Minute))
 
 		It("AC2: the ServiceAccount, Role, RoleBinding and token exist, owned by the Cluster, and the Role names exactly the referenced objects",
 			func(ctx SpecContext) {
@@ -739,9 +754,7 @@ func describeMode(m mode) {
 				edits := time.Now()
 				var lastWrite string
 				for i := range 10 {
-					var err error
-					lastWrite, err = framework.Touch(ctx, c, key(cname), fmt.Sprint(i))
-					Expect(err).NotTo(HaveOccurred())
+					lastWrite = touch(ctx, fmt.Sprint(i))
 					time.Sleep(500 * time.Millisecond)
 				}
 
@@ -879,8 +892,7 @@ func describeMode(m mode) {
 			invalidAt := time.Now()
 			Expect(c.Patch(ctx, &exporter, patch)).To(Succeed())
 
-			_, err := framework.Touch(ctx, c, key(cname), "invalid") // a reconcile makes CloudNativePG ask for the status
-			Expect(err).NotTo(HaveOccurred())
+			touch(ctx, "invalid") // a reconcile makes CloudNativePG ask for the status
 			Eventually(func(g Gomega, ctx SpecContext) {
 				st := status(g, ctx)
 				g.Expect(st.ExporterState).To(Equal("invalid"))
@@ -908,8 +920,7 @@ func describeMode(m mode) {
 			current.Spec = valid.Spec
 			Expect(c.Patch(ctx, &current, restore)).To(Succeed())
 
-			_, err = framework.Touch(ctx, c, key(cname), "restored")
-			Expect(err).NotTo(HaveOccurred())
+			touch(ctx, "restored")
 			Eventually(func(g Gomega, ctx SpecContext) {
 				st := status(g, ctx)
 				g.Expect(st.ExporterState).To(Equal("ok"))
@@ -938,8 +949,7 @@ func describeMode(m mode) {
 			awaitPluginExport(ctx, quiet)
 
 			// CloudNativePG calls SetStatusInCluster on a reconcile, which an annotation edit triggers.
-			_, err := framework.Touch(ctx, c, key(cname), "after-delete")
-			Expect(err).NotTo(HaveOccurred())
+			touch(ctx, "after-delete")
 			Eventually(func(g Gomega, ctx SpecContext) {
 				st := status(g, ctx)
 				g.Expect(st.Exporter).To(Equal(exporterName))

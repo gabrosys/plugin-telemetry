@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io/fs"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -356,31 +357,45 @@ var _ = Describe("Source", func() {
 
 	Describe("Watch", func() {
 		It("notifies once watching, then once, debounced, after a burst of events", func() {
-			var notified atomic.Int32
+			var mu sync.Mutex // guards notified
+			var notified []time.Time
+			count := func() int {
+				mu.Lock()
+				defer mu.Unlock()
+				return len(notified)
+			}
 			done := make(chan error, 1)
 			start()
 			go func() {
-				done <- src.Watch(ctx, nil, func() { notified.Add(1) })
+				done <- src.Watch(ctx, nil, func() {
+					mu.Lock()
+					defer mu.Unlock()
+					notified = append(notified, clk.Now())
+				})
 			}()
-			Eventually(notified.Load).Should(BeEquivalentTo(1))
+			Eventually(count).Should(Equal(1))
 
+			burst := clk.Now()
 			fw.set("clusters", "pg", enabledCluster(map[string]any{}))
 			fw.set("telemetryexporters", "default", exporter(nil))
 			fw.set("clusters", "pg", enabledCluster(map[string]any{"sidecarCPU": "100m"}))
 			Eventually(clk.HasWaiters).Should(BeTrue())
-			// A wake still queued after the first one re-arms the timer; let Watch take it before stepping.
-			time.Sleep(100 * time.Millisecond)
-
-			clk.Step(999 * time.Millisecond)
-			Consistently(notified.Load, "100ms").Should(BeEquivalentTo(1))
-			clk.Step(time.Millisecond)
-			Eventually(notified.Load).Should(BeEquivalentTo(2))
-			Consistently(notified.Load, "100ms").Should(BeEquivalentTo(2))
+			// A wake Watch takes late re-arms the timer, so step until the notification.
+			Eventually(func() int {
+				clk.Step(100 * time.Millisecond)
+				return count()
+			}).Should(Equal(2))
+			Consistently(count, "100ms").Should(Equal(2))
+			mu.Lock()
+			Expect(notified[1].Sub(burst)).To(BeNumerically(">=", time.Second))
+			mu.Unlock()
 
 			fw.set("telemetryexporters", "default", exporter(nil))
 			Eventually(clk.HasWaiters).Should(BeTrue())
-			clk.Step(time.Second)
-			Eventually(notified.Load).Should(BeEquivalentTo(3))
+			clk.Step(999 * time.Millisecond)
+			Consistently(count, "100ms").Should(Equal(2))
+			clk.Step(time.Millisecond)
+			Eventually(count).Should(Equal(3))
 		})
 
 		It("returns nil when ctx ends", func() {

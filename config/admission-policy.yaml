@@ -82,6 +82,9 @@ spec:
     - name: readOnly
       expression: >-
         object.rules == null || object.rules.all(rule, rule.verbs.all(verb, verb in ['get', 'list', 'watch']))
+    - name: named
+      expression: >-
+        object.rules == null || object.rules.all(rule, rule.?resourceNames.orValue([]).size() > 0)
     - name: ownRole
       expression: object.roleRef.kind == 'Role' && object.roleRef.name == object.metadata.name
     - name: subjects
@@ -98,6 +101,9 @@ spec:
     - expression: variables.deleting || !variables.role || variables.readOnly
       reason: Forbidden
       message: a Role may grant only get, list and watch
+    - expression: variables.deleting || !variables.role || variables.named
+      reason: Forbidden
+      message: every rule of a Role must name the objects it covers (resourceNames)
     - expression: variables.deleting || !variables.binding || variables.ownRole
       reason: Forbidden
       message: a RoleBinding may refer only to the Role of its own name

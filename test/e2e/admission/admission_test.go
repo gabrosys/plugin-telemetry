@@ -55,6 +55,7 @@ const (
 	// Parts of the roles policy's messages, one per rule.
 	nameRule     = "named *.telemetry may be"
 	verbsRule    = "only get, list and watch"
+	namesRule    = "must name the objects"
 	roleRefRule  = "only to the Role of its own name"
 	subjectsRule = "only the ServiceAccount of its own name"
 
@@ -71,8 +72,13 @@ var (
 	pluginUser    = framework.ServiceAccountUser(pluginNS, pluginAccount)
 	pluginSubject = serviceAccountSubject(pluginNS, pluginAccount)
 
-	readConfigMaps = rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"get"}}
-	createSecrets  = rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"create"}}
+	readConfigMaps = rbacv1.PolicyRule{
+		APIGroups: []string{""}, Resources: []string{"configmaps"}, ResourceNames: []string{"adm-config"}, Verbs: []string{"get"},
+	}
+	createSecrets = rbacv1.PolicyRule{
+		APIGroups: []string{""}, Resources: []string{"secrets"}, ResourceNames: []string{"adm-config"}, Verbs: []string{"create"},
+	}
+	readAnyConfigMap = rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"get"}}
 )
 
 func tokenSecret(namespace, name, account string) *corev1.Secret {
@@ -485,6 +491,11 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 	It("denies a Role granting create on secrets, the first step to a token for any account", func(ctx SpecContext) {
 		role := &rbacv1.Role{ObjectMeta: meta(chainName), Rules: []rbacv1.PolicyRule{createSecrets, readConfigMaps}}
 		Expect(createRole(ctx, role, dryRun)).To(deniedBy(verbsRule))
+	})
+
+	It("denies a Role with a read rule that names no object", func(ctx SpecContext) {
+		role := &rbacv1.Role{ObjectMeta: meta(chainName), Rules: []rbacv1.PolicyRule{readConfigMaps, readAnyConfigMap}}
+		Expect(createRole(ctx, role, dryRun)).To(deniedBy(namesRule))
 	})
 
 	It("denies a Role not named *.telemetry", func(ctx SpecContext) {

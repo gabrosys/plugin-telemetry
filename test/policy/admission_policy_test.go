@@ -31,7 +31,7 @@ var _ = Describe("the admission policies", func() {
 				checked++
 			}
 		}
-		Expect(checked).To(Equal(7))
+		Expect(checked).To(Equal(8))
 	})
 })
 

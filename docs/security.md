@@ -53,7 +53,7 @@ The plugin runs as ServiceAccount `plugin-telemetry` in the namespace of the Clo
 
 The ClusterRole has no `serviceaccounts/token`, no `escalate`, no `bind` and no `update`. There is no Role or RoleBinding in `cnpg-system`. Write rights on Secrets, ServiceAccounts, Roles and RoleBindings reach every namespace, so the admission policies below narrow them.
 
-Each sidecar runs with its own ServiceAccount. Its only rights are the read rules of its Role above.
+Each sidecar runs with its own ServiceAccount. Its own rights are the read rules of its Role above. Its token also carries the groups `system:serviceaccounts`, `system:serviceaccounts:<namespace>` and `system:authenticated`, so every binding to those groups applies to the sidecar too.
 
 ## The admission policies
 
@@ -73,11 +73,12 @@ Two of them match a request only when the user is a ServiceAccount whose name is
 `plugin-telemetry-roles` covers Roles and RoleBindings (create, update, delete):
 
 - The name must end in `.telemetry`, on delete too.
-- A Role may grant only `get`, `list` and `watch`. A Role without rules passes.
+- A Role may grant only `get`, `list` and `watch`, and every rule must carry `resourceNames`, so a Role never grants a whole kind. A Role without rules passes.
 - A RoleBinding must refer to the Role of its own name, and bind exactly one subject: the ServiceAccount of its own name in its own namespace.
 - Messages:
   - `only Roles and RoleBindings named *.telemetry may be written or deleted`
   - `a Role may grant only get, list and watch`
+  - `every rule of a Role must name the objects it covers (resourceNames)`
   - `a RoleBinding may refer only to the Role of its own name`
   - `a RoleBinding may bind only the ServiceAccount of its own name, in its own namespace`
 
@@ -105,4 +106,7 @@ Never shown: header values, the password and key material. Header values from th
 
 - A compromised plugin process can read every ConfigMap and Secret in the cluster, because its ClusterRole has `get`, `list` and `watch` on both without a name limit (`config/rbac.yaml`). The policies limit what it may write, not what it may read.
 - The policies bind the plugin and `*.telemetry` accounts only. Any other user who may create ServiceAccounts or Roles can create a ServiceAccount named `<something>.telemetry`, and can give it other rights. The `*.telemetry` policies then limit that account on Secrets, ServiceAccounts, Roles and RoleBindings only. Such an account also stays in the way of a Cluster of that name.
+- A token Secret of type `kubernetes.io/service-account-token` does not expire, and it stays after the plugin that wrote it is gone. Tokens written before a fix, or by a compromised plugin, persist until someone deletes them.
+- A `*.telemetry` account inherits every right that is bound to the groups `system:serviceaccounts` or `system:serviceaccounts:<namespace>`. The roles policy limits the Roles the plugin writes, not these group bindings. A compromised plugin can create such an account in a namespace where the group holds rights and read its token.
+- A compromised plugin can write a token Secret for any existing `*.telemetry` account, including one that someone else bound to broader rights, and read the token. The identities policy checks the name of the account, not who owns it.
 - The CloudNativePG instance manager serves an API on `localhost:8010` without authentication (CloudNativePG v1.30.1 `pkg/management/url/url.go`). The Pod's containers share one network namespace, so the sidecar can call it. This is a CloudNativePG property the plugin does not change.

@@ -30,28 +30,27 @@ import (
 )
 
 const (
-	policyName           = "plugin-telemetry-identities"
-	rolesPolicy          = "plugin-telemetry-roles"
-	reservedPolicy       = "plugin-telemetry-reserved-names"
-	clusterName          = "adm"
-	exporterName         = "default"
-	pluginAccount        = "plugin-telemetry"
-	pluginNS             = "cnpg-system"
-	grantName            = "plugin-telemetry-admission-e2e"
-	tokenGrantName       = "plugin-telemetry-admission-token-e2e"
-	escalateGrantName    = "plugin-telemetry-admission-escalate-e2e"
-	subresourceGrantName = "plugin-telemetry-admission-subresource-e2e"
-	throwawayName        = "throwaway.telemetry"
-	telemetryName        = "adm.telemetry"
-	oldTelemetryName     = "adm-telemetry"
-	telemetryToken       = "adm.telemetry-token"
-	otherToken           = "other-token"
-	dashedName           = "probe-telemetry"
-	probeName            = "probe.telemetry"
-	chainName            = "chain.telemetry"
-	clusterRoleName      = "admission-e2e.telemetry"
-	legacyName           = "legacy.telemetry"
-	timeout              = 2 * time.Minute
+	policyName        = "plugin-telemetry-identities"
+	rolesPolicy       = "plugin-telemetry-roles"
+	reservedPolicy    = "plugin-telemetry-reserved-names"
+	clusterName       = "adm"
+	exporterName      = "default"
+	pluginAccount     = "plugin-telemetry"
+	pluginNS          = "cnpg-system"
+	grantName         = "plugin-telemetry-admission-e2e"
+	tokenGrantName    = "plugin-telemetry-admission-token-e2e"
+	escalateGrantName = "plugin-telemetry-admission-escalate-e2e"
+	throwawayName     = "throwaway.telemetry"
+	telemetryName     = "adm.telemetry"
+	oldTelemetryName  = "adm-telemetry"
+	telemetryToken    = "adm.telemetry-token"
+	otherToken        = "other-token"
+	dashedName        = "probe-telemetry"
+	probeName         = "probe.telemetry"
+	chainName         = "chain.telemetry"
+	clusterRoleName   = "admission-e2e.telemetry"
+	legacyName        = "legacy.telemetry"
+	timeout           = 2 * time.Minute
 
 	// Parts of the roles policy's messages, one per rule.
 	nameRule     = "named *.telemetry may be"
@@ -463,6 +462,14 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		}).WithContext(ctx).WithTimeout(timeout).WithPolling(time.Second)
 	}
 
+	// grantEscalate lets the plugin create Roles with rules it doesn't hold, until the current node ends.
+	grantEscalate := func(ctx SpecContext) {
+		GinkgoHelper()
+		grant(ctx, c, cfg, ns, escalateGrantName, pluginSubject, rbacv1.PolicyRule{
+			APIGroups: []string{rbacv1.GroupName}, Resources: []string{"roles"}, Verbs: []string{"escalate"},
+		})
+	}
+
 	baseRefs := clusterconfig.Refs{Cluster: clusterName, Exporter: exporterName}
 
 	It("allows the identity's Role and RoleBinding for adm, applied as the plugin applies them", func(ctx SpecContext) {
@@ -502,9 +509,7 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 
 	It("denies a Role with get on a subresource, which can be as strong as a write", func(ctx SpecContext) {
 		// RBAC refuses a rule the plugin doesn't hold before admission, unless the plugin may escalate.
-		grant(ctx, c, cfg, ns, subresourceGrantName, pluginSubject, rbacv1.PolicyRule{
-			APIGroups: []string{rbacv1.GroupName}, Resources: []string{"roles"}, Verbs: []string{"escalate"},
-		})
+		grantEscalate(ctx)
 		for _, resource := range []string{"pods/exec", "nodes/proxy", "*"} {
 			role := &rbacv1.Role{ObjectMeta: meta(chainName), Rules: []rbacv1.PolicyRule{{
 				APIGroups: []string{""}, Resources: []string{resource}, ResourceNames: []string{"adm-1"}, Verbs: []string{"get"},
@@ -619,9 +624,7 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 
 	It("denies a Role with * verbs", func(ctx SpecContext) {
 		// RBAC refuses a * verb before admission unless the plugin may escalate.
-		grant(ctx, c, cfg, ns, escalateGrantName, pluginSubject, rbacv1.PolicyRule{
-			APIGroups: []string{rbacv1.GroupName}, Resources: []string{"roles"}, Verbs: []string{"escalate"},
-		})
+		grantEscalate(ctx)
 		role := &rbacv1.Role{ObjectMeta: meta(chainName), Rules: []rbacv1.PolicyRule{{
 			APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"*"},
 		}}}

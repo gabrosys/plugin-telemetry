@@ -42,7 +42,7 @@ Other facts:
 
 ## The plugin's rights
 
-The plugin runs as ServiceAccount `plugin-telemetry` in the namespace of the CloudNativePG operator, `cnpg-system` by default: CloudNativePG finds plugins only there (`config/service.yaml`). It is bound to one ClusterRole (`config/rbac.yaml`):
+The plugin runs as ServiceAccount `plugin-telemetry` in the namespace of the CloudNativePG operator, `cnpg-system` by default: CloudNativePG finds plugins only there (CloudNativePG v1.30.1 `internal/controller/plugin_predicates.go` `isPluginService`). It is bound to one ClusterRole (`config/rbac.yaml`):
 
 | API group | Resources | Verbs |
 |---|---|---|
@@ -61,9 +61,9 @@ Each sidecar runs with its own ServiceAccount. Its own rights are the read rules
 
 `config/admission-policy.yaml` defines three ValidatingAdmissionPolicies (ValidatingAdmissionPolicy v1), each with a binding that denies. All three have `failurePolicy: Fail` and bind every namespace. They ship in the default manifest (`config/kustomization.yaml`) and need Kubernetes 1.34 or later, the project's floor. Where they are not installed or not enforced, the ClusterRole table above is the only limit on the plugin.
 
-On a first install, the default render lists the policies and their bindings after the Deployment, so the API server may not enforce them yet when the plugin Pods start. The Pods wait for the cert-manager Secrets of `config/certificates.yaml`, which the render lists last, and the plugin then syncs its caches before it writes, so the gap is seconds. To close it, apply the policies first: `kubectl apply -f config/admission-policy.yaml`, then the rest.
+On a first install, the default render lists the policies and their bindings after the Deployment, so the API server may not enforce them yet when the plugin Pods start. The Pods wait for the cert-manager Secrets of `config/certificates.yaml`, which the render lists last, and the plugin then syncs its caches before it writes, so the gap is seconds. To close it, apply the policies first: `kubectl --context <context> apply -f config/admission-policy.yaml`, then the rest.
 
-Two of them match a request only when the user is a ServiceAccount whose name is `plugin-telemetry` or ends in `.telemetry`, in any namespace (`system:serviceaccount:*:plugin-telemetry` and `system:serviceaccount:*:*.telemetry`, match condition `plugin-or-identity-account`). No namespace is named, so the policies follow the plugin when CloudNativePG runs outside `cnpg-system`. They bind the plugin and the sidecar accounts, and no other user. A ServiceAccount named `plugin-telemetry` in another namespace is bound too.
+Two of them match a request only when the user is a ServiceAccount whose name is `plugin-telemetry` or ends in `.telemetry`, in any namespace (`system:serviceaccount:*:plugin-telemetry` and `system:serviceaccount:*:*.telemetry`, match condition `plugin-or-identity-account`). No namespace is named, so the policies follow the plugin when CloudNativePG runs outside `cnpg-system`. They bind the plugin, the sidecar accounts and any other ServiceAccount with one of these names, and no other user.
 
 `plugin-telemetry-identities` covers Secrets and ServiceAccounts (create, update, delete) and TokenRequest (create on `serviceaccounts/token`):
 

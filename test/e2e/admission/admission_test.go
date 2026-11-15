@@ -139,11 +139,13 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		plugin *kubernetes.Clientset
 		cfg    *rest.Config
 		ns     string
+		image  string
 	)
 
 	BeforeAll(func(ctx SpecContext) {
 		env, err := framework.LoadEnv(os.Getenv)
 		Expect(err).NotTo(HaveOccurred())
+		image = env.PostgresImage
 		c, cfg, err = framework.NewClients(env.KubeContext)
 		Expect(err).NotTo(HaveOccurred())
 
@@ -506,9 +508,10 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 
 	It("the API server rejects a Cluster and a Pooler whose spec.serviceAccountName ends in .telemetry, before admission", func(ctx SpecContext) {
 		rejected := SatisfyAll(Satisfy(apierrors.IsInvalid),
-			MatchError(ContainSubstring("spec.serviceAccountName")), Not(MatchError(ContainSubstring(reservedPolicy))))
+			MatchError(ContainSubstring("spec.serviceAccountName")), MatchError(ContainSubstring("should match")),
+			Not(MatchError(ContainSubstring(reservedPolicy))))
 
-		cluster := framework.NewCluster(ns, "adm-sa", "unused")
+		cluster := framework.NewCluster(ns, "adm-sa", image)
 		cluster.Spec.ServiceAccountName = telemetryName
 		Expect(c.Create(ctx, cluster, client.DryRunAll)).To(rejected)
 

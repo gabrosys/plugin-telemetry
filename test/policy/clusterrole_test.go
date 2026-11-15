@@ -23,18 +23,25 @@ type rule struct {
 }
 
 type manifest struct {
-	Kind     string `yaml:"kind"`
-	Metadata struct {
-		Name string `yaml:"name"`
+	Kind      string `yaml:"kind"`
+	Namespace string `yaml:"namespace"`
+	Metadata  struct {
+		Name      string `yaml:"name"`
+		Namespace string `yaml:"namespace"`
 	} `yaml:"metadata"`
+	ConfigMapGenerator []struct {
+		Name      string `yaml:"name"`
+		Namespace string `yaml:"namespace"`
+	} `yaml:"configMapGenerator"`
 	Rules   []rule `yaml:"rules"`
 	RoleRef struct {
 		Kind string `yaml:"kind"`
 		Name string `yaml:"name"`
 	} `yaml:"roleRef"`
 	Subjects []struct {
-		Kind string `yaml:"kind"`
-		Name string `yaml:"name"`
+		Kind      string `yaml:"kind"`
+		Name      string `yaml:"name"`
+		Namespace string `yaml:"namespace"`
 	} `yaml:"subjects"`
 }
 

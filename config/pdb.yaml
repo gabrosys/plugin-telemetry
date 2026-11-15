@@ -2,6 +2,7 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: plugin-telemetry
+  namespace: cnpg-system
 spec:
   minAvailable: 1
   selector:

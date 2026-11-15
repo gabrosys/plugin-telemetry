@@ -2,6 +2,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: plugin-telemetry
+  namespace: cnpg-system
   labels:
     cnpg.io/pluginName: telemetry.gabrosys.github.io
   annotations:

@@ -2,6 +2,7 @@ apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
   name: plugin-telemetry-selfsigned
+  namespace: cnpg-system
 spec:
   selfSigned: {}
 ---
@@ -9,6 +10,7 @@ apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: plugin-telemetry-server
+  namespace: cnpg-system
 spec:
   secretName: plugin-telemetry-server-tls
   dnsNames:
@@ -26,6 +28,7 @@ apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: plugin-telemetry-client
+  namespace: cnpg-system
 spec:
   secretName: plugin-telemetry-client-tls
   commonName: plugin-telemetry-client

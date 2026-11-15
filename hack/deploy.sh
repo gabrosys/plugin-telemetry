@@ -47,6 +47,7 @@ images:
     digest: $digest
 configMapGenerator:
   - name: telemetry-sidecar-image
+    namespace: cnpg-system
     behavior: replace
     literals:
       - image=$ref

@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: plugin-telemetry
+  namespace: cnpg-system
   labels:
     app.kubernetes.io/name: plugin-telemetry
 spec:

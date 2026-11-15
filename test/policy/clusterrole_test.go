@@ -1,9 +1,76 @@
 package policy_test
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.yaml.in/yaml/v4"
 )
+
+const rbacFile = "config/rbac.yaml"
+
+type rule struct {
+	APIGroups     []string `yaml:"apiGroups"`
+	Resources     []string `yaml:"resources"`
+	ResourceNames []string `yaml:"resourceNames"`
+	Verbs         []string `yaml:"verbs"`
+}
+
+type manifest struct {
+	Kind     string `yaml:"kind"`
+	Metadata struct {
+		Name string `yaml:"name"`
+	} `yaml:"metadata"`
+	Rules   []rule `yaml:"rules"`
+	RoleRef struct {
+		Kind string `yaml:"kind"`
+		Name string `yaml:"name"`
+	} `yaml:"roleRef"`
+	Subjects []struct {
+		Kind string `yaml:"kind"`
+		Name string `yaml:"name"`
+	} `yaml:"subjects"`
+}
+
+func readManifests(file string) ([]manifest, error) {
+	raw, err := fs.ReadFile(os.DirFS(repoRoot), file)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", file, err)
+	}
+
+	var out []manifest
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	for {
+		var m manifest
+		err := dec.Decode(&m)
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", file, err)
+		}
+		out = append(out, m)
+	}
+}
+
+func find(manifests []manifest, kind string) manifest {
+	GinkgoHelper()
+
+	for _, m := range manifests {
+		if m.Kind == kind {
+			return m
+		}
+	}
+	Fail("no " + kind)
+
+	return manifest{}
+}
 
 var _ = Describe("the plugin ClusterRole", func() {
 	var (

@@ -23,12 +23,14 @@ How the plugin writes them:
 - For the four identity kinds (ServiceAccount, Role, RoleBinding, Secret), the controller reads through a cache limited to objects that carry the `managed-by` label (`internal/operator/manager.go` `managerOptions`). Other Secrets are not cached, so a Secret without the label is invisible to it.
 - An object that the cache lacks is created with a plain create. If the API server says it already exists, the object is not the plugin's and is left alone (`internal/identity/ensure.go` `Ensurer.Ensure`).
 - An object that the cache holds and that differs from the wanted state is updated with a server-side apply pinned to the cached uid and resourceVersion. If the stored copy changed since the cache read, the apply fails with a conflict and nothing is overwritten (`Ensurer.Ensure`, `steps`).
-- A token Secret of any type other than `kubernetes.io/service-account-token` is never written or deleted (`Ensurer.Ensure`, `Ensurer.Remove`, `wrongType`).
+- A token Secret of any type other than `kubernetes.io/service-account-token` (an empty type too) is never written or deleted (`Ensurer.Ensure`, `Ensurer.Remove`, `wrongType`). A cached token Secret that names another account, or a cached RoleBinding that refers to another role, is never written either (`inTheWay`).
 
-An object that is "in the way" (already there but not in the cache, a wrong-typed token, or a changed stored copy) is not written. The controller logs `identity controller` with `outcome` set to `in the way` once, retries every 5 s, and logs `in the way cleared` once when a pass succeeds (`internal/operator/controller.go` `IdentityController.Reconcile`, `requeueInTheWay`). The Cluster status shows `identity: pending` with one line in `problems` for each reason (`internal/operator/status.go` `ClusterStatus`, `internal/identity/ensure.go` `Ensurer.Pending`):
+An object that is "in the way" (already there but not in the cache, a wrong-typed token, a token for another account, a RoleBinding that refers to another role, or a changed stored copy) is not written. The controller logs `identity controller` with `outcome` set to `in the way` once, retries every 5 s, and logs `in the way cleared` once when a pass succeeds (`internal/operator/controller.go` `IdentityController.Reconcile`, `requeueInTheWay`). The Cluster status shows `identity: pending` with one line in `problems` for each reason (`internal/operator/status.go` `ClusterStatus`, `internal/identity/ensure.go` `Ensurer.Pending`):
 
 - `<Kind>/<name> is not in the plugin's cache: not created yet, or not the plugin's`
 - `Secret/<name> has type <type>, not kubernetes.io/service-account-token: delete it`
+- `Secret/<name> names ServiceAccount "<account>", not "<cluster>.telemetry": delete it`
+- `RoleBinding/<name> refers to <kind>/<name>, not Role/<cluster>.telemetry: delete it`
 - `Secret/<name> has no data.token yet`
 
 Other facts:

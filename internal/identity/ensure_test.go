@@ -197,9 +197,6 @@ var _ = Describe("Ensurer", func() {
 		Entry("subject added", func(o *identity.Objects) {
 			o.RoleBinding.Subjects = append(o.RoleBinding.Subjects, rbacv1.Subject{Kind: "ServiceAccount", Name: "other", Namespace: identityNS})
 		}, bindName),
-		Entry("token annotation changed", func(o *identity.Objects) {
-			o.Token.Annotations[corev1.ServiceAccountNameKey] = "other"
-		}, secretRef),
 	)
 
 	It("applies nothing when someone adds another, non-controller owner reference", func() {
@@ -263,6 +260,40 @@ var _ = Describe("Ensurer", func() {
 		Expect(err).To(MatchError(identity.ErrInTheWay))
 		Expect(err).To(MatchError(ContainSubstring(secretRef)))
 		Expect(err).To(MatchError(ContainSubstring("Opaque")))
+		Expect(wrote).To(BeEmpty())
+		Expect(calls).To(BeEmpty())
+	})
+
+	It("writes nothing over a cached token Secret with no type and returns ErrInTheWay", func() {
+		build(cached(func(o *identity.Objects) { o.Token.Type = "" })...)
+
+		wrote, err := ensurer.Ensure(ctx, newCluster(), refs())
+		Expect(err).To(MatchError(identity.ErrInTheWay))
+		Expect(err).To(MatchError(ContainSubstring(secretRef)))
+		Expect(wrote).To(BeEmpty())
+		Expect(calls).To(BeEmpty())
+	})
+
+	It("writes nothing over a cached token Secret that names another account and returns ErrInTheWay", func() {
+		build(cached(func(o *identity.Objects) { o.Token.Annotations[corev1.ServiceAccountNameKey] = "default" })...)
+
+		wrote, err := ensurer.Ensure(ctx, newCluster(), refs())
+		Expect(err).To(MatchError(identity.ErrInTheWay))
+		Expect(err).To(MatchError(ContainSubstring(secretRef)))
+		Expect(err).To(MatchError(ContainSubstring(`"default"`)))
+		Expect(wrote).To(BeEmpty())
+		Expect(calls).To(BeEmpty())
+	})
+
+	It("writes nothing over a cached RoleBinding that refers to another role and returns ErrInTheWay", func() {
+		build(cached(func(o *identity.Objects) {
+			o.RoleBinding.RoleRef = rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "view"}
+		})...)
+
+		wrote, err := ensurer.Ensure(ctx, newCluster(), refs())
+		Expect(err).To(MatchError(identity.ErrInTheWay))
+		Expect(err).To(MatchError(ContainSubstring(bindName)))
+		Expect(err).To(MatchError(ContainSubstring("ClusterRole/view")))
 		Expect(wrote).To(BeEmpty())
 		Expect(calls).To(BeEmpty())
 	})
@@ -371,6 +402,15 @@ var _ = Describe("Ensurer", func() {
 			Expect(c.Get(ctx, client.ObjectKey{Namespace: identityNS, Name: tokenKey}, &corev1.Secret{})).To(Succeed())
 		})
 
+		It("skips a token Secret with no type", func() {
+			build(cached(func(o *identity.Objects) { o.Token.Type = "" })...)
+
+			n, err := ensurer.Remove(ctx, identityNS, "pg")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(3))
+			Expect(c.Get(ctx, client.ObjectKey{Namespace: identityNS, Name: tokenKey}, &corev1.Secret{})).To(Succeed())
+		})
+
 		It("deletes the four with uid and resourceVersion preconditions and counts them", func() {
 			build(cached(nil)...)
 
@@ -432,6 +472,19 @@ var _ = Describe("Ensurer", func() {
 
 			build(cached(nil)...)
 			Expect(pending()).To(BeEmpty())
+		})
+
+		It("lists a token Secret with no type, one that names another account, and a RoleBinding that refers to another role", func() {
+			build(cached(func(o *identity.Objects) { o.Token.Type = "" })...)
+			Expect(pending()).To(ConsistOf(secretRef + ` has type "", not kubernetes.io/service-account-token: delete it`))
+
+			build(cached(func(o *identity.Objects) { o.Token.Annotations[corev1.ServiceAccountNameKey] = "default" })...)
+			Expect(pending()).To(ConsistOf(secretRef + ` names ServiceAccount "default", not "pg.telemetry": delete it`))
+
+			build(cached(func(o *identity.Objects) {
+				o.RoleBinding.RoleRef = rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "view"}
+			})...)
+			Expect(pending()).To(ConsistOf(bindName + ` refers to ClusterRole/view, not Role/pg.telemetry: delete it`))
 		})
 
 		It("lists a missing Role beside the other three being cached", func() {

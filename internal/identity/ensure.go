@@ -29,7 +29,8 @@ type Ensurer struct {
 	Writer client.Client
 }
 
-// ErrInTheWay means an identity object exists that the cache doesn't hold, the cached token has another type, or the stored copy changed since the cache read.
+// ErrInTheWay means an identity object exists that the cache doesn't hold, the cached token has another type or names another account,
+// the cached RoleBinding refers to another role, or the stored copy changed since the cache read.
 var ErrInTheWay = errors.New("in the way of the identity")
 
 // step is one object: its empty cache copy, the desired object, whether the copy matches it, and its apply
@@ -43,7 +44,9 @@ type step struct {
 
 // Ensure visits ServiceAccount, Role, RoleBinding and token Secret in order. An object the cache lacks gets a
 // plain Create with FieldOwner; AlreadyExists ends the pass with ErrInTheWay. A cached object that differs is
-// applied with FieldOwner, ForceOwnership, its cached uid and its cached resourceVersion. It returns what it wrote, as Kind/name.
+// applied with FieldOwner, ForceOwnership, its cached uid and its cached resourceVersion; a Conflict from that apply ends the pass with
+// ErrInTheWay. A cached token of another type or for another account, and a cached RoleBinding with another roleRef, are never written:
+// the pass ends with ErrInTheWay. It returns what it wrote, as Kind/name.
 func (e *Ensurer) Ensure(ctx context.Context, c *apiv1.Cluster, refs clusterconfig.Refs) ([]string, error) {
 	want, err := Desired(c, refs)
 	if err != nil {
@@ -57,6 +60,10 @@ func (e *Ensurer) Ensure(ctx context.Context, c *apiv1.Cluster, refs clusterconf
 		if err != nil {
 			return wrote, err
 		}
+		blocked := ""
+		if found {
+			blocked = inTheWay(s.cached, c.Name)
+		}
 		switch {
 		case !found:
 			err = e.Writer.Create(ctx, s.want, client.FieldOwner(FieldOwner))
@@ -66,8 +73,8 @@ func (e *Ensurer) Ensure(ctx context.Context, c *apiv1.Cluster, refs clusterconf
 			if err != nil {
 				return wrote, fmt.Errorf("create %s in %s: %w", name, c.Namespace, err)
 			}
-		case wrongType(s.cached) != "":
-			return wrote, fmt.Errorf("%w: %s has type %s, not %s", ErrInTheWay, name, wrongType(s.cached), corev1.SecretTypeServiceAccountToken)
+		case blocked != "":
+			return wrote, fmt.Errorf("%w: %s %s", ErrInTheWay, name, blocked)
 		case s.same():
 			continue
 		default:
@@ -112,7 +119,7 @@ func (e *Ensurer) Remove(ctx context.Context, namespace, cluster string) (int, e
 
 			continue
 		}
-		if !found || wrongType(obj) != "" {
+		if _, wrong := wrongType(obj); !found || wrong {
 			continue
 		}
 		err = e.deleteExact(ctx, obj)
@@ -138,11 +145,15 @@ func (e *Ensurer) Pending(ctx context.Context, namespace, cluster string) ([]str
 			return nil, err
 		}
 		secret, isSecret := obj.(*corev1.Secret)
+		blocked := ""
+		if found {
+			blocked = inTheWay(obj, cluster)
+		}
 		switch {
 		case !found:
 			lines = append(lines, name+" is not in the plugin's cache: not created yet, or not the plugin's")
-		case wrongType(obj) != "":
-			lines = append(lines, fmt.Sprintf("%s has type %s, not %s: delete it", name, wrongType(obj), corev1.SecretTypeServiceAccountToken))
+		case blocked != "":
+			lines = append(lines, name+" "+blocked)
 		case isSecret && len(secret.Data[corev1.ServiceAccountTokenKey]) == 0:
 			lines = append(lines, name+" has no data.token yet")
 		}
@@ -164,10 +175,35 @@ func (e *Ensurer) cachedGet(ctx context.Context, obj client.Object) (bool, error
 	return true, nil
 }
 
-// wrongType returns the type of obj when it is a Secret that is not a service-account token, else "".
-func wrongType(obj client.Object) corev1.SecretType {
+// wrongType returns the type of obj and true when it is a Secret that is not a service-account token; an empty type is wrong.
+func wrongType(obj client.Object) (corev1.SecretType, bool) {
 	if secret, ok := obj.(*corev1.Secret); ok && secret.Type != corev1.SecretTypeServiceAccountToken {
-		return secret.Type
+		return secret.Type, true
+	}
+
+	return "", false
+}
+
+// inTheWay says why a cached object can't be taken over by an apply, or "" when it can: a token Secret of another type or
+// for another account, a RoleBinding that refers to another role. The plugin can't fix these, so the user deletes the object.
+func inTheWay(obj client.Object, cluster string) string {
+	account := metadata.ServiceAccountName(cluster)
+	if typ, wrong := wrongType(obj); wrong {
+		if typ == "" {
+			typ = `""`
+		}
+
+		return fmt.Sprintf("has type %s, not %s: delete it", typ, corev1.SecretTypeServiceAccountToken)
+	}
+	switch o := obj.(type) {
+	case *corev1.Secret:
+		if got := o.Annotations[corev1.ServiceAccountNameKey]; got != account {
+			return fmt.Sprintf("names ServiceAccount %q, not %q: delete it", got, account)
+		}
+	case *rbacv1.RoleBinding:
+		if want := ownRoleRef(account); o.RoleRef != want {
+			return fmt.Sprintf("refers to %s/%s, not %s/%s: delete it", o.RoleRef.Kind, o.RoleRef.Name, want.Kind, want.Name)
+		}
 	}
 
 	return ""

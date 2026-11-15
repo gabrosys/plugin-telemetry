@@ -72,11 +72,16 @@ func Desired(c *apiv1.Cluster, refs clusterconfig.Refs) (Objects, error) {
 		Role:           &rbacv1.Role{ObjectMeta: meta(account), Rules: rules(refs)},
 		RoleBinding: &rbacv1.RoleBinding{
 			ObjectMeta: meta(account),
-			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: account},
+			RoleRef:    ownRoleRef(account),
 			Subjects:   []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: account, Namespace: c.Namespace}},
 		},
 		Token: &corev1.Secret{ObjectMeta: tokenMeta, Type: corev1.SecretTypeServiceAccountToken},
 	}, nil
+}
+
+// ownRoleRef refers to the Role of the account's own name.
+func ownRoleRef(account string) rbacv1.RoleRef {
+	return rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: account}
 }
 
 // rules has one read rule per kind that has names; an empty resourceNames, or an empty name, would grant every name.

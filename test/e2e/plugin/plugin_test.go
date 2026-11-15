@@ -87,6 +87,20 @@ type instance struct {
 	Deleting bool
 }
 
+// touchCluster retries framework.Touch on API errors and returns the write's resourceVersion.
+func touchCluster(ctx context.Context, c client.Client, key client.ObjectKey, value string) string {
+	GinkgoHelper()
+
+	var rv string
+	Eventually(func(g Gomega) {
+		var err error
+		rv, err = framework.Touch(ctx, c, key, value)
+		g.Expect(err).NotTo(HaveOccurred())
+	}).WithTimeout(30 * time.Second).WithPolling(time.Second).Should(Succeed())
+
+	return rv
+}
+
 func readTestdata(name string) []byte {
 	GinkgoHelper()
 
@@ -232,18 +246,10 @@ func describeMode(m mode) {
 			}).WithTimeout(30 * time.Second).WithPolling(specPoll).Should(Succeed())
 		}
 
-		// touch retries the write on API errors and returns its resourceVersion.
 		touch := func(ctx context.Context, value string) string {
 			GinkgoHelper()
 
-			var rv string
-			Eventually(func(g Gomega) {
-				var err error
-				rv, err = framework.Touch(ctx, c, key(cname), value)
-				g.Expect(err).NotTo(HaveOccurred())
-			}).WithTimeout(30 * time.Second).WithPolling(time.Second).Should(Succeed())
-
-			return rv
+			return touchCluster(ctx, c, key(cname), value)
 		}
 
 		primary := func(ctx context.Context) types.NamespacedName {
@@ -562,7 +568,9 @@ func describeMode(m mode) {
 			image, err := framework.SidecarImage(ctx, c)
 			Expect(err).NotTo(HaveOccurred())
 
-			for _, pod := range pods(Default, ctx) {
+			list := pods(Default, ctx)
+			Expect(list).To(HaveLen(getCluster(Default, ctx).Spec.Instances))
+			for _, pod := range list {
 				Expect(pod.Status.Phase).To(Equal(corev1.PodRunning), pod.Name)
 
 				i := slices.IndexFunc(pod.Spec.InitContainers, func(ctr corev1.Container) bool {
@@ -610,7 +618,7 @@ func describeMode(m mode) {
 			Expect(decided(reviews, false)).To(BeEmpty())
 
 			other := cname + "-other"
-			reviews = reviewAll(ctx, forbidden(ns, cname, other))
+			reviews = reviewAll(ctx, forbidden(ns, cname, other, readable))
 			AddReportEntry("can-i (want false)", table(reviews))
 			Expect(decided(reviews, true)).To(BeEmpty())
 
@@ -717,8 +725,7 @@ func describeMode(m mode) {
 			// CloudNativePG stops polling the status while the exporter is missing; each touch is a reconcile that
 			// asks again, in case the plugin's cache didn't hold the exporter yet.
 			Eventually(func(g Gomega, ctx SpecContext) {
-				_, err := framework.Touch(ctx, c, key(cname), fmt.Sprint("created-invalid-", time.Now().UnixNano()))
-				g.Expect(err).NotTo(HaveOccurred())
+				touchCluster(ctx, c, key(cname), fmt.Sprint("created-invalid-", time.Now().UnixNano()))
 				st := status(g, ctx)
 				g.Expect(st.ExporterState).To(Equal("invalid"))
 				g.Expect(st.Message).To(ContainSubstring("exporter.timeout"))

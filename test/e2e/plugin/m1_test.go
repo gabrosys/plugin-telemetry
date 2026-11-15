@@ -3,18 +3,13 @@
 package plugin_test
 
 import (
-	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 )
@@ -97,8 +92,9 @@ func sidecarMounts(peer bool) []corev1.VolumeMount {
 	return mounts
 }
 
-// forbidden lists what the sidecar of cluster must not do; other is another Cluster of the namespace.
-func forbidden(namespace, cluster, other string) []authorizationv1.ResourceAttributes {
+// forbidden lists what the sidecar of cluster must not do; other is another Cluster of the namespace and
+// readable what it may read, which it must not write either.
+func forbidden(namespace, cluster, other string, readable []authorizationv1.ResourceAttributes) []authorizationv1.ResourceAttributes {
 	attrs := []authorizationv1.ResourceAttributes{
 		{Namespace: namespace, Verb: "get", Resource: "secrets", Name: cluster + apiv1.SuperUserSecretSuffix},
 		{Namespace: namespace, Verb: "get", Resource: "secrets", Name: cluster + apiv1.ApplicationUserSecretSuffix},
@@ -109,16 +105,12 @@ func forbidden(namespace, cluster, other string) []authorizationv1.ResourceAttri
 		{Namespace: namespace, Verb: "get", Group: cnpgGroup, Resource: "clusters", Name: other},
 	}
 
-	targets := []authorizationv1.ResourceAttributes{
+	targets := append([]authorizationv1.ResourceAttributes{
 		{Namespace: namespace, Group: cnpgGroup, Resource: "clusters"},
-		{Namespace: namespace, Group: cnpgGroup, Resource: "clusters", Name: cluster},
-		{Namespace: namespace, Group: metadata.PluginName, Resource: "telemetryexporters", Name: exporterName},
 		{Namespace: namespace, Resource: "configmaps"},
-		{Namespace: namespace, Resource: "configmaps", Name: baseQueries},
 		{Namespace: namespace, Resource: "secrets"},
-		{Namespace: namespace, Resource: "secrets", Name: monitorSecret},
 		{Namespace: namespace, Resource: "pods"},
-	}
+	}, readable...)
 	for _, verb := range []string{"create", "update", "patch", "delete"} {
 		for _, target := range targets {
 			target.Verb = verb
@@ -127,21 +119,4 @@ func forbidden(namespace, cluster, other string) []authorizationv1.ResourceAttri
 	}
 
 	return attrs
-}
-
-// bumpDescriptions changes spec.description of each Cluster, which bumps the generation and triggers a reconcile.
-func bumpDescriptions(ctx context.Context, c client.Client, keys ...client.ObjectKey) {
-	GinkgoHelper()
-
-	for _, key := range keys {
-		Eventually(func(g Gomega) {
-			var cluster apiv1.Cluster
-			g.Expect(c.Get(ctx, key, &cluster)).To(Succeed())
-			generation := cluster.Generation
-			patch := client.MergeFrom(cluster.DeepCopy())
-			cluster.Spec.Description = "m1 reconcile " + time.Now().UTC().Format(time.RFC3339Nano)
-			g.Expect(c.Patch(ctx, &cluster, patch)).To(Succeed())
-			g.Expect(cluster.Generation).To(BeNumerically(">", generation), key.String())
-		}).WithTimeout(30 * time.Second).WithPolling(time.Second).Should(Succeed())
-	}
 }

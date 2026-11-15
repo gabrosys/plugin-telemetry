@@ -82,7 +82,7 @@ func DecodeReport(out string) (preflight.Report, error) {
 	return rep, nil
 }
 
-// DecodeReportFromLogs finds the one line of combined stdout and stderr that decodes strictly as a Report.
+// DecodeReportFromLogs finds the one line of combined stdout and stderr that decodes strictly as a Report (ErrInvalidReport for none or two).
 func DecodeReportFromLogs(logs string) (preflight.Report, error) {
 	var (
 		found preflight.Report

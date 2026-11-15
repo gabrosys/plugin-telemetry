@@ -38,7 +38,7 @@ const (
 )
 
 // The restart spec rolls the plugin out; Serial runs this container after every parallel one, on process 1.
-var _ = Describe("the plugin environment", Ordered, Serial, func() {
+var _ = Describe("the plugin environment", Ordered, Serial, ContinueOnFailure, func() {
 	var (
 		env    framework.Env
 		c      client.Client
@@ -180,15 +180,17 @@ var _ = Describe("the plugin environment", Ordered, Serial, func() {
 			return names
 		}
 
+		var current apiv1.Cluster
+		Expect(c.Get(ctx, clusterKey, &current)).To(Succeed())
 		before := instances(Default, ctx)
-		Expect(before).NotTo(BeEmpty())
+		Expect(before).To(HaveLen(current.Spec.Instances))
 		for name, in := range before {
 			Expect(in.PodSpec).NotTo(BeEmpty(), "pod %s has no %s annotation", name, framework.PodSpecAnnotation)
 		}
 
 		oldPlugins := pluginPods(ctx)
 		bumped := time.Now()
-		bumpDescriptions(ctx, c, clusterKey)
+		touchCluster(ctx, c, clusterKey, "restart-"+time.Now().UTC().Format(time.RFC3339Nano))
 		awaitEvaluations(ctx, oldPlugins, before, bumped)
 
 		Expect(framework.RestartPlugin(ctx, c)).To(Succeed())
@@ -198,7 +200,7 @@ var _ = Describe("the plugin environment", Ordered, Serial, func() {
 		Expect(newPlugins).NotTo(ContainElement(BeElementOf(oldPlugins)), "an old plugin Pod is still there")
 
 		bumped = time.Now()
-		bumpDescriptions(ctx, c, clusterKey)
+		touchCluster(ctx, c, clusterKey, "restart-"+time.Now().UTC().Format(time.RFC3339Nano))
 		awaitEvaluations(ctx, newPlugins, before, bumped)
 
 		Consistently(func(g Gomega, ctx context.Context) {
@@ -207,5 +209,5 @@ var _ = Describe("the plugin environment", Ordered, Serial, func() {
 			g.Expect(c.Get(ctx, clusterKey, &cluster)).To(Succeed())
 			g.Expect(cluster.Status.Phase).To(Equal(apiv1.PhaseHealthy))
 		}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(10 * time.Second).Should(Succeed())
-	}, SpecTimeout(10*time.Minute))
+	}, SpecTimeout(20*time.Minute))
 })

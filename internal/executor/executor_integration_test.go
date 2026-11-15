@@ -491,6 +491,27 @@ var _ = Describe("Result.ConnectionLost", func() {
 		Expect(res.ConnectionLost).To(BeFalse())
 	})
 
+	It("is not set when the caller's context is cancelled while the run waits for a pool slot", func(ctx SpecContext) {
+		cfg := server.MonitorConfig(GinkgoT().TempDir())
+		cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout
+		one := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()))
+		DeferCleanup(one.Close)
+
+		_, release, err := one.Acquire(ctx, "postgres")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { release(false) })
+
+		waitCtx, cancel := context.WithCancel(ctx)
+		time.AfterFunc(200*time.Millisecond, cancel)
+		DeferCleanup(cancel)
+
+		res := newExecutor(one, l).Run(waitCtx, jobFor("SELECT 'a' AS datname, 1 AS value"))
+		Expect(res.Err).To(MatchError(context.Canceled))
+		// Only a deadline is a timeout; a cancelled wait is an error that lost no connection.
+		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeError))
+		Expect(res.ConnectionLost).To(BeFalse())
+	})
+
 	It("is not set for a column mismatch", func(ctx SpecContext) {
 		res := exec.Run(ctx, jobFor("SELECT 'a' AS datname, 1 AS value, 2 AS extra"))
 		Expect(res.Err).To(MatchError(queries.ErrColumnMismatch))

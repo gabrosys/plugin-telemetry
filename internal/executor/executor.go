@@ -44,7 +44,7 @@ type Result struct {
 	WouldBe int                 // capped: series counted before giving up
 	Dropped map[queries.DropReason]int
 	Err     error
-	// ConnectionLost is set when the connection broke during the run or none could be acquired.
+	// ConnectionLost is set when the connection broke during the run or a connect attempt failed.
 	ConnectionLost bool
 	Started        time.Time
 	Duration       time.Duration

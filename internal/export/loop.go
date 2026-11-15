@@ -172,25 +172,38 @@ func (l *Loop) tick(ctx context.Context, t *target, at time.Time) {
 	rm.Resource = l.res
 
 	for _, b := range Split(rm, t.maxPoints) {
-		start := l.clk.Now()
-		status, err := t.exp.export(ctx, b)
-		rec := l.record(t, selfmetrics.OutcomeOK)
-		rec.Duration = l.clk.Since(start)
-		rec.Points = points(b)
-		rec.HTTPStatusCode = status
-		if err != nil {
-			errorType, rejected := Classify(err)
-			if errorType == errorTypeRejected {
-				rec.Rejected = min(rejected, rec.Points)
-				logger.Info("export partially rejected", "rejected", rejected, "error", err.Error())
-			} else {
-				rec.Outcome = selfmetrics.OutcomeError
-				rec.ErrorType = errorType
-				logger.Error(err, "export metrics", "error.type", errorType)
-			}
-		}
-		l.stats.Export(rec) //nolint:contextcheck // Stats.Export takes no context
+		l.send(ctx, t, b)
 	}
+}
+
+// send exports b and records the outcome. A request the SDK refuses as too large, with more than
+// one point, is sent in two halves under the same tick deadline, so the parts never outlast 0.9 × interval.
+func (l *Loop) send(ctx context.Context, t *target, b *metricdata.ResourceMetrics) {
+	logger := log.FromContext(ctx)
+	start := l.clk.Now()
+	status, err := t.exp.export(ctx, b)
+	rec := l.record(t, selfmetrics.OutcomeOK)
+	rec.Duration = l.clk.Since(start)
+	rec.Points = points(b)
+	rec.HTTPStatusCode = status
+	if err != nil {
+		errorType, rejected := Classify(err)
+		switch {
+		case errorType == errorTypeTooLarge && rec.Points > 1 && ctx.Err() == nil:
+			for _, part := range Split(b, (rec.Points+1)/2) {
+				l.send(ctx, t, part)
+			}
+			return
+		case errorType == errorTypeRejected:
+			rec.Rejected = min(rejected, rec.Points)
+			logger.Info("export partially rejected", "rejected", rejected, "error", err.Error())
+		default:
+			rec.Outcome = selfmetrics.OutcomeError
+			rec.ErrorType = errorType
+			logger.Error(err, "export metrics", "error.type", errorType)
+		}
+	}
+	l.stats.Export(rec) //nolint:contextcheck // Stats.Export takes no context
 }
 
 func points(rm *metricdata.ResourceMetrics) int {

@@ -6,12 +6,14 @@ import (
 	"math/rand/v2"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/sdk/instrumentation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -30,6 +32,7 @@ type fixedProducer struct {
 	err error
 
 	panics int // the next Produce calls that panic
+	size   int // bytes of each of the 8 labels of a point; 0 gives one small label
 }
 
 func (p *fixedProducer) Produce(context.Context) ([]metricdata.ScopeMetrics, error) {
@@ -39,7 +42,30 @@ func (p *fixedProducer) Produce(context.Context) ([]metricdata.ScopeMetrics, err
 		p.panics--
 		panic("producer broke")
 	}
+	if p.size > 0 {
+		return wide(p.n, 8, p.size).ScopeMetrics, p.err
+	}
 	return batch(p.n, 1).ScopeMetrics, p.err
+}
+
+// wide returns one gauge of n points, each with labels attributes of size bytes.
+func wide(n, labels, size int) *metricdata.ResourceMetrics {
+	v := strings.Repeat("x", size)
+	dps := make([]metricdata.DataPoint[float64], n)
+	for i := range dps {
+		kvs := []attribute.KeyValue{attribute.Int("i", i)}
+		for l := range labels {
+			kvs = append(kvs, attribute.String("l"+strconv.Itoa(l), v))
+		}
+		dps[i] = metricdata.DataPoint[float64]{Attributes: attribute.NewSet(kvs...), Time: time.Unix(1, 0), Value: float64(i)}
+	}
+	return &metricdata.ResourceMetrics{
+		Resource: loopResource,
+		ScopeMetrics: []metricdata.ScopeMetrics{{
+			Scope:   instrumentation.Scope{Name: "s"},
+			Metrics: []metricdata.Metrics{{Name: "g", Data: metricdata.Gauge[float64]{DataPoints: dps}}},
+		}},
+	}
 }
 
 func (p *fixedProducer) set(n int, err error) {
@@ -426,5 +452,57 @@ var _ = Describe("Loop", func() {
 
 		h.stop()
 		Expect(e.Export(ctx, batch(1, 1))).To(MatchError(export.ErrExporterShutdown))
+	})
+
+	Context("with a request cap of 64 KiB", func() {
+		BeforeEach(func() { DeferCleanup(export.SetMaxRequestSize(64<<10, 64<<10)) })
+
+		for _, protocol := range []string{settings.ProtocolHTTP, settings.ProtocolGRPC} {
+			newSrv := func() *otlptest.Server {
+				if protocol == settings.ProtocolGRPC {
+					return newGRPCServer(nil)
+				}
+				return newHTTPServer(nil)
+			}
+
+			It("delivers a tick over the cap in parts with every point once ("+protocol+")", func() {
+				srv := newSrv()
+				h := newLoopHarness(1)
+				h.prod.set(2000, nil)
+				h.prod.size = 300
+				h.loop.SetExporter(context.Background(), newExporter(exporterSettings(protocol, srv.URL)), 10*time.Second, 5000)
+				h.start()
+
+				for i := 0; i < 10 && h.exports("ok") == 0 && len(srv.Requests()) == 0; i++ {
+					Eventually(h.clk.HasWaiters).Should(BeTrue())
+					h.clk.Step(time.Second)
+					Eventually(func() bool { return h.clk.HasWaiters() || len(srv.Requests()) > 0 }).Should(BeTrue())
+				}
+				Eventually(func() int { return pointsOf(srv.Requests()) }, 20*time.Second).Should(Equal(2000))
+				Eventually(h.clk.HasWaiters, 20*time.Second).Should(BeTrue())
+
+				Expect(len(srv.Requests())).To(BeNumerically(">=", 2))
+				Expect(pointsOf(srv.Requests())).To(Equal(2000))
+				Expect(h.exports("error")).To(BeZero())
+				Expect(h.exports("ok")).To(Equal(float64(len(srv.Requests()))))
+			})
+
+			It("counts one point over the cap as request_too_large once ("+protocol+")", func() {
+				srv := newSrv()
+				h := newLoopHarness(1)
+				h.prod.set(1, nil)
+				h.prod.size = 70 << 10
+				h.loop.SetExporter(context.Background(), newExporter(exporterSettings(protocol, srv.URL)), 10*time.Second, 5000)
+				h.start()
+
+				for i := 0; i < 10 && h.exports("error") == 0; i++ {
+					h.step(time.Second)
+				}
+
+				Expect(h.exports("error")).To(Equal(1.0))
+				Expect(h.exports("ok")).To(BeZero())
+				Expect(srv.Requests()).To(BeEmpty())
+			})
+		}
 	})
 })

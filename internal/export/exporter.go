@@ -28,11 +28,14 @@ const (
 	componentHTTP = "otlp_http_metric_exporter"
 	componentGRPC = "otlp_grpc_metric_exporter"
 
-	maxRequestHTTP = 16 << 20
-	maxRequestGRPC = 4 << 20
-
 	// shutdownTimeout bounds the shutdown of an exporter that is no longer used.
 	shutdownTimeout = 5 * time.Second
+)
+
+// Request caps in bytes before compression; the SDK refuses a larger request unsent.
+var (
+	maxRequestHTTP = 16 << 20
+	maxRequestGRPC = 4 << 20
 )
 
 // ErrExporterShutdown is returned by Export after Shutdown.

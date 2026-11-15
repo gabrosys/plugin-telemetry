@@ -127,7 +127,7 @@ var _ = Describe("Apply", func() {
 				Expect(pod.Spec.Volumes).To(HaveLen(len(original.Spec.Volumes) + 2))
 				Expect(pod.Spec.Volumes[len(pod.Spec.Volumes)-2:]).To(Equal([]corev1.Volume{
 					{Name: "telemetry-token", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{ //nolint:gosec // a Secret name, not a credential
-						SecretName: "fixture-telemetry-token",
+						SecretName: "fixture.telemetry-token",
 						Optional:   ptr.To(true),
 					}}},
 					{Name: "telemetry-sa-mask", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},

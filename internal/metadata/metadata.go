@@ -29,7 +29,7 @@ const (
 )
 
 // identitySuffix ends the names of a Cluster's ServiceAccount, Role and RoleBinding.
-const identitySuffix = "-telemetry"
+const identitySuffix = ".telemetry"
 
 // ServiceAccountName returns the name of the cluster's sidecar ServiceAccount.
 func ServiceAccountName(cluster string) string {
@@ -38,5 +38,5 @@ func ServiceAccountName(cluster string) string {
 
 // TokenSecretName returns the name of the Secret holding the sidecar's token.
 func TokenSecretName(cluster string) string {
-	return cluster + "-telemetry-token"
+	return ServiceAccountName(cluster) + "-token"
 }

@@ -141,16 +141,16 @@ var _ = Describe("Status.SetStatusInCluster", func() {
 	It("reports identity pending with each identity object the plugin doesn't manage", func() {
 		objs = []client.Object{
 			newExporterWithEndpoint(),
-			&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg-telemetry"}},
-			&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg-telemetry"}},
+			&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg.telemetry"}},
+			&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg.telemetry"}},
 		}
 
 		st := decode(call(status(), cluster))
 
 		Expect(st.Identity).To(Equal("pending"))
 		Expect(st.Problems).To(ConsistOf(
-			"Role/pg-telemetry exists and is not managed by the plugin: no identity is applied",
-			"ServiceAccount/pg-telemetry exists and is not managed by the plugin: no identity is applied",
+			"Role/pg.telemetry exists and is not managed by the plugin: no identity is applied",
+			"ServiceAccount/pg.telemetry exists and is not managed by the plugin: no identity is applied",
 		))
 	})
 

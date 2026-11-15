@@ -38,18 +38,18 @@ const (
 	grantName         = "plugin-telemetry-admission-e2e"
 	tokenGrantName    = "plugin-telemetry-admission-token-e2e"
 	escalateGrantName = "plugin-telemetry-admission-escalate-e2e"
-	throwawayName     = "throwaway-telemetry"
-	telemetryName     = "adm-telemetry"
-	telemetryDotName  = "adm.telemetry"
-	telemetryToken    = "adm-telemetry-token"
+	throwawayName     = "throwaway.telemetry"
+	telemetryName     = "adm.telemetry"
+	oldTelemetryName  = "adm-telemetry"
+	telemetryToken    = "adm.telemetry-token"
 	otherToken        = "other-token"
-	probeName         = "probe-telemetry"
-	chainName         = "chain-telemetry"
-	clusterRoleName   = "admission-e2e-telemetry"
+	probeName         = "probe.telemetry"
+	chainName         = "chain.telemetry"
+	clusterRoleName   = "admission-e2e.telemetry"
 	timeout           = 2 * time.Minute
 
 	// Parts of the roles policy's messages, one per rule.
-	nameRule     = "named *-telemetry"
+	nameRule     = "named *.telemetry"
 	verbsRule    = "only get, list and watch"
 	roleRefRule  = "only to the Role of the same name"
 	subjectsRule = "only the ServiceAccount of the same name"
@@ -190,7 +190,7 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		Expect(createToken(ctx, "kube-system", tokenSecret("kube-system", "default-token", "default"))).To(denied())
 	})
 
-	It("denies an Opaque Secret named adm-telemetry-token", func(ctx SpecContext) {
+	It("denies an Opaque Secret named adm.telemetry-token", func(ctx SpecContext) {
 		secret := tokenSecret(ns, telemetryToken, telemetryName)
 		secret.Type = corev1.SecretTypeOpaque
 		Expect(createToken(ctx, ns, secret)).To(denied())
@@ -200,12 +200,22 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		Expect(createToken(ctx, ns, tokenSecret(ns, otherToken, telemetryName))).To(denied())
 	})
 
-	It("denies a ServiceAccount not ending in -telemetry", func(ctx SpecContext) {
+	It("denies a ServiceAccount not ending in .telemetry", func(ctx SpecContext) {
 		_, err := plugin.CoreV1().ServiceAccounts(ns).Create(ctx, serviceAccount(ns, "other"), metav1.CreateOptions{DryRun: dryRun})
 		Expect(err).To(denied())
 	})
 
-	It("allows the ServiceAccount adm-telemetry and the Secret adm-telemetry-token", func(ctx SpecContext) {
+	It("denies a ServiceAccount named adm-telemetry, the 0.4.0 name", func(ctx SpecContext) {
+		_, err := plugin.CoreV1().ServiceAccounts(ns).Create(ctx, serviceAccount(ns, oldTelemetryName), metav1.CreateOptions{DryRun: dryRun})
+		Expect(err).To(denied())
+	})
+
+	It("denies deleting the plugin's own ServiceAccount in cnpg-system", func(ctx SpecContext) {
+		err := plugin.CoreV1().ServiceAccounts(pluginNS).Delete(ctx, pluginAccount, metav1.DeleteOptions{DryRun: dryRun})
+		Expect(err).To(denied())
+	})
+
+	It("allows the ServiceAccount adm.telemetry and the Secret adm.telemetry-token", func(ctx SpecContext) {
 		_, err := plugin.CoreV1().ServiceAccounts(ns).Create(ctx, serviceAccount(ns, telemetryName), metav1.CreateOptions{})
 		Expect(err).NotTo(HaveOccurred())
 		_, err = plugin.CoreV1().Secrets(ns).Create(ctx, tokenSecret(ns, telemetryToken, telemetryName), metav1.CreateOptions{})
@@ -218,7 +228,7 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		}).WithContext(ctx).WithTimeout(timeout).WithPolling(time.Second).Should(Succeed())
 	})
 
-	It("denies an update that points adm-telemetry-token at another account", func(ctx SpecContext) {
+	It("denies an update that points adm.telemetry-token at another account", func(ctx SpecContext) {
 		var secret corev1.Secret
 		Expect(c.Get(ctx, client.ObjectKey{Namespace: ns, Name: telemetryToken}, &secret)).To(Succeed())
 		secret.Annotations[corev1.ServiceAccountNameKey] = clusterName
@@ -238,12 +248,12 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		Expect(plugin.CoreV1().ServiceAccounts(ns).DeleteCollection(ctx, deleteOpts, metav1.ListOptions{})).To(denied())
 	})
 
-	It("allows deleting adm-telemetry-token and adm-telemetry", func(ctx SpecContext) {
+	It("allows deleting adm.telemetry-token and adm.telemetry", func(ctx SpecContext) {
 		Expect(plugin.CoreV1().Secrets(ns).Delete(ctx, telemetryToken, metav1.DeleteOptions{})).To(Succeed())
 		Expect(plugin.CoreV1().ServiceAccounts(ns).Delete(ctx, telemetryName, metav1.DeleteOptions{})).To(Succeed())
 	})
 
-	It("denies the plugin's account a TokenRequest for a -telemetry account", func(ctx SpecContext) {
+	It("denies the plugin's account a TokenRequest for a .telemetry account", func(ctx SpecContext) {
 		grantPlugin(ctx, c, tokenGrantName, rbacv1.PolicyRule{
 			APIGroups: []string{""}, Resources: []string{"serviceaccounts/token"}, Verbs: []string{"create"},
 		})
@@ -357,7 +367,7 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		Expect(apply(ctx, role, nil)).To(Succeed())
 	})
 
-	It("allows a Role named *-telemetry with no rules", func(ctx SpecContext) {
+	It("allows a Role named *.telemetry with no rules", func(ctx SpecContext) {
 		Expect(createRole(ctx, &rbacv1.Role{ObjectMeta: meta(probeName)}, nil)).To(Succeed())
 	})
 
@@ -366,7 +376,7 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		Expect(createRole(ctx, role, dryRun)).To(deniedBy(verbsRule))
 	})
 
-	It("denies a Role not named *-telemetry", func(ctx SpecContext) {
+	It("denies a Role not named *.telemetry", func(ctx SpecContext) {
 		role := &rbacv1.Role{ObjectMeta: meta("chain"), Rules: []rbacv1.PolicyRule{readConfigMaps}}
 		Expect(createRole(ctx, role, dryRun)).To(deniedBy(nameRule))
 	})
@@ -468,7 +478,7 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		Expect(createRole(ctx, role, dryRun)).To(deniedBy(verbsRule))
 	})
 
-	It("denies deleting a Role or RoleBinding not named *-telemetry", func(ctx SpecContext) {
+	It("denies deleting a Role or RoleBinding not named *.telemetry", func(ctx SpecContext) {
 		// CloudNativePG names the Role and RoleBinding of a Cluster after it.
 		Eventually(func(g Gomega, ctx SpecContext) {
 			g.Expect(c.Get(ctx, key(clusterName), &rbacv1.Role{})).To(Succeed())
@@ -480,14 +490,14 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		Expect(plugin.RbacV1().RoleBindings(ns).Delete(ctx, clusterName, deleteOpts)).To(deniedBy(nameRule))
 	})
 
-	It("allows deleting the Roles and RoleBindings named *-telemetry", func(ctx SpecContext) {
+	It("allows deleting the Roles and RoleBindings named *.telemetry", func(ctx SpecContext) {
 		Expect(plugin.RbacV1().RoleBindings(ns).Delete(ctx, telemetryName, metav1.DeleteOptions{})).To(Succeed())
 		Expect(plugin.RbacV1().Roles(ns).Delete(ctx, telemetryName, metav1.DeleteOptions{})).To(Succeed())
 		Expect(plugin.RbacV1().Roles(ns).Delete(ctx, probeName, metav1.DeleteOptions{})).To(Succeed())
 	})
 
 	It("denies any user a Pooler named adm.telemetry", func(ctx SpecContext) {
-		Expect(c.Create(ctx, pooler(ns, telemetryDotName), client.DryRunAll)).To(reserved())
+		Expect(c.Create(ctx, pooler(ns, telemetryName), client.DryRunAll)).To(reserved())
 	})
 
 	It("allows a Pooler named adm-pooler", func(ctx SpecContext) {
@@ -499,11 +509,11 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 			MatchError(ContainSubstring("spec.serviceAccountName")), Not(MatchError(ContainSubstring(reservedPolicy))))
 
 		cluster := framework.NewCluster(ns, "adm-sa", "unused")
-		cluster.Spec.ServiceAccountName = telemetryDotName
+		cluster.Spec.ServiceAccountName = telemetryName
 		Expect(c.Create(ctx, cluster, client.DryRunAll)).To(rejected)
 
 		p := pooler(ns, "adm-sa-pooler")
-		p.Spec.ServiceAccountName = telemetryDotName
+		p.Spec.ServiceAccountName = telemetryName
 		Expect(c.Create(ctx, p, client.DryRunAll)).To(rejected)
 	})
 

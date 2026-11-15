@@ -82,7 +82,7 @@ var _ = Describe("IdentityController", func() {
 		reconcileOnce(ctx, "ns", "pg")
 
 		var role rbacv1.Role
-		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}, &role)).To(Succeed())
+		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg.telemetry"}, &role)).To(Succeed())
 		Expect(role.Rules).To(ContainElement(HaveField("ResourceNames", ContainElement("queries"))))
 
 		old := newCluster("ns", "pg", ours(nil))
@@ -158,16 +158,16 @@ var _ = Describe("IdentityController", func() {
 		build(newCluster("ns", "pg", ours(nil)))
 		reconcileOnce(ctx, "ns", "pg")
 
-		Expect(c.Delete(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg-telemetry"}})).To(Succeed())
+		Expect(c.Delete(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg.telemetry"}})).To(Succeed())
 		var role rbacv1.Role
-		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}, &role)).To(Succeed())
+		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg.telemetry"}, &role)).To(Succeed())
 		role.Rules = nil
 		Expect(c.Update(ctx, &role)).To(Succeed())
 
 		reconcileOnce(ctx, "ns", "pg")
 
 		Expect(identityExists(ctx, c, "pg")).To(Equal(allFour))
-		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}, &role)).To(Succeed())
+		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg.telemetry"}, &role)).To(Succeed())
 		Expect(role.Rules).NotTo(BeEmpty())
 	})
 
@@ -193,7 +193,7 @@ var _ = Describe("IdentityController", func() {
 	})
 
 	It("applies nothing and returns no error when an identity object isn't the plugin's", func(ctx context.Context) {
-		build(newCluster("ns", "pg", ours(nil)), &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg-telemetry"}})
+		build(newCluster("ns", "pg", ours(nil)), &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg.telemetry"}})
 		reconcileOnce(ctx, "ns", "pg")
 
 		Expect(identityExists(ctx, c, "pg")).To(Equal([4]bool{false, false, false, true}))

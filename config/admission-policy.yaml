@@ -26,21 +26,21 @@ spec:
       expression: >-
         request.operation == 'DELETE' || (variables.secret
           ? object.?type.orValue('') == 'kubernetes.io/service-account-token' &&
-            object.?metadata.annotations['kubernetes.io/service-account.name'].orValue('').endsWith('-telemetry') &&
+            object.?metadata.annotations['kubernetes.io/service-account.name'].orValue('').endsWith('.telemetry') &&
             object.metadata.name == object.metadata.annotations['kubernetes.io/service-account.name'] + '-token'
-          : object.metadata.name.endsWith('-telemetry'))
+          : object.metadata.name.endsWith('.telemetry'))
     - name: oldAllowed
       expression: >-
         request.operation == 'CREATE' || (variables.secret
           ? oldObject.?type.orValue('') == 'kubernetes.io/service-account-token' &&
-            oldObject.?metadata.annotations['kubernetes.io/service-account.name'].orValue('').endsWith('-telemetry') &&
+            oldObject.?metadata.annotations['kubernetes.io/service-account.name'].orValue('').endsWith('.telemetry') &&
             oldObject.metadata.name == oldObject.metadata.annotations['kubernetes.io/service-account.name'] + '-token'
-          : oldObject.metadata.name.endsWith('-telemetry'))
+          : oldObject.metadata.name.endsWith('.telemetry'))
   validations:
     - expression: variables.tokenRequest || (variables.newAllowed && variables.oldAllowed)
       reason: Forbidden
       message: >-
-        plugin-telemetry-identities: plugin-telemetry may write only ServiceAccounts named *-telemetry and their
+        plugin-telemetry-identities: plugin-telemetry may write only ServiceAccounts named *.telemetry and their
         kubernetes.io/service-account-token Secrets named <account>-token
     - expression: '!variables.tokenRequest'
       reason: Forbidden
@@ -98,10 +98,10 @@ spec:
       expression: request.operation == 'UPDATE' && variables.subjects == oldObject.?subjects.orValue([])
   validations:
     - expression: >-
-        (variables.deleting ? oldObject : object).metadata.name.endsWith('-telemetry')
+        (variables.deleting ? oldObject : object).metadata.name.endsWith('.telemetry')
       reason: Forbidden
       message: >-
-        plugin-telemetry-roles: plugin-telemetry may write only Roles and RoleBindings named *-telemetry
+        plugin-telemetry-roles: plugin-telemetry may write only Roles and RoleBindings named *.telemetry
     - expression: variables.deleting || !variables.role || variables.readOnly || variables.rulesKept
       reason: Forbidden
       message: >-

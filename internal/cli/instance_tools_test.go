@@ -149,7 +149,7 @@ var _ = Describe("instance print-config", func() {
 
 	It("prints the headers file name and no header", func() {
 		out, err := execute(context.Background(), "instance", "print-config", "--config", testdata("engine-headers.yaml"))
-		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(ContainSubstring("connect to PostgreSQL")))
 		Expect(out).To(ContainSubstring("headersFile: "))
 		Expect(out).NotTo(ContainSubstring("# headers"))
 		Expect(out).NotTo(ContainSubstring("authorization"))

@@ -44,6 +44,8 @@ const (
 	oldTelemetryName  = "adm-telemetry"
 	telemetryToken    = "adm.telemetry-token"
 	otherToken        = "other-token"
+	dottedName        = "probe.telemetry"
+	dashedName        = "probe-telemetry"
 	probeName         = "probe.telemetry"
 	chainName         = "chain.telemetry"
 	clusterRoleName   = "admission-e2e.telemetry"
@@ -57,11 +59,12 @@ const (
 )
 
 var (
-	dryRun      = []string{metav1.DryRunAll}
-	identities  = []string{"secrets", "serviceaccounts"}
-	writeVerbs  = []string{"create", "update", "patch", "delete", "deletecollection"}
-	pluginUser  = framework.ServiceAccountUser(pluginNS, pluginAccount)
-	secretCheck = authorizationv1.ResourceAttributes{Verb: "create", Resource: "secrets"}
+	dryRun        = []string{metav1.DryRunAll}
+	identities    = []string{"secrets", "serviceaccounts"}
+	writeVerbs    = []string{"create", "update", "patch", "delete", "deletecollection"}
+	pluginUser    = framework.ServiceAccountUser(pluginNS, pluginAccount)
+	pluginSubject = serviceAccountSubject(pluginNS, pluginAccount)
+	secretCheck   = authorizationv1.ResourceAttributes{Verb: "create", Resource: "secrets"}
 
 	readConfigMaps = rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"get"}}
 	createSecrets  = rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"create"}}
@@ -117,16 +120,28 @@ func roleRef(kind, name string) rbacv1.RoleRef {
 	return rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kind, Name: name}
 }
 
-// grantPlugin gives the plugin's account rule in every namespace until the current node ends.
-func grantPlugin(ctx SpecContext, c client.Client, name string, rule rbacv1.PolicyRule) {
+// grant gives subject rule in namespace, in every namespace when it is empty, until the current node ends.
+func grant(ctx SpecContext, c client.Client, namespace, name string, subject rbacv1.Subject, rule rbacv1.PolicyRule) {
 	GinkgoHelper()
-	role := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: name}, Rules: []rbacv1.PolicyRule{*rule.DeepCopy()}}
-	binding := &rbacv1.ClusterRoleBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
-		RoleRef:    roleRef("ClusterRole", name),
-		Subjects:   []rbacv1.Subject{serviceAccountSubject(pluginNS, pluginAccount)},
+	rules := []rbacv1.PolicyRule{*rule.DeepCopy()}
+	var objs []client.Object
+	if namespace == "" {
+		objs = []client.Object{
+			&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: name}, Rules: rules},
+			&rbacv1.ClusterRoleBinding{
+				ObjectMeta: metav1.ObjectMeta{Name: name},
+				RoleRef:    roleRef("ClusterRole", name),
+				Subjects:   []rbacv1.Subject{subject},
+			},
+		}
+	} else {
+		meta := metav1.ObjectMeta{Namespace: namespace, Name: name}
+		objs = []client.Object{
+			&rbacv1.Role{ObjectMeta: meta, Rules: rules},
+			&rbacv1.RoleBinding{ObjectMeta: meta, RoleRef: roleRef("Role", name), Subjects: []rbacv1.Subject{subject}},
+		}
 	}
-	for _, obj := range []client.Object{role, binding} {
+	for _, obj := range objs {
 		Expect(c.Create(ctx, obj)).To(Succeed())
 		DeferCleanup(func(ctx SpecContext) {
 			Expect(client.IgnoreNotFound(c.Delete(ctx, obj))).To(Succeed())
@@ -159,7 +174,7 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 
 		Expect(c.Create(ctx, framework.NewCluster(ns, clusterName, env.PostgresImage))).To(Succeed())
 
-		grantPlugin(ctx, c, grantName, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: identities, Verbs: writeVerbs})
+		grant(ctx, c, "", grantName, pluginSubject, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: identities, Verbs: writeVerbs})
 
 		plugin, err = framework.Impersonate(cfg, pluginUser)
 		Expect(err).NotTo(HaveOccurred())
@@ -275,7 +290,7 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 	})
 
 	It("denies the plugin's account a TokenRequest for a .telemetry account", func(ctx SpecContext) {
-		grantPlugin(ctx, c, tokenGrantName, rbacv1.PolicyRule{
+		grant(ctx, c, "", tokenGrantName, pluginSubject, rbacv1.PolicyRule{
 			APIGroups: []string{""}, Resources: []string{"serviceaccounts/token"}, Verbs: []string{"create"},
 		})
 
@@ -482,7 +497,7 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 
 	It("denies a Role with * verbs", func(ctx SpecContext) {
 		// RBAC refuses a * verb before admission unless the plugin may escalate.
-		grantPlugin(ctx, c, escalateGrantName, rbacv1.PolicyRule{
+		grant(ctx, c, "", escalateGrantName, pluginSubject, rbacv1.PolicyRule{
 			APIGroups: []string{rbacv1.GroupName}, Resources: []string{"roles"}, Verbs: []string{"escalate"},
 		})
 		Eventually(func(g Gomega, ctx SpecContext) {
@@ -515,6 +530,73 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		Expect(plugin.RbacV1().RoleBindings(ns).Delete(ctx, telemetryName, metav1.DeleteOptions{})).To(Succeed())
 		Expect(plugin.RbacV1().Roles(ns).Delete(ctx, telemetryName, metav1.DeleteOptions{})).To(Succeed())
 		Expect(plugin.RbacV1().Roles(ns).Delete(ctx, probeName, metav1.DeleteOptions{})).To(Succeed())
+	})
+
+	Context("accounts named after the plugin's", func() {
+		var dotted, dashed *kubernetes.Clientset
+
+		BeforeAll(func(ctx SpecContext) {
+			rules := map[string]rbacv1.PolicyRule{
+				"write": {
+					APIGroups: []string{"", rbacv1.GroupName}, Verbs: []string{"create"},
+					Resources: []string{"secrets", "serviceaccounts", "roles", "rolebindings"},
+				},
+				"read": readConfigMaps,
+			}
+			for _, name := range []string{dottedName, dashedName} {
+				account := serviceAccount(ns, name)
+				Expect(c.Create(ctx, account)).To(Succeed())
+				DeferCleanup(func(ctx SpecContext) {
+					Expect(client.IgnoreNotFound(c.Delete(ctx, account))).To(Succeed())
+				})
+				for kind, rule := range rules {
+					grant(ctx, c, ns, name+"-"+kind, serviceAccountSubject(ns, name), rule)
+				}
+			}
+
+			var err error
+			dotted, err = framework.Impersonate(cfg, framework.ServiceAccountUser(ns, dottedName))
+			Expect(err).NotTo(HaveOccurred())
+			dashed, err = framework.Impersonate(cfg, framework.ServiceAccountUser(ns, dashedName))
+			Expect(err).NotTo(HaveOccurred())
+
+			for _, name := range []string{dottedName, dashedName} {
+				Eventually(func(g Gomega, ctx SpecContext) {
+					allowed, err := framework.CanI(ctx, cfg, framework.ServiceAccountUser(ns, name),
+						authorizationv1.ResourceAttributes{Verb: "create", Resource: "roles", Group: rbacv1.GroupName, Namespace: ns})
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(allowed).To(BeTrue())
+				}).WithContext(ctx).WithTimeout(timeout).WithPolling(time.Second).Should(Succeed())
+			}
+		})
+
+		role := func(name string, rules ...rbacv1.PolicyRule) *rbacv1.Role {
+			return &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}, Rules: rules}
+		}
+
+		It("holds a *.telemetry account to the identities policy", func(ctx SpecContext) {
+			_, err := dotted.CoreV1().ServiceAccounts(ns).Create(ctx, serviceAccount(ns, "other"), metav1.CreateOptions{DryRun: dryRun})
+			Expect(err).To(denied())
+
+			_, err = dotted.CoreV1().ServiceAccounts(ns).Create(ctx, serviceAccount(ns, "other.telemetry"), metav1.CreateOptions{DryRun: dryRun})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("holds a *.telemetry account to the roles policy", func(ctx SpecContext) {
+			_, err := dotted.RbacV1().Roles(ns).Create(ctx, role(chainName, createSecrets, readConfigMaps), metav1.CreateOptions{DryRun: dryRun})
+			Expect(err).To(deniedBy(verbsRule))
+
+			_, err = dotted.RbacV1().Roles(ns).Create(ctx, role("read.telemetry", readConfigMaps), metav1.CreateOptions{DryRun: dryRun})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("holds an account named probe-telemetry, without the dot, to neither policy", func(ctx SpecContext) {
+			_, err := dashed.CoreV1().ServiceAccounts(ns).Create(ctx, serviceAccount(ns, "other"), metav1.CreateOptions{DryRun: dryRun})
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = dashed.RbacV1().Roles(ns).Create(ctx, role(chainName, createSecrets, readConfigMaps), metav1.CreateOptions{DryRun: dryRun})
+			Expect(err).NotTo(HaveOccurred())
+		})
 	})
 
 	It("denies any user a Pooler named adm.telemetry", func(ctx SpecContext) {

@@ -15,8 +15,11 @@ spec:
         operations: [CREATE]
         resources: [serviceaccounts/token]
   matchConditions:
-    - name: plugin-service-account
-      expression: request.userInfo.username == 'system:serviceaccount:cnpg-system:plugin-telemetry'
+    - name: plugin-or-identity-account
+      expression: >-
+        request.userInfo.username == 'system:serviceaccount:cnpg-system:plugin-telemetry' ||
+          (request.userInfo.username.startsWith('system:serviceaccount:') &&
+            request.userInfo.username.endsWith('.telemetry'))
   variables:
     - name: tokenRequest
       expression: request.resource.resource == 'serviceaccounts' && request.?subResource.orValue('') == 'token'
@@ -68,8 +71,11 @@ spec:
         operations: [CREATE, UPDATE, DELETE]
         resources: [roles, rolebindings]
   matchConditions:
-    - name: plugin-service-account
-      expression: request.userInfo.username == 'system:serviceaccount:cnpg-system:plugin-telemetry'
+    - name: plugin-or-identity-account
+      expression: >-
+        request.userInfo.username == 'system:serviceaccount:cnpg-system:plugin-telemetry' ||
+          (request.userInfo.username.startsWith('system:serviceaccount:') &&
+            request.userInfo.username.endsWith('.telemetry'))
   variables:
     - name: deleting
       expression: request.operation == 'DELETE'

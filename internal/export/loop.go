@@ -30,8 +30,9 @@ type Loop struct {
 	rnd    *rand.Rand // used by Run only
 	stats  *selfmetrics.Stats
 
-	mu      sync.Mutex // guards pending
+	mu      sync.Mutex // guards pending and current
 	pending *target
+	current *Exporter     // the exporter Run exports through, nil before its first take
 	wake    chan struct{} // signals the first SetExporter to a waiting Run
 }
 
@@ -40,18 +41,15 @@ func NewLoop(reader *sdkmetric.ManualReader, res *resource.Resource, clk clock.C
 	return &Loop{reader: reader, res: res, clk: clk, rnd: rnd, stats: stats, wake: make(chan struct{}, 1)}
 }
 
-// SetExporter takes effect at the next tick; the previous exporter is shut down after its export ends,
-// and a pending one it replaces at once. A nil exporter or a non-positive interval is ignored.
-func (l *Loop) SetExporter(e *Exporter, interval time.Duration, maxPoints int) {
+// SetExporter takes effect at the next tick; the exporter in use is shut down after its export ends,
+// and a pending one it replaces at once, unless that is the exporter in use. A nil exporter or a
+// non-positive interval is ignored.
+func (l *Loop) SetExporter(ctx context.Context, e *Exporter, interval time.Duration, maxPoints int) {
 	if e == nil || interval <= 0 {
 		return
 	}
-	l.mu.Lock()
-	replaced := l.pending
-	l.pending = &target{exp: e, interval: interval, maxPoints: maxPoints}
-	l.mu.Unlock()
-	if replaced != nil && replaced.exp != e {
-		l.shutdown(context.Background(), replaced.exp)
+	if unused := l.setPending(&target{exp: e, interval: interval, maxPoints: maxPoints}); unused != nil {
+		l.shutdown(ctx, unused)
 	}
 	select {
 	case l.wake <- struct{}{}:
@@ -59,12 +57,28 @@ func (l *Loop) SetExporter(e *Exporter, interval time.Duration, maxPoints int) {
 	}
 }
 
-// take returns the pending target, or nil.
+// setPending makes t the pending target and returns the exporter of the one it replaces when no
+// tick uses that exporter, or nil.
+func (l *Loop) setPending(t *target) *Exporter {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	replaced := l.pending
+	l.pending = t
+	if replaced == nil || replaced.exp == t.exp || replaced.exp == l.current {
+		return nil
+	}
+	return replaced.exp
+}
+
+// take returns the pending target, or nil, and makes its exporter the one in use.
 func (l *Loop) take() *target {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	p := l.pending
 	l.pending = nil
+	if p != nil {
+		l.current = p.exp
+	}
 	return p
 }
 

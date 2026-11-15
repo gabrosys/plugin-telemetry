@@ -367,7 +367,7 @@ func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 			// The loop takes the resource at creation; the old loop shuts its exporters down.
 			e.startLoop(ctx, export.Resource(s, e.getenv))
 		}
-		e.loop.l.SetExporter(exp, s.Exporter.Interval, s.Exporter.MaxPointsPerRequest) //nolint:contextcheck // SetExporter takes no context
+		e.loop.l.SetExporter(ctx, exp, s.Exporter.Interval, s.Exporter.MaxPointsPerRequest)
 	}
 	if newPool {
 		e.factsFailures = 0

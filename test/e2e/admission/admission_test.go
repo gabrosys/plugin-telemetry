@@ -30,32 +30,34 @@ import (
 )
 
 const (
-	policyName        = "plugin-telemetry-identities"
-	rolesPolicy       = "plugin-telemetry-roles"
-	reservedPolicy    = "plugin-telemetry-reserved-names"
-	clusterName       = "adm"
-	exporterName      = "default"
-	pluginAccount     = "plugin-telemetry"
-	pluginNS          = "cnpg-system"
-	grantName         = "plugin-telemetry-admission-e2e"
-	tokenGrantName    = "plugin-telemetry-admission-token-e2e"
-	escalateGrantName = "plugin-telemetry-admission-escalate-e2e"
-	throwawayName     = "throwaway.telemetry"
-	telemetryName     = "adm.telemetry"
-	oldTelemetryName  = "adm-telemetry"
-	telemetryToken    = "adm.telemetry-token"
-	otherToken        = "other-token"
-	dashedName        = "probe-telemetry"
-	probeName         = "probe.telemetry"
-	chainName         = "chain.telemetry"
-	clusterRoleName   = "admission-e2e.telemetry"
-	legacyName        = "legacy.telemetry"
-	timeout           = 2 * time.Minute
+	policyName           = "plugin-telemetry-identities"
+	rolesPolicy          = "plugin-telemetry-roles"
+	reservedPolicy       = "plugin-telemetry-reserved-names"
+	clusterName          = "adm"
+	exporterName         = "default"
+	pluginAccount        = "plugin-telemetry"
+	pluginNS             = "cnpg-system"
+	grantName            = "plugin-telemetry-admission-e2e"
+	tokenGrantName       = "plugin-telemetry-admission-token-e2e"
+	escalateGrantName    = "plugin-telemetry-admission-escalate-e2e"
+	subresourceGrantName = "plugin-telemetry-admission-subresource-e2e"
+	throwawayName        = "throwaway.telemetry"
+	telemetryName        = "adm.telemetry"
+	oldTelemetryName     = "adm-telemetry"
+	telemetryToken       = "adm.telemetry-token"
+	otherToken           = "other-token"
+	dashedName           = "probe-telemetry"
+	probeName            = "probe.telemetry"
+	chainName            = "chain.telemetry"
+	clusterRoleName      = "admission-e2e.telemetry"
+	legacyName           = "legacy.telemetry"
+	timeout              = 2 * time.Minute
 
 	// Parts of the roles policy's messages, one per rule.
 	nameRule     = "named *.telemetry may be"
 	verbsRule    = "only get, list and watch"
 	namesRule    = "must name the objects"
+	subRule      = "may not name subresources"
 	roleRefRule  = "only to the Role of its own name"
 	subjectsRule = "only the ServiceAccount of its own name"
 
@@ -496,6 +498,19 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 	It("denies a Role with a read rule that names no object", func(ctx SpecContext) {
 		role := &rbacv1.Role{ObjectMeta: meta(chainName), Rules: []rbacv1.PolicyRule{readConfigMaps, readAnyConfigMap}}
 		Expect(createRole(ctx, role, dryRun)).To(deniedBy(namesRule))
+	})
+
+	It("denies a Role with get on a subresource, which can be as strong as a write", func(ctx SpecContext) {
+		// RBAC refuses a rule the plugin doesn't hold before admission, unless the plugin may escalate.
+		grant(ctx, c, cfg, ns, subresourceGrantName, pluginSubject, rbacv1.PolicyRule{
+			APIGroups: []string{rbacv1.GroupName}, Resources: []string{"roles"}, Verbs: []string{"escalate"},
+		})
+		for _, resource := range []string{"pods/exec", "nodes/proxy", "*"} {
+			role := &rbacv1.Role{ObjectMeta: meta(chainName), Rules: []rbacv1.PolicyRule{{
+				APIGroups: []string{""}, Resources: []string{resource}, ResourceNames: []string{"adm-1"}, Verbs: []string{"get"},
+			}}}
+			Expect(createRole(ctx, role, dryRun)).To(deniedBy(subRule), resource)
+		}
 	})
 
 	It("denies a Role not named *.telemetry", func(ctx SpecContext) {

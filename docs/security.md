@@ -73,12 +73,13 @@ Two of them match a request only when the user is a ServiceAccount whose name is
 `plugin-telemetry-roles` covers Roles and RoleBindings (create, update, delete):
 
 - The name must end in `.telemetry`, on delete too.
-- A Role may grant only `get`, `list` and `watch`, and every rule must carry `resourceNames`, so a Role never grants a whole kind. A Role without rules passes.
+- A Role may grant only `get`, `list` and `watch`, and every rule must carry `resourceNames`, so a Role never grants a whole kind. A rule may not name a subresource (`pods/exec`) or `*` as a resource. A Role without rules passes.
 - A RoleBinding must refer to the Role of its own name, and bind exactly one subject: the ServiceAccount of its own name in its own namespace.
 - Messages:
   - `only Roles and RoleBindings named *.telemetry may be written or deleted`
   - `a Role may grant only get, list and watch`
   - `every rule of a Role must name the objects it covers (resourceNames)`
+  - `a Role may not name subresources, or * for every resource`
   - `a RoleBinding may refer only to the Role of its own name`
   - `a RoleBinding may bind only the ServiceAccount of its own name, in its own namespace`
 

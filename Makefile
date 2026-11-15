@@ -28,7 +28,7 @@ KIND := $(BIN)/kind-$(KIND_VERSION)
 KUBECTL := $(BIN)/kubectl-$(KUBECTL_VERSION)
 CMCTL := $(BIN)/cmctl-$(CMCTL_VERSION)
 
-KIND_CLUSTER ?= plugin-telemetry
+KIND_CLUSTER ?= plugin-telemetry-$(subst .,-,$(CNPG_VERSION))
 CNPG_VERSION ?= v1.30.1
 POSTGRES_IMAGE ?= ghcr.io/cloudnative-pg/postgresql:18.7-system-trixie@sha256:5a5dfbde88d5909fd4938189c141f53fb153f53c519f14907dce9e7c04baa153
 COLLECTOR_IMAGE ?= otel/opentelemetry-collector:0.165.0@sha256:34b24b740c3c88d3467740e8642a397c13898ef76d7295c5425164c482ed1b73

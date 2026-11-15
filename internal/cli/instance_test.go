@@ -61,7 +61,7 @@ var _ = Describe("instance preflight command", func() {
 		Expect(set).To(BeFalse())
 	})
 
-	It("reads PGPASSWORD before it clears the environment", func() {
+	It("does not print PGPASSWORD", func() {
 		GinkgoT().Setenv("PGPASSWORD", "hunter2")
 		var out bytes.Buffer
 		cmd := cli.NewRootCommand()

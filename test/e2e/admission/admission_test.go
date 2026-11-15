@@ -45,7 +45,6 @@ const (
 	oldTelemetryName  = "adm-telemetry"
 	telemetryToken    = "adm.telemetry-token"
 	otherToken        = "other-token"
-	dottedName        = "probe.telemetry"
 	dashedName        = "probe-telemetry"
 	probeName         = "probe.telemetry"
 	chainName         = "chain.telemetry"
@@ -66,7 +65,6 @@ var (
 	writeVerbs    = []string{"create", "update", "patch", "delete", "deletecollection"}
 	pluginUser    = framework.ServiceAccountUser(pluginNS, pluginAccount)
 	pluginSubject = serviceAccountSubject(pluginNS, pluginAccount)
-	secretCheck   = authorizationv1.ResourceAttributes{Verb: "create", Resource: "secrets"}
 
 	readConfigMaps = rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"get"}}
 	createSecrets  = rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"create"}}
@@ -132,8 +130,9 @@ func roleRef(kind, name string) rbacv1.RoleRef {
 	return rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: kind, Name: name}
 }
 
-// grant gives subject rule in namespace, in every namespace when it is empty, until the current node ends.
-func grant(ctx SpecContext, c client.Client, namespace, name string, subject rbacv1.Subject, rule rbacv1.PolicyRule) {
+// grant gives subject rule in namespace, in every namespace when it is empty, until the current node ends,
+// and waits until the API server authorizes every group, resource, verb and name the rule lists.
+func grant(ctx SpecContext, c client.Client, cfg *rest.Config, namespace, name string, subject rbacv1.Subject, rule rbacv1.PolicyRule) {
 	GinkgoHelper()
 	rules := []rbacv1.PolicyRule{*rule.DeepCopy()}
 	var objs []client.Object
@@ -159,6 +158,38 @@ func grant(ctx SpecContext, c client.Client, namespace, name string, subject rba
 			Expect(client.IgnoreNotFound(c.Delete(ctx, obj))).To(Succeed())
 		})
 	}
+
+	user := framework.ServiceAccountUser(subject.Namespace, subject.Name)
+	for _, attrs := range ruleAttributes(namespace, rule) {
+		Eventually(func(g Gomega, ctx SpecContext) {
+			allowed, err := framework.CanI(ctx, cfg, user, attrs)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(allowed).To(BeTrue(), "%s may not yet %s %s", user, attrs.Verb, attrs.Resource)
+		}).WithContext(ctx).WithTimeout(timeout).WithPolling(time.Second).Should(Succeed())
+	}
+}
+
+// ruleAttributes lists the access checks that tell a rule is in force: one per group, resource, verb and name.
+func ruleAttributes(namespace string, rule rbacv1.PolicyRule) []authorizationv1.ResourceAttributes {
+	names := rule.ResourceNames
+	if len(names) == 0 {
+		names = []string{""}
+	}
+	var checks []authorizationv1.ResourceAttributes
+	for _, group := range rule.APIGroups {
+		for _, resource := range rule.Resources {
+			resource, subresource, _ := strings.Cut(resource, "/")
+			for _, verb := range rule.Verbs {
+				for _, name := range names {
+					checks = append(checks, authorizationv1.ResourceAttributes{
+						Namespace: namespace, Verb: verb, Group: group, Resource: resource, Subresource: subresource, Name: name,
+					})
+				}
+			}
+		}
+	}
+
+	return checks
 }
 
 var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
@@ -186,16 +217,10 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 
 		Expect(c.Create(ctx, framework.NewCluster(ns, clusterName, env.PostgresImage))).To(Succeed())
 
-		grant(ctx, c, "", grantName, pluginSubject, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: identities, Verbs: writeVerbs})
+		grant(ctx, c, cfg, "", grantName, pluginSubject, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: identities, Verbs: writeVerbs})
 
 		plugin, err = framework.Impersonate(cfg, pluginUser)
 		Expect(err).NotTo(HaveOccurred())
-
-		Eventually(func(g Gomega, ctx SpecContext) {
-			allowed, err := framework.CanI(ctx, cfg, pluginUser, secretCheck)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(allowed).To(BeTrue())
-		}).WithContext(ctx).WithTimeout(timeout).WithPolling(time.Second).Should(Succeed())
 
 		Eventually(func(ctx SpecContext) error {
 			return c.Get(ctx, client.ObjectKey{Namespace: ns, Name: clusterName}, &corev1.ServiceAccount{})
@@ -302,7 +327,7 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 	})
 
 	It("denies the plugin's account a TokenRequest for a .telemetry account", func(ctx SpecContext) {
-		grant(ctx, c, ns, tokenGrantName, pluginSubject, rbacv1.PolicyRule{
+		grant(ctx, c, cfg, ns, tokenGrantName, pluginSubject, rbacv1.PolicyRule{
 			APIGroups: []string{""}, Resources: []string{"serviceaccounts/token"}, Verbs: []string{"create"},
 			ResourceNames: []string{throwawayName},
 		})
@@ -312,14 +337,6 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		DeferCleanup(func(ctx SpecContext) {
 			Expect(client.IgnoreNotFound(c.Delete(ctx, throwaway))).To(Succeed())
 		})
-
-		Eventually(func(g Gomega, ctx SpecContext) {
-			allowed, err := framework.CanI(ctx, cfg, pluginUser, authorizationv1.ResourceAttributes{
-				Verb: "create", Resource: "serviceaccounts", Subresource: "token", Namespace: ns, Name: throwawayName,
-			})
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(allowed).To(BeTrue())
-		}).WithContext(ctx).WithTimeout(timeout).WithPolling(time.Second).Should(Succeed())
 
 		request := &authenticationv1.TokenRequest{Spec: authenticationv1.TokenRequestSpec{ExpirationSeconds: ptr.To(int64(600))}}
 		_, err := plugin.CoreV1().ServiceAccounts(ns).CreateToken(ctx, throwawayName, request, metav1.CreateOptions{})
@@ -531,17 +548,9 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 
 	It("denies a Role with * verbs", func(ctx SpecContext) {
 		// RBAC refuses a * verb before admission unless the plugin may escalate.
-		grant(ctx, c, "", escalateGrantName, pluginSubject, rbacv1.PolicyRule{
+		grant(ctx, c, cfg, "", escalateGrantName, pluginSubject, rbacv1.PolicyRule{
 			APIGroups: []string{rbacv1.GroupName}, Resources: []string{"roles"}, Verbs: []string{"escalate"},
 		})
-		Eventually(func(g Gomega, ctx SpecContext) {
-			allowed, err := framework.CanI(ctx, cfg, pluginUser, authorizationv1.ResourceAttributes{
-				Verb: "escalate", Group: rbacv1.GroupName, Resource: "roles", Namespace: ns,
-			})
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(allowed).To(BeTrue())
-		}).WithContext(ctx).WithTimeout(timeout).WithPolling(time.Second).Should(Succeed())
-
 		role := &rbacv1.Role{ObjectMeta: meta(chainName), Rules: []rbacv1.PolicyRule{{
 			APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"*"},
 		}}}
@@ -570,38 +579,32 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		var dotted, dashed *kubernetes.Clientset
 
 		BeforeAll(func(ctx SpecContext) {
-			rules := map[string]rbacv1.PolicyRule{
-				"write": {
-					APIGroups: []string{"", rbacv1.GroupName}, Verbs: []string{"create"},
-					Resources: []string{"secrets", "serviceaccounts", "roles", "rolebindings"},
-				},
-				"read": readConfigMaps,
+			rules := []struct {
+				suffix string
+				rule   rbacv1.PolicyRule
+			}{
+				{"write-core", rbacv1.PolicyRule{APIGroups: []string{""}, Verbs: []string{"create"}, Resources: identities}},
+				{"write-rbac", rbacv1.PolicyRule{
+					APIGroups: []string{rbacv1.GroupName}, Verbs: []string{"create"}, Resources: []string{"roles", "rolebindings"},
+				}},
+				{"read", readConfigMaps},
 			}
-			for _, name := range []string{dottedName, dashedName} {
+			for _, name := range []string{probeName, dashedName} {
 				account := serviceAccount(ns, name)
 				Expect(c.Create(ctx, account)).To(Succeed())
 				DeferCleanup(func(ctx SpecContext) {
 					Expect(client.IgnoreNotFound(c.Delete(ctx, account))).To(Succeed())
 				})
-				for kind, rule := range rules {
-					grant(ctx, c, ns, name+"-"+kind, serviceAccountSubject(ns, name), rule)
+				for _, r := range rules {
+					grant(ctx, c, cfg, ns, name+"-"+r.suffix, serviceAccountSubject(ns, name), r.rule)
 				}
 			}
 
 			var err error
-			dotted, err = framework.Impersonate(cfg, framework.ServiceAccountUser(ns, dottedName))
+			dotted, err = framework.Impersonate(cfg, framework.ServiceAccountUser(ns, probeName))
 			Expect(err).NotTo(HaveOccurred())
 			dashed, err = framework.Impersonate(cfg, framework.ServiceAccountUser(ns, dashedName))
 			Expect(err).NotTo(HaveOccurred())
-
-			for _, name := range []string{dottedName, dashedName} {
-				Eventually(func(g Gomega, ctx SpecContext) {
-					allowed, err := framework.CanI(ctx, cfg, framework.ServiceAccountUser(ns, name),
-						authorizationv1.ResourceAttributes{Verb: "create", Resource: "roles", Group: rbacv1.GroupName, Namespace: ns})
-					g.Expect(err).NotTo(HaveOccurred())
-					g.Expect(allowed).To(BeTrue())
-				}).WithContext(ctx).WithTimeout(timeout).WithPolling(time.Second).Should(Succeed())
-			}
 		})
 
 		role := func(name string, rules ...rbacv1.PolicyRule) *rbacv1.Role {

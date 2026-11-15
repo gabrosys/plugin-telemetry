@@ -2,6 +2,7 @@
 package safe
 
 import (
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"sync"
@@ -30,7 +31,7 @@ func Call(logger logr.Logger, what string, fn func()) (panicked bool) {
 		if repeated(what, text) {
 			return
 		}
-		logger.Error(fmt.Errorf("%s", text), "recovered from a panic", "in", what, "stack", string(debug.Stack()))
+		logger.Error(errors.New(text), "recovered from a panic", "in", what, "stack", string(debug.Stack()))
 	}()
 	fn()
 	return false
@@ -45,6 +46,13 @@ func repeated(what, text string) bool {
 	}
 	last[what] = text
 	return false
+}
+
+// Reset forgets every panic logged, so specs don't depend on each other's order.
+func Reset() {
+	mu.Lock()
+	defer mu.Unlock()
+	clear(last)
 }
 
 func forget(what string) {

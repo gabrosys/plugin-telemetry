@@ -38,7 +38,7 @@ import (
 const (
 	debounce       = time.Second
 	tokenPollTime  = 5 * time.Second
-	startRetry     = 5 * time.Second // the wait before a watch whose start panicked is started again
+	startRetry     = 5 * time.Second // the wait before a watch whose start panicked, or whose informer died, is started again
 	snapshotRounds = 3               // the Cluster; the exporter and the Cluster's references; the exporter's references
 )
 
@@ -237,7 +237,7 @@ func (s *Source) reconcile(ctx context.Context, w watcher) (retry bool) {
 		for k, e := range starts {
 			var stop func()
 			if safe.Call(logger, "start of the watch on "+string(k.kind)+" "+k.name, func() {
-				stop = w(ctx, resources[k.kind], s.o.Namespace, k.name, s.handler(k, e))
+				stop = w(ctx, resources[k.kind], s.o.Namespace, k.name, s.handler(ctx, k, e))
 			}) {
 				retry = true
 				s.forget(k, e)
@@ -391,21 +391,21 @@ func (s *Source) objectLocked(k key) (*unstructured.Unstructured, error) {
 // handler returns what a watch on k reports to; reports from a watch that was stopped are dropped.
 // Watch errors are only logged: the informer lists again and reports what it finds. A panic in a
 // report is logged and the next report is handled.
-func (s *Source) handler(k key, e *entry) handler {
-	what := "report of the watch on " + string(k.kind) + " " + k.name
+func (s *Source) handler(ctx context.Context, k key, e *entry) handler {
+	watchOn := string(k.kind) + " " + k.name
 	return handler{
 		set: func(obj *unstructured.Unstructured) {
-			safe.Call(s.logger(), what, func() { s.set(k, e, obj) })
+			safe.Call(s.logger(), "report of the watch on "+watchOn, func() { s.set(k, e, obj) })
 		},
 		fail: func(err error) {
-			safe.Call(s.logger(), what, func() { s.fail(k, e, err) })
+			safe.Call(s.logger(), "error of the watch on "+watchOn, func() { s.fail(k, e, err) })
 		},
-		crashed: func() { s.crashed(k, e) },
+		crashed: func() { s.crashed(ctx, k, e) },
 	}
 }
 
 // crashed forgets the watch whose informer died and asks for a reconcile startRetry later, which starts it again.
-func (s *Source) crashed(k key, e *entry) {
+func (s *Source) crashed(ctx context.Context, k key, e *entry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.entries[k] != e {
@@ -414,8 +414,11 @@ func (s *Source) crashed(k key, e *entry) {
 	delete(s.entries, k)
 	retry := s.o.Clock.After(startRetry)
 	go func() {
-		<-retry
-		s.askReplan()
+		select {
+		case <-retry:
+			s.askReplan()
+		case <-ctx.Done():
+		}
 	}()
 }
 

@@ -166,6 +166,11 @@ func (c *memConfig) readNames() []string {
 	return slices.Sorted(maps.Keys(c.reads))
 }
 
+// panickyError is an error whose text can't be read.
+type panickyError struct{}
+
+func (panickyError) Error() string { panic("error text broke") }
+
 // memSettings exports over TLS to a port nothing listens on.
 const memSettings = `cluster: mem
 postgres:
@@ -719,6 +724,18 @@ var _ = Describe("An engine on an in-memory Config", func() {
 		n := h.cfg.settingsCalls()
 		h.reload()
 		Expect(h.cfg.settingsCalls()).To(BeNumerically(">", n))
+	})
+
+	It("backs off a facts round that gathers but panics after its success path", func() {
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) },
+			func(context.Context, int) (planner.Facts, error) {
+				return planner.Facts{Version: memPrimary.Version, Databases: memPrimary.Databases, ChecksErr: panickyError{}}, nil
+			})
+		h.advance(func() bool { return len(h.roundTimes()) >= 4 })
+		gotGaps := gaps(h.roundTimes())
+		for i, wait := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second} {
+			Expect(gotGaps[i]).To(And(BeNumerically(">=", wait), BeNumerically("<", wait+200*time.Millisecond)), "gap %d", i)
+		}
 	})
 
 	It("sets cnpg_collector_up to 0 when a facts round panics", func() {

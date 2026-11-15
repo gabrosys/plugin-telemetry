@@ -610,10 +610,13 @@ func (e *engine) onEarlyFacts(ctx context.Context) {
 // factsRound runs one facts round. A round that panics counts as a failed one: upMetric is 0 and, when
 // the timer drove it, the timer is armed again with the backoff.
 func (e *engine) factsRound(ctx context.Context, timed bool) {
+	before := e.factsFailures
 	if !safe.Call(log.FromContext(ctx).GetLogger(), "facts round", func() { e.gatherRound(ctx, timed) }) {
 		return
 	}
 	e.setUp(false)
+	// The round may have reset the count before it panicked.
+	e.factsFailures = before
 	if cur := e.plan.current; timed && cur != nil {
 		e.factsFailures++
 		e.setFactsTimer(factsWait(e.factsFailures, cur.settings.PlanInterval))

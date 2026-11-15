@@ -7,6 +7,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/gabrosys/plugin-telemetry/internal/export/otlptest"
+	"github.com/gabrosys/plugin-telemetry/internal/safe"
 )
 
 func TestExport(t *testing.T) {
@@ -34,3 +35,5 @@ var _ = BeforeSuite(func() {
 	pki.client2.cert, pki.client2.key, err = pki.caA.Issue("client-2")
 	Expect(err).NotTo(HaveOccurred())
 })
+
+var _ = BeforeEach(safe.Reset)

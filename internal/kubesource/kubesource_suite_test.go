@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/gabrosys/plugin-telemetry/internal/kubesource"
+	"github.com/gabrosys/plugin-telemetry/internal/safe"
 )
 
 func TestKubesource(t *testing.T) {
@@ -142,3 +143,5 @@ func writeFile(path, content string) error {
 var errForbidden = errors.New("RBAC: access denied")
 
 func metaCreate() metav1.CreateOptions { return metav1.CreateOptions{} }
+
+var _ = BeforeEach(safe.Reset)

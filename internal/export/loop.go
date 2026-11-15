@@ -3,7 +3,6 @@ package export
 import (
 	"context"
 	"math/rand/v2"
-	"slices"
 	"sync"
 	"time"
 
@@ -31,9 +30,8 @@ type Loop struct {
 	rnd    *rand.Rand // used by Run only
 	stats  *selfmetrics.Stats
 
-	mu      sync.Mutex // guards pending and unused
+	mu      sync.Mutex // guards pending
 	pending *target
-	unused  []*Exporter   // replaced before their first tick
 	wake    chan struct{} // signals the first SetExporter to a waiting Run
 }
 
@@ -42,34 +40,32 @@ func NewLoop(reader *sdkmetric.ManualReader, res *resource.Resource, clk clock.C
 	return &Loop{reader: reader, res: res, clk: clk, rnd: rnd, stats: stats, wake: make(chan struct{}, 1)}
 }
 
-// SetExporter takes effect at the next tick; the previous exporter is shut down after its export ends.
-// A nil exporter or a non-positive interval is ignored.
+// SetExporter takes effect at the next tick; the previous exporter is shut down after its export ends,
+// and a pending one it replaces at once. A nil exporter or a non-positive interval is ignored.
 func (l *Loop) SetExporter(e *Exporter, interval time.Duration, maxPoints int) {
 	if e == nil || interval <= 0 {
 		return
 	}
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.pending != nil && l.pending.exp != e {
-		l.unused = append(l.unused, l.pending.exp)
-	}
+	replaced := l.pending
 	l.pending = &target{exp: e, interval: interval, maxPoints: maxPoints}
+	l.mu.Unlock()
+	if replaced != nil && replaced.exp != e {
+		l.shutdown(context.Background(), replaced.exp)
+	}
 	select {
 	case l.wake <- struct{}{}:
 	default:
 	}
 }
 
-// take returns the pending target, or nil, and the exporters replaced before they were used.
-func (l *Loop) take() (*target, []*Exporter) {
+// take returns the pending target, or nil.
+func (l *Loop) take() *target {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	p, unused := l.pending, l.unused
-	l.pending, l.unused = nil, nil
-	if p != nil {
-		unused = slices.DeleteFunc(unused, func(e *Exporter) bool { return e == p.exp })
-	}
-	return p, unused
+	p := l.pending
+	l.pending = nil
+	return p
 }
 
 // Run exports until ctx ends, then shuts the exporters down. It waits for the first
@@ -79,9 +75,7 @@ func (l *Loop) Run(ctx context.Context) error {
 	defer func() { l.shutdownAll(ctx, cur) }()
 
 	for cur == nil {
-		var unused []*Exporter
-		cur, unused = l.take()
-		l.shutdown(ctx, unused...)
+		cur = l.take()
 		if cur != nil {
 			break
 		}
@@ -98,14 +92,11 @@ func (l *Loop) Run(ctx context.Context) error {
 			return nil
 		}
 		at := next
-		if p, unused := l.take(); p != nil || len(unused) > 0 {
-			l.shutdown(ctx, unused...)
-			if p != nil {
-				if p.exp != cur.exp {
-					l.shutdown(ctx, cur.exp)
-				}
-				cur = p
+		if p := l.take(); p != nil {
+			if p.exp != cur.exp {
+				l.shutdown(ctx, cur.exp)
 			}
+			cur = p
 		}
 		l.tick(ctx, cur, at)
 
@@ -201,14 +192,14 @@ func (l *Loop) shutdown(ctx context.Context, exps ...*Exporter) {
 	}
 }
 
-// shutdownAll shuts down the current exporter and any set but not used yet.
+// shutdownAll shuts down the current exporter and the pending one.
 func (l *Loop) shutdownAll(ctx context.Context, cur *target) {
-	p, unused := l.take()
-	if p != nil && (cur == nil || p.exp != cur.exp) {
-		unused = append(unused, p.exp)
-	}
+	var exps []*Exporter
 	if cur != nil {
-		unused = append(unused, cur.exp)
+		exps = append(exps, cur.exp)
 	}
-	l.shutdown(ctx, unused...)
+	if p := l.take(); p != nil && (cur == nil || p.exp != cur.exp) {
+		exps = append(exps, p.exp)
+	}
+	l.shutdown(ctx, exps...)
 }

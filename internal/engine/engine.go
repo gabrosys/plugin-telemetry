@@ -332,15 +332,18 @@ func (e *engine) reload(ctx context.Context) {
 	logger.Error(err, "invalid configuration, keeping the one in force", "config", e.cfg.Name(), "generation", e.plan.generation)
 }
 
-// onChange reloads the exporter's files and the configuration, each only if its files changed.
+// onChange rebuilds the exporter and reloads the configuration, each only if its files changed.
 func (e *engine) onChange(ctx context.Context) {
 	if e.exp != nil {
 		if d := digestOf(e.cfg.ReadFile, e.exporterFiles); d != e.exporterDigest {
 			e.exporterDigest = d
-			if err := e.exp.Reload(); err != nil { //nolint:contextcheck // Exporter.Reload takes no context
-				log.FromContext(ctx).Error(err, "reload the exporter files")
+			ex := e.plan.current.settings.Exporter
+			if exp, err := export.NewExporter(ctx, ex, e.cfg.ReadFile); err != nil {
+				log.FromContext(ctx).Error(err, "rebuild the exporter, keeping the current one")
 			} else {
-				log.FromContext(ctx).Info("reloaded the exporter files")
+				e.loop.l.SetExporter(exp, ex.Interval, ex.MaxPointsPerRequest) //nolint:contextcheck // SetExporter takes no context
+				e.exp = exp
+				log.FromContext(ctx).Info("rebuilt the exporter after its files changed")
 			}
 		}
 	}
@@ -385,7 +388,7 @@ func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 			// The loop takes the resource at creation; the old loop shuts the old exporter down.
 			e.startLoop(ctx, export.Resource(s, e.getenv), exp, s.Exporter)
 		} else {
-			e.loop.l.SetExporter(exp, s.Exporter.Interval, s.Exporter.MaxPointsPerRequest)
+			e.loop.l.SetExporter(exp, s.Exporter.Interval, s.Exporter.MaxPointsPerRequest) //nolint:contextcheck // SetExporter takes no context
 		}
 		e.exp, e.exporterFiles, e.exporterDigest = exp, files, digest
 	}
@@ -490,7 +493,7 @@ func (e *engine) serverVersion() *semver.Version { return e.server.Load() }
 func (e *engine) startLoop(ctx context.Context, res *resource.Resource, exp *export.Exporter, s settings.Exporter) {
 	e.stopLoop()
 	l := export.NewLoop(e.reader, res, e.clk, e.newRand(), e.stats)
-	l.SetExporter(exp, s.Interval, s.MaxPointsPerRequest)
+	l.SetExporter(exp, s.Interval, s.MaxPointsPerRequest) //nolint:contextcheck // SetExporter takes no context
 	lctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {

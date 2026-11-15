@@ -356,18 +356,29 @@ var _ = Describe("Loop", func() {
 		Expect(srvB.Requests()).To(HaveLen(2))
 	})
 
-	It("shuts down an exporter replaced before its first tick, and the last one when Run returns", func(ctx SpecContext) {
+	It("shuts down an exporter replaced before its first tick", func(ctx SpecContext) {
 		srvA, srvB := newHTTPServer(nil), newHTTPServer(nil)
 		a, b := httpExporter(srvA), httpExporter(srvB)
 		h := newLoopHarness(1)
 		h.loop.SetExporter(a, 10*time.Second, 1000)
 		h.loop.SetExporter(b, 10*time.Second, 1000)
+
+		Expect(a.Export(ctx, batch(1, 1))).To(MatchError(export.ErrExporterShutdown))
 		h.start()
 		h.stepUntilRequest(srvB, 10)
 
 		Expect(srvA.Requests()).To(BeEmpty())
-		Expect(a.Export(ctx, batch(1, 1))).To(MatchError(export.ErrExporterShutdown))
+	})
+
+	It("shuts down the last exporter when Run returns", func(ctx SpecContext) {
+		srv := newHTTPServer(nil)
+		e := httpExporter(srv)
+		h := newLoopHarness(1)
+		h.loop.SetExporter(e, 10*time.Second, 1000)
+		h.start()
+		h.stepUntilRequest(srv, 10)
+
 		h.stop()
-		Expect(b.Export(ctx, batch(1, 1))).To(MatchError(export.ErrExporterShutdown))
+		Expect(e.Export(ctx, batch(1, 1))).To(MatchError(export.ErrExporterShutdown))
 	})
 })

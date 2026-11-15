@@ -181,7 +181,7 @@ var _ = Describe("Exporter", func() {
 			Expect(export.HTTPProxy(e)).To(BeNil())
 		})
 
-		It("adds the headers file's entries to every request and picks up a change without a new exporter", func(ctx SpecContext) {
+		It("adds the headers file's entries to every request", func(ctx SpecContext) {
 			srv := newHTTPServer(nil)
 			s := exporterSettings(settings.ProtocolHTTP, srv.URL+"/v1/metrics")
 			s.HeadersFile = writeFile(dir, "headers", []byte("Authorization=Bearer%20one, x-tenant = a\n"))
@@ -189,36 +189,28 @@ var _ = Describe("Exporter", func() {
 
 			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
 			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
-			writeFile(dir, "headers", []byte("x-tenant=b"))
-			Expect(e.Reload()).To(Succeed())
-			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
 
 			reqs := srv.Requests()
-			Expect(reqs).To(HaveLen(3))
-			for _, r := range reqs[:2] {
+			Expect(reqs).To(HaveLen(2))
+			for _, r := range reqs {
 				Expect(r.Header.Get("Authorization")).To(Equal("Bearer one"))
 				Expect(r.Header.Get("X-Tenant")).To(Equal("a"))
 			}
-			Expect(reqs[2].Header.Get("X-Tenant")).To(Equal("b"))
-			Expect(reqs[2].Header.Get("Authorization")).To(BeEmpty())
 		})
 
-		It("keeps the last good headers when Reload fails, without the values in the error", func(ctx SpecContext) {
+		It("refuses a broken headers file without the values in the error", func() {
 			srv := newHTTPServer(nil)
 			s := exporterSettings(settings.ProtocolHTTP, srv.URL+"/v1/metrics")
-			s.HeadersFile = writeFile(dir, "headers", []byte("x-tenant=a"))
-			e := newExporter(s)
+			s.HeadersFile = writeFile(dir, "headers", []byte("x-tenant=secret-value,broken"))
 
-			writeFile(dir, "headers", []byte("x-tenant=secret-value,broken"))
-			err := e.Reload()
+			e, err := export.NewExporter(context.Background(), s, os.ReadFile)
+
 			Expect(err).To(HaveOccurred())
+			Expect(e).To(BeNil())
 			Expect(err.Error()).NotTo(ContainSubstring("secret-value"))
-			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
-
-			Expect(srv.Requests()[0].Header.Get("X-Tenant")).To(Equal("a"))
 		})
 
-		It("presents the client certificate and picks up a renewed one without a new exporter", func(ctx SpecContext) {
+		It("presents the client certificate", func(ctx SpecContext) {
 			srv := newHTTPServer(serverTLS(pki.caA))
 			s := exporterSettings(settings.ProtocolHTTP, srv.URL+"/v1/metrics")
 			s.TLS.CAFile = writeFile(dir, "ca.pem", pki.caA.PEM)
@@ -227,18 +219,13 @@ var _ = Describe("Exporter", func() {
 			e := newExporter(s)
 
 			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
-			writeFile(dir, "tls.crt", pki.client2.cert)
-			writeFile(dir, "tls.key", pki.client2.key)
-			Expect(e.Reload()).To(Succeed())
-			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
 
 			reqs := srv.Requests()
-			Expect(reqs).To(HaveLen(2))
+			Expect(reqs).To(HaveLen(1))
 			Expect(reqs[0].ClientCN()).To(Equal("client-1"))
-			Expect(reqs[1].ClientCN()).To(Equal("client-2"))
 		})
 
-		It("trusts a CA file in place of the system roots after Reload", func(ctx SpecContext) {
+		It("trusts a CA file in place of the system roots", func(ctx SpecContext) {
 			srv := newHTTPServer(serverTLS(pki.caB))
 			s := exporterSettings(settings.ProtocolHTTP, srv.URL+"/v1/metrics")
 			s.TLS.CAFile = writeFile(dir, "ca.pem", pki.caA.PEM)
@@ -247,8 +234,8 @@ var _ = Describe("Exporter", func() {
 			Expect(e.Export(ctx, batch(1, 1))).NotTo(Succeed())
 			Expect(srv.Requests()).To(BeEmpty())
 
-			writeFile(dir, "ca.pem", pki.caB.PEM)
-			Expect(e.Reload()).To(Succeed())
+			s.TLS.CAFile = writeFile(dir, "ca.pem", pki.caB.PEM)
+			e = newExporter(s)
 			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
 			Expect(srv.Requests()).To(HaveLen(1))
 		})
@@ -366,14 +353,13 @@ var _ = Describe("Exporter", func() {
 			Expect(srv.Requests()).To(HaveLen(sent))
 		}, SpecTimeout(10*time.Second))
 
-		It("refuses exports and reloads after Shutdown", func(ctx SpecContext) {
+		It("refuses exports after Shutdown", func(ctx SpecContext) {
 			srv := newHTTPServer(nil)
 			e := newExporter(exporterSettings(settings.ProtocolHTTP, srv.URL+"/v1/metrics"))
 
 			Expect(e.Shutdown(ctx)).To(Succeed())
 
 			Expect(e.Export(ctx, batch(1, 1))).To(MatchError(export.ErrExporterShutdown))
-			Expect(e.Reload()).To(MatchError(export.ErrExporterShutdown))
 			Expect(srv.Requests()).To(BeEmpty())
 		})
 	})
@@ -397,8 +383,6 @@ var _ = Describe("Exporter", func() {
 			e := newExporter(s)
 
 			Expect(e.Export(ctx, batch(3, 1))).To(Succeed())
-			writeFile(dir, "headers", []byte("x-tenant=b"))
-			Expect(e.Reload()).To(Succeed())
 			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
 
 			reqs := srv.Requests()
@@ -407,11 +391,11 @@ var _ = Describe("Exporter", func() {
 			Expect(reqs[0].ClientCN()).To(Equal("client-1"))
 			Expect(reqs[0].Header.Get("X-Tenant")).To(Equal("a"))
 			Expect(reqs[0].Points()).To(Equal(3))
-			Expect(reqs[1].Header.Get("X-Tenant")).To(Equal("b"))
+			Expect(reqs[1].Header.Get("X-Tenant")).To(Equal("a"))
 			Expect(e.ComponentType()).To(Equal("otlp_grpc_metric_exporter"))
 		})
 
-		It("redials when Reload finds a new CA file", func(ctx SpecContext) {
+		It("fails against a server its CA file doesn't vouch for", func(ctx SpecContext) {
 			s.TLS.CAFile = writeFile(dir, "ca.pem", pki.caB.PEM)
 			s.Interval = time.Second
 			s.Timeout = 300 * time.Millisecond
@@ -419,11 +403,6 @@ var _ = Describe("Exporter", func() {
 
 			Expect(e.Export(ctx, batch(1, 1))).NotTo(Succeed())
 			Expect(srv.Requests()).To(BeEmpty())
-
-			writeFile(dir, "ca.pem", pki.caA.PEM)
-			Expect(e.Reload()).To(Succeed())
-			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
-			Expect(srv.Requests()).To(HaveLen(1))
 		}, SpecTimeout(10*time.Second))
 
 		It("times out each attempt after exporter.timeout and retries", func(ctx SpecContext) {

@@ -19,11 +19,10 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/sources"
 )
 
-// material is what Reload re-reads from the files named in the settings.
+// material is what NewExporter reads from the files named in the settings.
 type material struct {
 	headers map[string]string
-	caPEM   []byte
-	roots   *x509.CertPool   // system roots plus caPEM; nil for plaintext
+	roots   *x509.CertPool   // system roots plus the CA file; nil for plaintext
 	cert    *tls.Certificate // nil without a client certificate
 }
 
@@ -48,10 +47,11 @@ func loadMaterial(s settings.Exporter, secure bool, read sources.ReadFile) (mate
 		return m, fmt.Errorf("load system roots: %w", err)
 	}
 	if s.TLS.CAFile != "" {
-		if m.caPEM, err = read(s.TLS.CAFile); err != nil {
+		caPEM, err := read(s.TLS.CAFile)
+		if err != nil {
 			return m, fmt.Errorf("read ca file: %w", err)
 		}
-		if !roots.AppendCertsFromPEM(m.caPEM) {
+		if !roots.AppendCertsFromPEM(caPEM) {
 			return m, fmt.Errorf("ca file %s: no PEM certificate", s.TLS.CAFile)
 		}
 	}
@@ -110,33 +110,17 @@ func isKeyChar(r rune) bool {
 	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.'
 }
 
-// live holds what Reload swaps in place.
-type live struct {
-	headers atomic.Pointer[map[string]string]
-	cert    atomic.Pointer[tls.Certificate]
-}
-
-func (l *live) currentHeaders() map[string]string { return *l.headers.Load() }
-
-// clientCertificate serves tls.Config.GetClientCertificate from the current key pair.
-func (l *live) clientCertificate(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
-	if c := l.cert.Load(); c != nil {
-		return c, nil
-	}
-	return &tls.Certificate{}, nil
-}
-
-func tlsConfig(t settings.TLS, roots *x509.CertPool, l *live) *tls.Config {
+func tlsConfig(t settings.TLS, m material) *tls.Config {
 	cfg := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		ServerName: t.ServerName,
-		RootCAs:    roots,
+		RootCAs:    m.roots,
 	}
 	if t.MinVersion == "1.3" {
 		cfg.MinVersion = tls.VersionTLS13
 	}
-	if t.CertFile != "" {
-		cfg.GetClientCertificate = l.clientCertificate
+	if m.cert != nil {
+		cfg.Certificates = []tls.Certificate{*m.cert}
 	}
 	return cfg
 }
@@ -158,39 +142,23 @@ func newHTTPTransport(cfg *tls.Config) *http.Transport {
 	}
 }
 
-// roundTripper sends through the current *http.Transport, adds the current headers to every
-// request and records each response status in the request's attempts.
+// roundTripper sends through base and records each response status in the request's attempts.
 type roundTripper struct {
-	base atomic.Pointer[http.Transport]
-	live *live
+	base *http.Transport
 }
 
 func (t *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	out := req.Clone(req.Context())
-	for k, v := range t.live.currentHeaders() {
-		if out.Header.Get(k) == "" {
-			out.Header.Set(k, v)
-		}
-	}
 	a := attemptsFrom(req.Context())
 	a.begin()
-	resp, err := t.base.Load().RoundTrip(out)
+	resp, err := t.base.RoundTrip(req)
 	if resp != nil {
 		a.response(resp.StatusCode)
 	}
 	return resp, err //nolint:wrapcheck // http.Client and url.Error.Temporary need the transport's error as is
 }
 
-// CloseIdleConnections closes the idle connections of the current transport.
-func (t *roundTripper) CloseIdleConnections() { t.base.Load().CloseIdleConnections() }
-
-// swap replaces the transport and closes the old one's idle connections; its busy ones
-// close after IdleConnTimeout once their requests end.
-func (t *roundTripper) swap(next *http.Transport) {
-	if old := t.base.Swap(next); old != nil {
-		old.CloseIdleConnections()
-	}
-}
+// CloseIdleConnections closes the idle connections of the transport.
+func (t *roundTripper) CloseIdleConnections() { t.base.CloseIdleConnections() }
 
 // attempts records the HTTP responses of one export.
 type attempts struct {
@@ -221,18 +189,6 @@ func attemptsFrom(ctx context.Context) *attempts {
 	a, _ := ctx.Value(attemptsKey{}).(*attempts)
 	return a
 }
-
-// rpcHeaders sends the current headers as gRPC metadata on every call.
-type rpcHeaders struct {
-	live   *live
-	secure bool
-}
-
-func (h rpcHeaders) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
-	return h.live.currentHeaders(), nil
-}
-
-func (h rpcHeaders) RequireTransportSecurity() bool { return h.secure }
 
 // boundAttempt gives each call its own timeout and adds context.DeadlineExceeded to the
 // error of a call whose context expired, which grpc-go reports only as a DeadlineExceeded status.

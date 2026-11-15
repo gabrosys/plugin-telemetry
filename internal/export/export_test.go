@@ -5,7 +5,7 @@ import (
 	"net/url"
 )
 
-// HTTPProxy returns the Proxy of the HTTP exporter's current transport.
+// HTTPProxy returns the Proxy of the HTTP exporter's transport.
 func HTTPProxy(e *Exporter) func(*http.Request) (*url.URL, error) {
-	return e.rt.base.Load().Proxy
+	return e.rt.base.Proxy
 }

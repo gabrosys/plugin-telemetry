@@ -1,9 +1,7 @@
 package export
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -37,53 +35,29 @@ const (
 	shutdownTimeout = 5 * time.Second
 )
 
-// ErrExporterShutdown is returned by Export and Reload after Shutdown.
+// ErrExporterShutdown is returned by Export after Shutdown.
 var ErrExporterShutdown = errors.New("exporter is shut down")
 
 // Exporter wraps otlpmetrichttp or otlpmetricgrpc with our own HTTP client or gRPC
 // connection, so no OTEL_EXPORTER_OTLP_* or proxy variable can change where or how it sends.
+// It reads its files once; a configuration change builds a new Exporter.
 type Exporter struct {
 	s         settings.Exporter
-	read      sources.ReadFile
 	component string
 	address   string
 	port      int
 	secure    bool
 
-	live live
-	rt   *roundTripper // HTTP only
+	exp  sdkmetric.Exporter
+	conn *grpc.ClientConn // gRPC only
+	rt   *roundTripper    // HTTP only
 
-	reloadMu sync.Mutex // serializes Reload and guards caPEM
-	caPEM    []byte
-
-	mu         sync.Mutex // guards current, closed and retireErrs
-	current    *backend
-	closed     bool
-	retireErrs []error
-	retired    sync.WaitGroup // backends replaced by Reload, until they are closed
+	mu       sync.Mutex // guards closed
+	closed   bool
+	inflight sync.WaitGroup // running exports
 }
 
-// backend is one SDK exporter and, for gRPC, the connection it sends on.
-type backend struct {
-	exp      sdkmetric.Exporter
-	conn     *grpc.ClientConn
-	inflight sync.WaitGroup
-}
-
-func (b *backend) close(ctx context.Context) error {
-	var errs []error
-	if err := b.exp.Shutdown(ctx); err != nil {
-		errs = append(errs, fmt.Errorf("shut down otlp exporter: %w", err))
-	}
-	if b.conn != nil {
-		if err := b.conn.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close grpc connection: %w", err))
-		}
-	}
-	return errors.Join(errs...)
-}
-
-// NewExporter builds the exporter from s and reads its TLS and header files with read, now and on Reload.
+// NewExporter builds the exporter from s and reads its TLS and header files once with read.
 func NewExporter(ctx context.Context, s settings.Exporter, read sources.ReadFile) (*Exporter, error) {
 	var component string
 	switch s.Protocol {
@@ -101,7 +75,7 @@ func NewExporter(ctx context.Context, s settings.Exporter, read sources.ReadFile
 	if s.Timeout <= 0 || s.Interval*9/10 <= s.Timeout {
 		return nil, fmt.Errorf("exporter timeout %s: must be positive and below 0.9 × interval %s", s.Timeout, s.Interval)
 	}
-	e := &Exporter{s: s, read: read, component: component, address: u.Hostname(), secure: u.Scheme == "https"}
+	e := &Exporter{s: s, component: component, address: u.Hostname(), secure: u.Scheme == "https"}
 	e.port = 80
 	if e.secure {
 		e.port = 443
@@ -116,26 +90,15 @@ func NewExporter(ctx context.Context, s settings.Exporter, read sources.ReadFile
 	if err != nil {
 		return nil, err
 	}
-	e.store(m)
-
 	if s.Protocol == settings.ProtocolHTTP {
-		e.current, err = e.newHTTPBackend(ctx, m)
+		err = e.initHTTP(ctx, m)
 	} else {
-		e.current, err = e.newGRPCBackend(ctx, m)
+		err = e.initGRPC(ctx, m)
 	}
 	if err != nil {
 		return nil, err
 	}
 	return e, nil
-}
-
-// store publishes the headers, the client certificate and the CA of m.
-func (e *Exporter) store(m material) {
-	e.live.headers.Store(&m.headers)
-	if m.cert != nil {
-		e.live.cert.Store(m.cert)
-	}
-	e.caPEM = m.caPEM
 }
 
 // exportTimeout bounds one export with its retries.
@@ -145,13 +108,12 @@ func (e *Exporter) retry() (initial, maxInterval, maxElapsed time.Duration) {
 	return time.Second, 5 * time.Second, e.exportTimeout() - e.s.Timeout
 }
 
-func (e *Exporter) newHTTPBackend(ctx context.Context, m material) (*backend, error) {
-	e.rt = &roundTripper{live: &e.live}
-	tlsCfg := tlsConfig(e.s.TLS, m.roots, &e.live)
+func (e *Exporter) initHTTP(ctx context.Context, m material) error {
+	tlsCfg := tlsConfig(e.s.TLS, m)
 	if !e.secure {
 		tlsCfg = nil
 	}
-	e.rt.base.Store(newHTTPTransport(tlsCfg))
+	e.rt = &roundTripper{base: newHTTPTransport(tlsCfg)}
 	client := &http.Client{
 		Transport: e.rt,
 		Timeout:   e.s.Timeout,
@@ -169,7 +131,7 @@ func (e *Exporter) newHTTPBackend(ctx context.Context, m material) (*backend, er
 		otlpmetrichttp.WithEndpointURL(e.s.Endpoint),
 		otlpmetrichttp.WithHTTPClient(client),
 		otlpmetrichttp.WithTLSClientConfig(tlsCfg),
-		otlpmetrichttp.WithHeaders(map[string]string{}),
+		otlpmetrichttp.WithHeaders(m.headers),
 		otlpmetrichttp.WithCompression(compression),
 		otlpmetrichttp.WithTimeout(e.s.Timeout),
 		otlpmetrichttp.WithRetry(otlpmetrichttp.RetryConfig{
@@ -180,19 +142,20 @@ func (e *Exporter) newHTTPBackend(ctx context.Context, m material) (*backend, er
 		otlpmetrichttp.WithAggregationSelector(sdkmetric.DefaultAggregationSelector),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("create otlp http exporter: %w", err)
+		e.rt.CloseIdleConnections()
+		return fmt.Errorf("create otlp http exporter: %w", err)
 	}
-	return &backend{exp: exp}, nil
+	e.exp = exp
+	return nil
 }
 
-func (e *Exporter) newGRPCBackend(ctx context.Context, m material) (*backend, error) {
+func (e *Exporter) initGRPC(ctx context.Context, m material) error {
 	creds := insecure.NewCredentials()
 	if e.secure {
-		creds = credentials.NewTLS(tlsConfig(e.s.TLS, m.roots, &e.live))
+		creds = credentials.NewTLS(tlsConfig(e.s.TLS, m))
 	}
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(creds),
-		grpc.WithPerRPCCredentials(rpcHeaders{live: &e.live, secure: e.secure}),
 		grpc.WithNoProxy(),
 		grpc.WithDisableServiceConfig(),
 		grpc.WithUnaryInterceptor(boundAttempt(e.s.Timeout)),
@@ -203,13 +166,13 @@ func (e *Exporter) newGRPCBackend(ctx context.Context, m material) (*backend, er
 	}
 	conn, err := grpc.NewClient(net.JoinHostPort(e.address, strconv.Itoa(e.port)), opts...)
 	if err != nil {
-		return nil, fmt.Errorf("create grpc client: %w", err)
+		return fmt.Errorf("create grpc client: %w", err)
 	}
 
 	initial, maxInterval, maxElapsed := e.retry()
 	expOpts := []otlpmetricgrpc.Option{
 		otlpmetricgrpc.WithGRPCConn(conn),
-		otlpmetricgrpc.WithHeaders(map[string]string{}),
+		otlpmetricgrpc.WithHeaders(m.headers),
 		otlpmetricgrpc.WithTimeout(e.exportTimeout()),
 		otlpmetricgrpc.WithRetry(otlpmetricgrpc.RetryConfig{
 			Enabled: true, InitialInterval: initial, MaxInterval: maxInterval, MaxElapsedTime: maxElapsed,
@@ -223,90 +186,14 @@ func (e *Exporter) newGRPCBackend(ctx context.Context, m material) (*backend, er
 	}
 	exp, err := otlpmetricgrpc.New(ctx, expOpts...)
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("create otlp grpc exporter: %w", err), conn.Close())
+		return errors.Join(fmt.Errorf("create otlp grpc exporter: %w", err), conn.Close())
 	}
-	return &backend{exp: exp, conn: conn}, nil
+	e.exp, e.conn = exp, conn
+	return nil
 }
 
 // ComponentType is the semconv otel.component.type of the exporter.
 func (e *Exporter) ComponentType() string { return e.component }
-
-// Reload re-reads the TLS and header files. HTTP swaps certificates, CA and headers in
-// place; gRPC swaps the client certificate and headers in place and redials on a CA change.
-// On error the exporter keeps what it had.
-func (e *Exporter) Reload() error {
-	e.reloadMu.Lock()
-	defer e.reloadMu.Unlock()
-	if e.isClosed() {
-		return ErrExporterShutdown
-	}
-
-	m, err := loadMaterial(e.s, e.secure, e.read)
-	if err != nil {
-		return fmt.Errorf("reload exporter: %w", err)
-	}
-	caChanged := e.secure && !bytes.Equal(m.caPEM, e.caPEM)
-	certChanged := m.cert != nil && !sameLeaf(m.cert, e.live.cert.Load())
-
-	var next *backend
-	if caChanged && e.s.Protocol == settings.ProtocolGRPC {
-		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		if next, err = e.newGRPCBackend(ctx, m); err != nil {
-			return fmt.Errorf("reload exporter: %w", err)
-		}
-	}
-	e.store(m)
-
-	switch {
-	case next != nil:
-		return e.replace(next)
-	case caChanged:
-		e.rt.swap(newHTTPTransport(tlsConfig(e.s.TLS, m.roots, &e.live)))
-	case certChanged && e.rt != nil:
-		e.rt.CloseIdleConnections()
-	}
-	return nil
-}
-
-func sameLeaf(a, b *tls.Certificate) bool {
-	return a != nil && b != nil && len(a.Certificate) > 0 && len(b.Certificate) > 0 &&
-		bytes.Equal(a.Certificate[0], b.Certificate[0])
-}
-
-func (e *Exporter) isClosed() bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.closed
-}
-
-// replace makes next the current backend and closes the old one after its exports end.
-func (e *Exporter) replace(next *backend) error {
-	e.mu.Lock()
-	if e.closed {
-		e.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		return errors.Join(ErrExporterShutdown, next.close(ctx))
-	}
-	old := e.current
-	e.current = next
-	e.retired.Add(1)
-	e.mu.Unlock()
-
-	go func() {
-		defer e.retired.Done()
-		old.inflight.Wait()
-		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		if err := old.close(ctx); err != nil {
-			e.mu.Lock()
-			e.retireErrs = append(e.retireErrs, err)
-			e.mu.Unlock()
-		}
-	}()
-	return nil
-}
 
 // Export sends rm in one request, retrying for at most 0.9 × interval.
 func (e *Exporter) Export(ctx context.Context, rm *metricdata.ResourceMetrics) error {
@@ -321,16 +208,15 @@ func (e *Exporter) export(ctx context.Context, rm *metricdata.ResourceMetrics) (
 		e.mu.Unlock()
 		return 0, ErrExporterShutdown
 	}
-	b := e.current
-	b.inflight.Add(1)
+	e.inflight.Add(1)
 	e.mu.Unlock()
-	defer b.inflight.Done()
+	defer e.inflight.Done()
 
 	// Created before the SDK's own export timeout, so it expires first with context.DeadlineExceeded.
 	ctx, cancel := context.WithTimeout(ctx, e.exportTimeout())
 	defer cancel()
 	a := &attempts{}
-	err := b.exp.Export(withAttempts(ctx, a), rm)
+	err := e.exp.Export(withAttempts(ctx, a), rm)
 	last, final := int(a.last.Load()), int(a.final.Load())
 	if err == nil {
 		return last, nil
@@ -341,7 +227,7 @@ func (e *Exporter) export(ctx context.Context, rm *metricdata.ResourceMetrics) (
 	return last, fmt.Errorf("otlp export: %w", err)
 }
 
-// Shutdown waits for running exports, then closes the SDK exporter and its connections.
+// Shutdown waits for running exports, then closes the SDK exporter and its connection.
 // If ctx ends first it returns, and the closing still happens once those exports end.
 func (e *Exporter) Shutdown(ctx context.Context) error {
 	e.mu.Lock()
@@ -350,22 +236,14 @@ func (e *Exporter) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	e.closed = true
-	cur := e.current
 	e.mu.Unlock()
 
 	result := make(chan error, 1)
 	go func() {
-		cur.inflight.Wait()
-		e.retired.Wait()
+		e.inflight.Wait()
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 		defer cancel()
-		err := cur.close(cctx)
-		if e.rt != nil {
-			e.rt.CloseIdleConnections()
-		}
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		result <- errors.Join(append([]error{err}, e.retireErrs...)...)
+		result <- e.close(cctx)
 	}()
 	select {
 	case err := <-result:
@@ -373,4 +251,20 @@ func (e *Exporter) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return fmt.Errorf("shut down exporter: %w", ctx.Err())
 	}
+}
+
+func (e *Exporter) close(ctx context.Context) error {
+	var errs []error
+	if err := e.exp.Shutdown(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("shut down otlp exporter: %w", err))
+	}
+	if e.conn != nil {
+		if err := e.conn.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close grpc connection: %w", err))
+		}
+	}
+	if e.rt != nil {
+		e.rt.CloseIdleConnections()
+	}
+	return errors.Join(errs...)
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"maps"
 	"slices"
 	"sort"
 	"strconv"
@@ -19,7 +18,6 @@ import (
 
 	"github.com/gabrosys/plugin-telemetry/internal/engine"
 	"github.com/gabrosys/plugin-telemetry/internal/executor"
-	"github.com/gabrosys/plugin-telemetry/internal/export"
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
@@ -31,7 +29,6 @@ import (
 const (
 	connectTimeout = 5 * time.Second
 	poolIdle       = 30 * time.Second
-	redacted       = "<redacted>"
 	absent         = "-"
 )
 
@@ -326,7 +323,6 @@ func series(name string, labels []string, value float64) string {
 }
 
 func newPrintConfigCommand(flags *instanceFlags) *cobra.Command {
-	var offline bool
 	cmd := &cobra.Command{
 		Use:   "print-config",
 		Short: "Print the effective settings, the sources and the plan",
@@ -337,15 +333,14 @@ func newPrintConfigCommand(flags *instanceFlags) *cobra.Command {
 				return err
 			}
 
-			return printConfig(cmd.Context(), cmd.OutOrStdout(), open, offline)
+			return printConfig(cmd.Context(), cmd.OutOrStdout(), open)
 		},
 	}
-	cmd.Flags().BoolVar(&offline, "offline", false, "do not connect: print the queries that need no facts to be skipped")
 
 	return cmd
 }
 
-func printConfig(ctx context.Context, w io.Writer, open func(context.Context) (engine.Config, error), offline bool) error {
+func printConfig(ctx context.Context, w io.Writer, open func(context.Context) (engine.Config, error)) error {
 	c, err := openConfig(ctx, open)
 	if err != nil {
 		return err
@@ -357,19 +352,12 @@ func printConfig(ctx context.Context, w io.Writer, open func(context.Context) (e
 	var b strings.Builder
 	b.WriteString(out)
 
-	var connectErr error
-	if offline {
-		b.WriteString("# plan (offline: not planned from live facts)\n")
-		b.WriteString(offlinePlan(c))
-	} else {
-		clearEnv(ctx)
-		var pool *pg.Pool
-		var facts planner.Facts
-		if pool, facts, connectErr = connect(ctx, c); connectErr == nil {
-			pool.Close()
-			b.WriteString("# plan\n")
-			b.WriteString(livePlan(planner.Build(c.defs, c.settings, facts)))
-		}
+	clearEnv(ctx)
+	pool, facts, connectErr := connect(ctx, c)
+	if connectErr == nil {
+		pool.Close()
+		b.WriteString("# plan\n")
+		b.WriteString(livePlan(planner.Build(c.defs, c.settings, facts)))
 	}
 	if _, err := io.WriteString(w, b.String()); err != nil {
 		return fmt.Errorf("write configuration: %w", err)
@@ -378,28 +366,15 @@ func printConfig(ctx context.Context, w io.Writer, open func(context.Context) (e
 	return connectErr
 }
 
-// describe renders the settings, the headers, the sources.
+// describe renders the settings and the sources.
 func describe(c *config) (string, error) {
 	var b strings.Builder
-	shown := c.settings
-	shown.Exporter.Endpoint = settings.RedactEndpoint(shown.Exporter.Endpoint)
-	raw, err := yaml.Marshal(shown)
+	raw, err := yaml.Marshal(c.settings)
 	if err != nil {
 		return "", fmt.Errorf("render settings: %w", err)
 	}
 	b.WriteString("# settings\n")
 	b.Write(raw)
-
-	if f := c.settings.Exporter.HeadersFile; f != "" {
-		b.WriteString("# headers\n")
-		keys, err := headerKeys(c.read, f)
-		if err != nil {
-			fmt.Fprintf(&b, "unreadable: %v\n", err)
-		}
-		for _, k := range keys {
-			fmt.Fprintf(&b, "%s: %s\n", k, redacted)
-		}
-	}
 
 	b.WriteString("# sources\n")
 	for _, st := range c.result.Status {
@@ -413,21 +388,6 @@ func describe(c *config) (string, error) {
 	return b.String(), nil
 }
 
-// headerKeys returns the sorted keys of the headers file when the exporter's parser accepts all of it;
-// otherwise the parser's error, which names the entry by position only.
-func headerKeys(read sources.ReadFile, file string) ([]string, error) {
-	data, err := read(file)
-	if err != nil {
-		return nil, fmt.Errorf("read headers file: %w", err)
-	}
-	headers, err := export.ParseHeaders(string(data))
-	if err != nil {
-		return nil, fmt.Errorf("parse headers file: %w", err)
-	}
-
-	return slices.Sorted(maps.Keys(headers)), nil
-}
-
 func livePlan(p planner.Plan) string {
 	var b strings.Builder
 	for _, j := range p.Jobs {
@@ -435,32 +395,6 @@ func livePlan(p planner.Plan) string {
 	}
 	for _, s := range p.Skips {
 		fmt.Fprintf(&b, "skipped %s\n", skipLine(s))
-	}
-
-	return b.String()
-}
-
-// offlinePlan lists the whole-query skips that need no facts and the interval and group of the other queries.
-func offlinePlan(c *config) string {
-	s := c.settings
-	var b strings.Builder
-	for i := range c.defs {
-		d := &c.defs[i]
-		reason := ""
-		switch {
-		case s.ExcludedQuery(d.Key):
-			reason = planner.ReasonExcludedQuery
-		case d.Disabled != "":
-			reason = planner.ReasonDisabled + d.Disabled
-		case planner.AllMetricsExcluded(d, s):
-			reason = planner.ReasonAllMetrics
-		}
-		if reason != "" {
-			fmt.Fprintf(&b, "skipped %s: %s\n", d.Key, reason)
-			continue
-		}
-		group, interval := planner.EffectiveInterval(d, s)
-		fmt.Fprintf(&b, "unplanned %s group=%s interval=%s\n", d.Key, group, interval)
 	}
 
 	return b.String()

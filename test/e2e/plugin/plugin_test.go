@@ -1047,13 +1047,13 @@ func describeMode(m mode) {
 			Expect(allowed(Default, ctx, "list", "", "secrets", "")).To(BeFalse())
 		}, SpecTimeout(3*time.Minute))
 
-		It("security: print-config redacts the headers and shows no seeded Secret value", func(ctx SpecContext) {
+		It("security: print-config names the headers file and shows no seeded Secret value", func(ctx SpecContext) {
 			for _, pod := range pods(Default, ctx) {
 				stdout, stderr, err := framework.Exec(ctx, cfg, types.NamespacedName{Namespace: ns, Name: pod.Name},
 					metadata.SidecarContainerName, []string{"/plugin-telemetry", "instance", "print-config"})
 				Expect(err).NotTo(HaveOccurred(), stderr)
 				Expect(stdout).To(ContainSubstring("headersFile: secret/"+headersSecret+"/"+headersKey), "print-config shows no configuration")
-				Expect(stdout).To(ContainSubstring(headerName + ": <redacted>"))
+				Expect(stdout).NotTo(ContainSubstring(headerName), "print-config lists no header key")
 
 				for _, sentinel := range sentinels {
 					Expect(stdout).NotTo(ContainSubstring(sentinel), "print-config of %s", pod.Name)

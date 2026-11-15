@@ -247,13 +247,15 @@ var _ = Describe("instance tools in Kubernetes mode", func() {
 	})
 
 	It("print-config reads a snapshot, shows the virtual names and never a Secret value", func() {
-		useSnapshot(newFakeKube("engine-valid.yaml", virtualFiles(), virtual))
-		out, err := execute(context.Background(), "instance", "print-config", "--offline")
-		Expect(err).NotTo(HaveOccurred())
+		useSnapshot(newFakeKube("engine-unreachable.yaml", virtualFiles(), virtual))
+		out, err := execute(context.Background(), "instance", "print-config")
+		Expect(err).To(MatchError(ContainSubstring("connect to PostgreSQL")))
 		Expect(out).To(ContainSubstring("ok configmap/queries/probe.yaml"))
 		Expect(out).To(ContainSubstring("ok metricqueryset/extra"))
-		Expect(out).To(ContainSubstring("authorization: <redacted>"))
-		Expect(out).To(ContainSubstring("x-tenant: <redacted>"))
+		Expect(out).To(ContainSubstring("headersFile: secret/otlp/headers"))
+		Expect(out).NotTo(ContainSubstring("# headers"))
+		Expect(out).NotTo(ContainSubstring("authorization"))
+		Expect(out).NotTo(ContainSubstring("x-tenant"))
 		Expect(out).NotTo(ContainSubstring("s3cr3t-token"))
 		Expect(out).NotTo(ContainSubstring("acme-secret"))
 
@@ -261,21 +263,6 @@ var _ = Describe("instance tools in Kubernetes mode", func() {
 		Expect(gotOptions[0]).To(Equal(kubesource.Options{
 			Namespace: "app", Cluster: "demo", APIServer: "https://10.0.0.1:443", TokenDir: metadata.SidecarTokenDir,
 		}))
-	})
-
-	It("print-config shows only the parse error of a headers Secret in HTTP syntax", func() {
-		const value = "Authorization: Basic dXNlcjpwYXNzd29yZA=="
-		files := virtualFiles()
-		files["secret/otlp/headers"] = []byte(value)
-		useSnapshot(newFakeKube("engine-valid.yaml", files, virtual))
-
-		out, err := execute(context.Background(), "instance", "print-config", "--offline")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(out).To(ContainSubstring("# headers\nunreadable: "))
-		Expect(out).To(ContainSubstring("entry 1:"))
-		for _, part := range append(strings.Fields(value), "dXNlcjpwYXNzd29yZA") {
-			Expect(out).NotTo(ContainSubstring(part))
-		}
 	})
 
 	It("validate reads a snapshot", func() {
@@ -309,7 +296,7 @@ var _ = Describe("instance tools in Kubernetes mode", func() {
 	It("never prints the content of a malformed Secret-backed source", func() {
 		files := virtualFiles()
 		files["secret/queries/q.yaml"] = []byte("a:\n  query: SELECT 1\nb: SENTINELVALUE-do-not-leak\n")
-		useSnapshot(newFakeKube("engine-valid.yaml", files, func(s *settings.Settings) {
+		useSnapshot(newFakeKube("engine-unreachable.yaml", files, func(s *settings.Settings) {
 			virtual(s)
 			s.Sources = append(s.Sources, "secret/queries/q.yaml")
 		}).sensitive("secret/"))
@@ -319,8 +306,8 @@ var _ = Describe("instance tools in Kubernetes mode", func() {
 		Expect(out).To(ContainSubstring("error secret/queries/q.yaml -: "))
 		Expect(out + err.Error()).NotTo(ContainSubstring("SENTINE"))
 
-		out, err = execute(context.Background(), "instance", "print-config", "--offline")
-		Expect(err).NotTo(HaveOccurred())
+		out, err = execute(context.Background(), "instance", "print-config")
+		Expect(err).To(HaveOccurred())
 		Expect(out).To(ContainSubstring("invalid secret/queries/q.yaml: "))
 		Expect(out).NotTo(ContainSubstring("SENTINE"))
 	})

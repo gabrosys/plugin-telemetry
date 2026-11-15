@@ -40,6 +40,7 @@ E2E_TIMEOUT_plugin := 50m
 E2E_TIMEOUT_engine := 20m
 # Regex for ginkgo --focus; empty runs every spec.
 E2E_FOCUS ?=
+override E2E_FOCUS := $(value E2E_FOCUS)
 export E2E_FOCUS
 
 DEV_ENV := KIND=$(KIND) KUBECTL=$(KUBECTL) CMCTL=$(CMCTL) KIND_CLUSTER=$(KIND_CLUSTER) KIND_NODE_IMAGE=$(KIND_NODE_IMAGE) \

@@ -30,6 +30,7 @@ import (
 const (
 	policyName        = "plugin-telemetry-identities"
 	rolesPolicy       = "plugin-telemetry-roles"
+	reservedPolicy    = "plugin-telemetry-reserved-names"
 	clusterName       = "adm"
 	exporterName      = "default"
 	pluginAccount     = "plugin-telemetry"
@@ -39,6 +40,7 @@ const (
 	escalateGrantName = "plugin-telemetry-admission-escalate-e2e"
 	throwawayName     = "throwaway-telemetry"
 	telemetryName     = "adm-telemetry"
+	telemetryDotName  = "adm.telemetry"
 	telemetryToken    = "adm-telemetry-token"
 	otherToken        = "other-token"
 	probeName         = "probe-telemetry"
@@ -88,6 +90,22 @@ func denied() OmegaMatcher {
 func deniedBy(rule string) OmegaMatcher {
 	return SatisfyAll(Satisfy(apierrors.IsForbidden),
 		MatchError(ContainSubstring(rolesPolicy)), MatchError(ContainSubstring(rule)))
+}
+
+func pooler(namespace, name string) *apiv1.Pooler {
+	return &apiv1.Pooler{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+		Spec: apiv1.PoolerSpec{
+			Cluster:   apiv1.LocalObjectReference{Name: clusterName},
+			Instances: ptr.To(int32(1)),
+			PgBouncer: &apiv1.PgBouncerSpec{PoolMode: apiv1.PgBouncerPoolModeSession},
+		},
+	}
+}
+
+// reserved matches an Invalid error raised by the reserved-names policy.
+func reserved() OmegaMatcher {
+	return SatisfyAll(Satisfy(apierrors.IsInvalid), MatchError(ContainSubstring(reservedPolicy)))
 }
 
 func serviceAccountSubject(namespace, name string) rbacv1.Subject {
@@ -466,6 +484,27 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		Expect(plugin.RbacV1().RoleBindings(ns).Delete(ctx, telemetryName, metav1.DeleteOptions{})).To(Succeed())
 		Expect(plugin.RbacV1().Roles(ns).Delete(ctx, telemetryName, metav1.DeleteOptions{})).To(Succeed())
 		Expect(plugin.RbacV1().Roles(ns).Delete(ctx, probeName, metav1.DeleteOptions{})).To(Succeed())
+	})
+
+	It("denies any user a Pooler named adm.telemetry", func(ctx SpecContext) {
+		Expect(c.Create(ctx, pooler(ns, telemetryDotName), client.DryRunAll)).To(reserved())
+	})
+
+	It("allows a Pooler named adm-pooler", func(ctx SpecContext) {
+		Expect(c.Create(ctx, pooler(ns, "adm-pooler"), client.DryRunAll)).To(Succeed())
+	})
+
+	It("the API server rejects a Cluster and a Pooler whose spec.serviceAccountName ends in .telemetry, before admission", func(ctx SpecContext) {
+		rejected := SatisfyAll(Satisfy(apierrors.IsInvalid),
+			MatchError(ContainSubstring("spec.serviceAccountName")), Not(MatchError(ContainSubstring(reservedPolicy))))
+
+		cluster := framework.NewCluster(ns, "adm-sa", "unused")
+		cluster.Spec.ServiceAccountName = telemetryDotName
+		Expect(c.Create(ctx, cluster, client.DryRunAll)).To(rejected)
+
+		p := pooler(ns, "adm-sa-pooler")
+		p.Spec.ServiceAccountName = telemetryDotName
+		Expect(c.Create(ctx, p, client.DryRunAll)).To(rejected)
 	})
 
 	It("leaves other users alone", func(ctx SpecContext) {

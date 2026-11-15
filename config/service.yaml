@@ -9,7 +9,6 @@ metadata:
     cnpg.io/pluginClientSecret: plugin-telemetry-client-tls
     cnpg.io/pluginServerSecret: plugin-telemetry-server-tls
     cnpg.io/pluginPort: "9090"
-    telemetry.gabrosys.github.io/capabilities: lifecycle,operator
 spec:
   selector:
     app.kubernetes.io/name: plugin-telemetry

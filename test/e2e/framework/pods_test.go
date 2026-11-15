@@ -10,16 +10,14 @@ import (
 
 var _ = Describe("DecodeReport", func() {
 	It("decodes the report line", func() {
-		rep, err := framework.DecodeReport(`{"uid":65534,"gid":26,"groups":[26],"podTokenPresent":false,` +
+		rep, err := framework.DecodeReport(`{"uid":65534,"podTokenPresent":false,` +
 			`"kube":{"username":"system:serviceaccount:ns:c.telemetry","clusterReadable":true},` +
 			`"postgres":{"host":"/controller/run","user":"cnpg_metrics_exporter","connected":true,` +
 			`"currentUser":"cnpg_metrics_exporter","walFiles":2,"archiveStatusFiles":1}}` + "\n")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rep).To(Equal(preflight.Report{
-			UID:    65534,
-			GID:    26,
-			Groups: []int{26},
-			Kube:   &preflight.KubeReport{Username: "system:serviceaccount:ns:c.telemetry", ClusterReadable: true},
+			UID:  65534,
+			Kube: &preflight.KubeReport{Username: "system:serviceaccount:ns:c.telemetry", ClusterReadable: true},
 			Postgres: &preflight.PostgresReport{
 				Host:               "/controller/run",
 				User:               "cnpg_metrics_exporter",

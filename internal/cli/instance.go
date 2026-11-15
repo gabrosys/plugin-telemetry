@@ -194,9 +194,9 @@ func clearEnv(ctx context.Context) {
 
 func newPreflightCommand() *cobra.Command {
 	var (
-		pg   preflight.PostgresConfig
-		cfg  = preflight.Config{PodTokenDir: metadata.PodTokenDir}
-		port uint16
+		pgCfg preflight.PostgresConfig
+		cfg   = preflight.Config{PodTokenDir: metadata.PodTokenDir}
+		port  uint16
 	)
 
 	cmd := &cobra.Command{
@@ -204,11 +204,12 @@ func newPreflightCommand() *cobra.Command {
 		Short: "Check PostgreSQL and Kubernetes access and print a JSON report",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			pg.Port = port
-			if pg.PasswordSecret == "" {
-				pg.Password = os.Getenv("PGPASSWORD")
+			pgCfg.Port = port
+			if pgCfg.PasswordSecret == "" {
+				pgCfg.Password = os.Getenv("PGPASSWORD")
 			}
-			cfg.Postgres = pg
+			cfg.Postgres = pgCfg
+			clearEnv(cmd.Context())
 
 			if host, p := os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT"); host != "" && p != "" {
 				cfg.APIServer = "https://" + net.JoinHostPort(host, p)
@@ -224,11 +225,11 @@ func newPreflightCommand() *cobra.Command {
 	}
 
 	f := cmd.Flags()
-	f.StringVar(&pg.Host, "pg-host", metadata.SocketDir, "PostgreSQL host, or a socket directory when it starts with /")
+	f.StringVar(&pgCfg.Host, "pg-host", metadata.SocketDir, "PostgreSQL host, or a socket directory when it starts with /")
 	f.Uint16Var(&port, "pg-port", 5432, "PostgreSQL port")
-	f.StringVar(&pg.User, "pg-user", metadata.MetricsExporterRole, "PostgreSQL user")
-	f.StringVar(&pg.Database, "pg-database", "postgres", "PostgreSQL database")
-	f.StringVar(&pg.PasswordSecret, "password-secret", "", "Secret holding the password, read with the sidecar token (default $PGPASSWORD)")
+	f.StringVar(&pgCfg.User, "pg-user", metadata.MetricsExporterRole, "PostgreSQL user")
+	f.StringVar(&pgCfg.Database, "pg-database", "postgres", "PostgreSQL database")
+	f.StringVar(&pgCfg.PasswordSecret, "password-secret", "", "Secret holding the password, read with the sidecar token (default $PGPASSWORD)")
 	f.BoolVar(&cfg.Kube, "kube", true, "run the Kubernetes checks")
 	f.StringVar(&cfg.TokenDir, "token-dir", metadata.SidecarTokenDir, "directory holding the sidecar token and ca.crt")
 	f.StringVar(&cfg.Namespace, "namespace", os.Getenv("NAMESPACE"), "namespace of the Cluster (default $NAMESPACE)")

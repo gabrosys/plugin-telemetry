@@ -4,23 +4,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
-	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
 	kubeTimeout = 10 * time.Second
 	passwordKey = "password"
 )
+
+var clusterResource = schema.GroupVersionResource{Group: "postgresql.cnpg.io", Version: "v1", Resource: "clusters"}
 
 var (
 	errSecretNeedsKube = errors.New("read password secret: kubernetes checks are disabled")
@@ -57,12 +57,6 @@ func checkKube(ctx context.Context, cfg Config) (rep *KubeReport, password strin
 		TLSClientConfig: rest.TLSClientConfig{CAFile: filepath.Join(cfg.TokenDir, "ca.crt")},
 	}
 
-	if tok, err := os.ReadFile(restCfg.BearerTokenFile); err == nil {
-		if exp, ok := TokenExpiry(string(tok)); ok {
-			rep.TokenExpiresAt = exp.UTC().Format(time.RFC3339)
-		}
-	}
-
 	cs, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
 		return fail(fmt.Errorf("create clientset: %w", err))
@@ -74,18 +68,12 @@ func checkKube(ctx context.Context, cfg Config) (rep *KubeReport, password strin
 	}
 	rep.Username = review.Status.UserInfo.Username
 
-	scheme := runtime.NewScheme()
-	if err := apiv1.AddToScheme(scheme); err != nil {
-		return fail(fmt.Errorf("register CNPG types: %w", err))
-	}
-
-	c, err := client.New(restCfg, client.Options{Scheme: scheme})
+	dc, err := dynamic.NewForConfig(restCfg)
 	if err != nil {
-		return fail(fmt.Errorf("create client: %w", err))
+		return fail(fmt.Errorf("create dynamic client: %w", err))
 	}
 
-	var cluster apiv1.Cluster
-	if err := c.Get(ctx, client.ObjectKey{Namespace: cfg.Namespace, Name: cfg.Cluster}, &cluster); err != nil {
+	if _, err := dc.Resource(clusterResource).Namespace(cfg.Namespace).Get(ctx, cfg.Cluster, metav1.GetOptions{}); err != nil {
 		rep.Error = fmt.Sprintf("get cluster %s/%s: %v", cfg.Namespace, cfg.Cluster, err)
 	} else {
 		rep.ClusterReadable = true

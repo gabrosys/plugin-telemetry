@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -46,6 +47,32 @@ var _ = Describe("instance preflight command", func() {
 		Expect(report).To(HaveKey("postgres"))
 		Expect(report).To(HaveKey("kube"))
 		Expect(strings.Count(out.String(), "\n")).To(Equal(1))
+	})
+
+	It("clears PG* before it connects", func() {
+		GinkgoT().Setenv("PGAPPNAME", "x")
+		cmd := cli.NewRootCommand()
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		cmd.SetArgs([]string{"instance", "preflight", "--kube=false", "--pg-host=127.0.0.1", "--pg-port=1"})
+		Expect(cmd.Execute()).To(Succeed())
+
+		_, set := os.LookupEnv("PGAPPNAME")
+		Expect(set).To(BeFalse())
+	})
+
+	It("reads PGPASSWORD before it clears the environment", func() {
+		GinkgoT().Setenv("PGPASSWORD", "hunter2")
+		var out bytes.Buffer
+		cmd := cli.NewRootCommand()
+		cmd.SetOut(&out)
+		cmd.SetErr(io.Discard)
+		cmd.SetArgs([]string{"instance", "preflight", "--kube=false", "--pg-host=127.0.0.1", "--pg-port=1"})
+		Expect(cmd.Execute()).To(Succeed())
+
+		Expect(out.String()).NotTo(ContainSubstring("PGPASSWORD"))
+		Expect(out.String()).NotTo(ContainSubstring("hunter2"))
+		Expect(out.String()).To(ContainSubstring(`"connected":false`))
 	})
 
 	It("rejects unknown flags", func() {

@@ -1,10 +1,15 @@
 package kubesource_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io/fs"
+	"strings"
 	"sync"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -15,6 +20,7 @@ import (
 	dynfake "k8s.io/client-go/dynamic/fake"
 	clienttesting "k8s.io/client-go/testing"
 
+	"github.com/gabrosys/plugin-telemetry/internal/clusterconfig"
 	"github.com/gabrosys/plugin-telemetry/internal/kubesource"
 	"github.com/gabrosys/plugin-telemetry/internal/sources"
 )
@@ -39,7 +45,9 @@ var _ = Describe("the dynamic watcher", func() {
 		ctx, cancel = context.WithCancel(context.Background())
 		DeferCleanup(cancel)
 
+		mu.Lock()
 		listed, watched = nil, nil
+		mu.Unlock()
 		events = make(chan *unstructured.Unstructured, 16)
 		failures = make(chan error, 16)
 		client = dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
@@ -48,17 +56,17 @@ var _ = Describe("the dynamic watcher", func() {
 		client.PrependReactor("list", "configmaps", func(a clienttesting.Action) (bool, runtime.Object, error) {
 			mu.Lock()
 			defer mu.Unlock()
-			la, ok := a.(clienttesting.ListAction)
-			Expect(ok).To(BeTrue())
-			listed = append(listed, la.GetListRestrictions().Fields.String())
+			if la, ok := a.(clienttesting.ListAction); ok {
+				listed = append(listed, la.GetListRestrictions().Fields.String())
+			}
 			return false, nil, nil
 		})
 		client.PrependWatchReactor("configmaps", func(a clienttesting.Action) (bool, watch.Interface, error) {
 			mu.Lock()
 			defer mu.Unlock()
-			wa, ok := a.(clienttesting.WatchAction)
-			Expect(ok).To(BeTrue())
-			watched = append(watched, wa.GetWatchRestrictions().Fields.String())
+			if wa, ok := a.(clienttesting.WatchAction); ok {
+				watched = append(watched, wa.GetWatchRestrictions().Fields.String())
+			}
 			return false, nil, nil
 		})
 		handler = kubesource.NewHandler(func(o *unstructured.Unstructured) { events <- o }, func(err error) { failures <- err })
@@ -99,65 +107,100 @@ var _ = Describe("the dynamic watcher", func() {
 	})
 })
 
-var _ = Describe("the snapshot watcher", func() {
+var _ = Describe("Snapshot", func() {
 	var (
 		ctx    context.Context
+		logs   *bytes.Buffer
 		client *dynfake.FakeDynamicClient
 	)
 
 	BeforeEach(func() {
-		ctx = context.Background()
+		logs = &bytes.Buffer{}
+		logger := funcr.New(func(prefix, args string) { logs.WriteString(prefix + args + "\n") }, funcr.Options{Verbosity: 10})
+		ctx = logr.NewContext(context.Background(), logger)
 		gvrs := map[schema.GroupVersionResource]string{
 			{Group: "postgresql.cnpg.io", Version: "v1", Resource: "clusters"}:                           "ClusterList",
 			{Group: "telemetry.gabrosys.github.io", Version: "v1alpha1", Resource: "telemetryexporters"}: "TelemetryExporterList",
+			{Group: "telemetry.gabrosys.github.io", Version: "v1alpha1", Resource: "metricquerysets"}:    "MetricQuerySetList",
 			{Version: "v1", Resource: "configmaps"}:                                                      "ConfigMapList",
+			{Version: "v1", Resource: "secrets"}:                                                         "SecretList",
 		}
 		client = dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrs,
-			enabledCluster(map[string]any{}), exporter(map[string]any{
-				"exporter": map[string]any{"endpoint": "http://c:4318"},
+			cluster(clusterOpts{
+				plugins:    []any{pluginEntry(map[string]any{"auth": "password", "passwordSecret": "pw"}, nil)},
+				monitoring: map[string]any{"customQueriesConfigMap": []any{map[string]any{"name": "mon-cm", "key": "q.yaml"}}},
+			}),
+			exporter(map[string]any{
+				"exporter": map[string]any{"endpoint": "http://c:4318", "headers": map[string]any{"name": "hdr", "key": "h"}},
 				"envFrom":  map[string]any{"configMap": map[string]any{"name": "envcm"}},
-			}))
+				"metrics":  map[string]any{"querySets": []any{"extra"}},
+			}),
+			secret("pw", map[string]string{"username": "monitor", "password": "p"}),
+			secret("hdr", map[string]string{"h": "k=v"}),
+			configMap("mon-cm", map[string]any{"q.yaml": "a: 1\n"}),
+			querySet("extra", map[string]any{"q": map[string]any{"query": "SELECT 1"}}),
+		)
 	})
 
-	snapshot := func() (*kubesource.Source, func() error) {
-		src, err := kubesource.New(kubesource.Options{
+	snapshot := func() (*kubesource.Source, error) {
+		return kubesource.SnapshotWith(ctx, kubesource.Options{
 			Namespace: "ns", Cluster: "pg", APIServer: "https://x", TokenDir: GinkgoT().TempDir(),
-		})
-		Expect(err).NotTo(HaveOccurred())
-		w, errs := kubesource.SnapshotWatcher(client)
-		src.Begin(ctx, w)
-		return src, errs
+		}, client)
+	}
+
+	// gets returns the objects read, as "<resource>/<name>".
+	gets := func() []string {
+		var out []string
+		for _, a := range client.Actions() {
+			if g, ok := a.(clienttesting.GetAction); ok && a.GetVerb() == "get" {
+				out = append(out, a.GetResource().Resource+"/"+g.GetName())
+			}
+		}
+		return out
 	}
 
 	It("reads every referenced object once and treats a 404 as a missing object", func() {
-		src, errs := snapshot()
-		Expect(errs()).To(Succeed())
-		_, _, err := src.Settings()
+		src, err := snapshot()
 		Expect(err).NotTo(HaveOccurred())
-		_, err = src.ReadFile("configmap/envcm/k")
+		Expect(gets()).To(ConsistOf(
+			"clusters/pg", "telemetryexporters/default", "secrets/pw", "configmaps/mon-cm",
+			"secrets/hdr", "configmaps/envcm", "metricquerysets/extra",
+		))
+
+		s, _, err := src.Settings()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(s.Postgres.User).To(Equal("monitor"))
+		Expect(src.ReadFile(clusterconfig.SecretFile("hdr", "h"))).To(Equal([]byte("k=v")))
+		Expect(src.ReadFile(clusterconfig.QuerySetFile("extra"))).To(MatchJSON(`{"q":{"query":"SELECT 1"}}`))
+		_, err = src.ReadFile(clusterconfig.ConfigMapFile("envcm", "k"))
 		Expect(err).To(MatchError(fs.ErrNotExist))
 	})
 
 	It("reports a 403 as ErrDenied", func() {
-		client.PrependReactor("get", "configmaps", func(clienttesting.Action) (bool, runtime.Object, error) {
-			return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "configmaps"}, "envcm", errForbidden)
+		client.PrependReactor("get", "secrets", func(a clienttesting.Action) (bool, runtime.Object, error) {
+			if g, ok := a.(clienttesting.GetAction); ok && g.GetName() == "hdr" {
+				return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "hdr", errForbidden)
+			}
+			return false, nil, nil
 		})
-		src, errs := snapshot()
-		Expect(errs()).To(Succeed())
-		_, err := src.ReadFile("configmap/envcm/k")
-		Expect(err).To(MatchError(sources.ErrDenied))
-		_, _, err = src.Settings()
+		src, err := snapshot()
+		Expect(err).NotTo(HaveOccurred())
+		_, err = src.ReadFile(clusterconfig.SecretFile("hdr", "h"))
 		Expect(err).To(MatchError(sources.ErrDenied))
 	})
 
-	It("collects any other error", func() {
-		client.PrependReactor("get", "configmaps", func(clienttesting.Action) (bool, runtime.Object, error) {
-			return true, nil, apierrors.NewInternalError(errForbidden)
+	It("returns any other error once and does not log it", func() {
+		client.PrependReactor("get", "configmaps", func(a clienttesting.Action) (bool, runtime.Object, error) {
+			if g, ok := a.(clienttesting.GetAction); ok && g.GetName() == "envcm" {
+				return true, nil, apierrors.NewInternalError(errors.New("etcd is down"))
+			}
+			return false, nil, nil
 		})
-		src, errs := snapshot()
-		Expect(errs()).To(MatchError(ContainSubstring("configmaps envcm")))
-		_, err := src.ReadFile("configmap/envcm/k")
-		Expect(err).To(HaveOccurred())
-		Expect(err).NotTo(MatchError(fs.ErrNotExist))
+		_, err := snapshot()
+		Expect(err).To(MatchError(ContainSubstring("get configmaps envcm")))
+		Expect(strings.Count(err.Error(), "etcd is down")).To(Equal(1))
+		Expect(gets()).To(ContainElement("configmaps/envcm"))
+		Expect(strings.Count(strings.Join(gets(), " "), "configmaps/envcm")).To(Equal(1))
+		Expect(logs.String()).NotTo(ContainSubstring("etcd is down"))
 	})
 })

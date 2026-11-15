@@ -44,12 +44,8 @@ type kubeSource interface {
 
 // newKubeSource and snapshotKubeSource build the Kubernetes source; specs replace them.
 var (
-	newKubeSource = func(o kubesource.Options) (kubeSource, error) {
-		src, err := kubesource.New(o)
-		if err != nil {
-			return nil, fmt.Errorf("new kubernetes source: %w", err)
-		}
-		return src, nil
+	newKubeSource = func(o kubesource.Options) kubeSource {
+		return kubesource.New(o)
 	}
 	snapshotKubeSource = func(ctx context.Context, o kubesource.Options) (engine.Config, error) {
 		src, err := kubesource.Snapshot(ctx, o)
@@ -127,11 +123,8 @@ func newInstanceCommand() *cobra.Command {
 
 				return nil
 			}
-			src, err := newKubeSource(o)
-			if err == nil {
-				err = runEngine(ctx, src, src.Start)
-			}
-			if err != nil {
+			src := newKubeSource(o)
+			if err := runEngine(ctx, src, src.Start); err != nil {
 				logger.Error(err, "the metrics engine stopped")
 				<-ctx.Done()
 			}

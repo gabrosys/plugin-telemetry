@@ -108,9 +108,9 @@ var _ = Describe("instance in Kubernetes mode", func() {
 
 	useRun := func(src *fakeKube) {
 		DeferCleanup(cli.SetKubeSources(
-			func(o kubesource.Options) (cli.KubeSource, error) {
+			func(o kubesource.Options) cli.KubeSource {
 				gotOptions = append(gotOptions, o)
-				return src, nil
+				return src
 			},
 			func(context.Context, kubesource.Options) (engine.Config, error) {
 				return nil, errors.New("unexpected snapshot")
@@ -221,7 +221,10 @@ var _ = Describe("instance tools in Kubernetes mode", func() {
 			src = fk
 		}
 		DeferCleanup(cli.SetKubeSources(
-			func(kubesource.Options) (cli.KubeSource, error) { return nil, errors.New("unexpected run") },
+			func(kubesource.Options) cli.KubeSource {
+				Fail("unexpected run")
+				return nil
+			},
 			func(_ context.Context, o kubesource.Options) (engine.Config, error) {
 				gotOptions = append(gotOptions, o)
 				return s, nil

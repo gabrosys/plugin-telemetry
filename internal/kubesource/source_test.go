@@ -14,6 +14,7 @@ import (
 	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/gabrosys/plugin-telemetry/internal/clusterconfig"
@@ -41,13 +42,29 @@ var _ = Describe("Source", func() {
 
 		fw = newFakeWatcher()
 		clk = clocktesting.NewFakeClock(time.Unix(1_700_000_000, 0))
-		var err error
-		src, err = kubesource.New(kubesource.Options{
+		src = kubesource.New(kubesource.Options{
 			Namespace: "ns", Cluster: "pg", APIServer: "https://127.0.0.1:1", TokenDir: GinkgoT().TempDir(), Clock: clk,
 		})
-		Expect(err).NotTo(HaveOccurred())
-		start = func() { src.Begin(ctx, fw.watch) }
+		start = func() {
+			rctx, stop := context.WithCancel(ctx)
+			ran := make(chan struct{})
+			go func() {
+				defer GinkgoRecover()
+				defer close(ran)
+				src.RunWith(rctx, fw.watch)
+			}()
+			DeferCleanup(func() {
+				stop()
+				Eventually(ran).Should(BeClosed())
+			})
+		}
 	})
+
+	// watching waits until exactly the given watches run.
+	watching := func(keys ...string) {
+		GinkgoHelper()
+		Eventually(fw.active).Should(ConsistOf(keys))
+	}
 
 	// ready feeds the Cluster and the default exporter.
 	ready := func() {
@@ -56,10 +73,25 @@ var _ = Describe("Source", func() {
 		fw.set("telemetryexporters", "default", exporter(nil))
 	}
 
-	It("is named kubernetes and fails to build on empty options", func() {
+	It("is named kubernetes", func() {
 		Expect(src.Name()).To(Equal("kubernetes"))
-		_, err := kubesource.New(kubesource.Options{})
-		Expect(err).To(HaveOccurred())
+	})
+
+	It("stops every watch and returns when ctx ends", func() {
+		rctx, stop := context.WithCancel(ctx)
+		ran := make(chan struct{})
+		go func() {
+			defer GinkgoRecover()
+			defer close(ran)
+			src.RunWith(rctx, fw.watch)
+		}()
+		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+		watching("clusters/pg", "telemetryexporters/default")
+		Consistently(ran, "50ms").ShouldNot(BeClosed())
+
+		stop()
+		Eventually(ran).Should(BeClosed())
+		Expect(fw.active()).To(BeEmpty())
 	})
 
 	It("returns ErrNoConfiguration until the Cluster is known, then while the exporter is missing", func() {
@@ -94,7 +126,7 @@ var _ = Describe("Source", func() {
 	It("does not watch the exporter while the plugin is disabled", func() {
 		start()
 		fw.set("clusters", "pg", cluster(clusterOpts{plugins: []any{pluginEntry(map[string]any{}, map[string]any{"enabled": false})}}))
-		Expect(fw.active()).To(ConsistOf("clusters/pg"))
+		Consistently(fw.active, "100ms").Should(ConsistOf("clusters/pg"))
 	})
 
 	It("builds settings once the Cluster and the exporter are known", func() {
@@ -109,7 +141,7 @@ var _ = Describe("Source", func() {
 
 	It("starts watches for exactly References and stops those no longer referenced", func() {
 		start()
-		Expect(fw.active()).To(ConsistOf("clusters/pg"))
+		watching("clusters/pg")
 
 		fw.set("clusters", "pg", cluster(clusterOpts{
 			plugins: []any{pluginEntry(map[string]any{"auth": "password", "passwordSecret": "pw", "exporter": "ex"}, nil)},
@@ -118,7 +150,7 @@ var _ = Describe("Source", func() {
 				"customQueriesSecret":    []any{map[string]any{"name": "mon-sec", "key": "q.yaml"}},
 			},
 		}))
-		Expect(fw.active()).To(ConsistOf("clusters/pg", "telemetryexporters/ex", "secrets/pw", "configmaps/mon-cm", "secrets/mon-sec"))
+		watching("clusters/pg", "telemetryexporters/ex", "secrets/pw", "configmaps/mon-cm", "secrets/mon-sec")
 
 		fw.set("telemetryexporters", "ex", exporter(map[string]any{
 			"exporter": map[string]any{"endpoint": "http://c:4318", "headers": map[string]any{"name": "hdr", "key": "h"}},
@@ -128,16 +160,77 @@ var _ = Describe("Source", func() {
 			},
 			"metrics": map[string]any{"querySets": []any{"qs1"}},
 		}))
-		Expect(fw.active()).To(ConsistOf(
+		watching(
 			"clusters/pg", "telemetryexporters/ex", "secrets/pw", "configmaps/mon-cm", "secrets/mon-sec",
 			"secrets/hdr", "configmaps/envcm", "secrets/envsecret", "metricquerysets/qs1",
-		))
+		)
 
 		fw.set("telemetryexporters", "ex", exporter(nil))
-		Expect(fw.active()).To(ConsistOf("clusters/pg", "telemetryexporters/ex", "secrets/pw", "configmaps/mon-cm", "secrets/mon-sec"))
+		watching("clusters/pg", "telemetryexporters/ex", "secrets/pw", "configmaps/mon-cm", "secrets/mon-sec")
 
 		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
-		Expect(fw.active()).To(ConsistOf("clusters/pg", "telemetryexporters/default"))
+		watching("clusters/pg", "telemetryexporters/default")
+	})
+
+	It("keeps watching the objects of the last settings that built while an edit fails Build", func() {
+		withHeaders := func(name string, timeout string) *unstructured.Unstructured {
+			return exporter(map[string]any{
+				"exporter": map[string]any{
+					"endpoint": "http://c:4318", "timeout": timeout, "headers": map[string]any{"name": name, "key": "h"},
+				},
+				"metrics": map[string]any{"interval": "30s"},
+			})
+		}
+		start()
+		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+		fw.set("telemetryexporters", "default", withHeaders("h1", "10s"))
+		fw.set("secrets", "h1", secret("h1", map[string]string{"h": "k=1"}))
+		_, _, err := src.Settings()
+		Expect(err).NotTo(HaveOccurred())
+
+		fw.set("telemetryexporters", "default", withHeaders("h2", "20s"))
+		watching("clusters/pg", "telemetryexporters/default", "secrets/h1", "secrets/h2")
+		fw.set("secrets", "h2", secret("h2", map[string]string{"h": "k=2"}))
+		_, _, err = src.Settings()
+		Expect(err).To(MatchError(ContainSubstring("exporter.timeout")))
+		Expect(src.ReadFile(clusterconfig.SecretFile("h1", "h"))).To(Equal([]byte("k=1")))
+		Consistently(fw.active, "100ms").Should(ContainElement("secrets/h1"))
+
+		fw.set("telemetryexporters", "default", withHeaders("h2", "10s"))
+		s, _, err := src.Settings()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(s.Exporter.HeadersFile).To(Equal(clusterconfig.SecretFile("h2", "h")))
+		watching("clusters/pg", "telemetryexporters/default", "secrets/h2")
+	})
+
+	It("drops reports from a watch that was stopped", func() {
+		withQuerySet := exporter(map[string]any{
+			"exporter": map[string]any{"endpoint": "http://c:4318"},
+			"metrics":  map[string]any{"querySets": []any{"qs1"}},
+		})
+		start()
+		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+		fw.set("telemetryexporters", "default", withQuerySet)
+		stale := fw.handler("metricquerysets", "qs1")
+
+		fw.set("telemetryexporters", "default", exporter(nil))
+		watching("clusters/pg", "telemetryexporters/default")
+		fw.set("telemetryexporters", "default", withQuerySet)
+		watching("clusters/pg", "telemetryexporters/default", "metricquerysets/qs1")
+
+		var notified atomic.Int32
+		go func() {
+			defer GinkgoRecover()
+			Expect(src.Watch(ctx, nil, func() { notified.Add(1) })).To(Succeed())
+		}()
+		Eventually(notified.Load).Should(BeEquivalentTo(1))
+		stale.Set(querySet("qs1", map[string]any{"q": map[string]any{"query": "SELECT 1"}}))
+		stale.Fail(errors.New("connection refused"))
+
+		_, err := src.ReadFile(clusterconfig.QuerySetFile("qs1"))
+		Expect(err).To(MatchError(kubesource.ErrNotSynced))
+		Expect(logs.String()).NotTo(ContainSubstring("watch failed"))
+		Consistently(clk.HasWaiters, "100ms").Should(BeFalse())
 	})
 
 	Describe("ReadFile", func() {
@@ -173,10 +266,20 @@ var _ = Describe("Source", func() {
 				`{"q":{"query":"SELECT 1","metrics":[{"v":{"usage":"GAUGE","metric_mapping":{}}}]}}`))
 		})
 
+		It("answers not synced, not missing, for a virtual file with no watch yet", func() {
+			for _, name := range []string{
+				clusterconfig.ConfigMapFile("unwatched", "k"), clusterconfig.SecretFile("unwatched", "k"), clusterconfig.QuerySetFile("unwatched"),
+			} {
+				_, err := src.ReadFile(name)
+				Expect(err).To(MatchError(kubesource.ErrNotSynced), name)
+				Expect(err).NotTo(MatchError(fs.ErrNotExist), name)
+			}
+		})
+
 		It("answers fs.ErrNotExist for an unknown name or a missing key", func() {
 			fw.set("configmaps", "mon-cm", configMap("mon-cm", map[string]any{"q.yaml": "a"}))
 			for _, name := range []string{
-				"other/x", "configmap/unwatched/k", clusterconfig.ConfigMapFile("mon-cm", "missing"), "configmap/mon-cm",
+				"other/x", clusterconfig.ConfigMapFile("mon-cm", "missing"), "configmap/mon-cm",
 			} {
 				_, err := src.ReadFile(name)
 				Expect(err).To(MatchError(fs.ErrNotExist), name)
@@ -203,7 +306,7 @@ var _ = Describe("Source", func() {
 	})
 
 	Describe("Settings", func() {
-		It("keeps the bytes unchanged when only the Cluster status or an unrelated annotation changes", func() {
+		It("keeps the bytes unchanged when only the Cluster status, an unrelated annotation or a plugin parameter Build ignores changes", func() {
 			ready()
 			_, before, err := src.Settings()
 			Expect(err).NotTo(HaveOccurred())
@@ -214,6 +317,11 @@ var _ = Describe("Source", func() {
 				annotations: map[string]string{"kubectl.kubernetes.io/last-applied-configuration": "x"},
 			}))
 			_, after, err := src.Settings()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(after).To(Equal(before))
+
+			fw.set("clusters", "pg", enabledCluster(map[string]any{"sidecarCPU": "100m"}))
+			_, after, err = src.Settings()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(after).To(Equal(before))
 
@@ -275,46 +383,47 @@ var _ = Describe("Source", func() {
 			Eventually(notified.Load).Should(BeEquivalentTo(3))
 		})
 
-		It("notifies at once after a watch error other than a 403 and returns nil when ctx ends", func() {
-			var notified atomic.Int32
+		It("returns nil when ctx ends", func() {
 			done := make(chan error, 1)
 			wctx, cancel := context.WithCancel(ctx)
 			start()
-			go func() {
-				done <- src.Watch(wctx, nil, func() { notified.Add(1) })
-			}()
-			Eventually(notified.Load).Should(BeEquivalentTo(1))
-
-			fw.fail("clusters", "pg", errors.New("connection refused"))
-			Eventually(notified.Load).Should(BeEquivalentTo(2))
-
+			go func() { done <- src.Watch(wctx, nil, func() {}) }()
 			cancel()
 			Eventually(done).Should(Receive(BeNil()))
 		})
 	})
 
-	It("logs a repeated watch error once and notifies for it once, and again when the error changes", func() {
-		var notified atomic.Int32
-		done := make(chan error, 1)
+	It("logs a repeated watch error once, and again when the error changes or after an event", func() {
 		start()
-		go func() {
-			done <- src.Watch(ctx, nil, func() { notified.Add(1) })
-		}()
-		Eventually(notified.Load).Should(BeEquivalentTo(1))
-
 		fw.fail("clusters", "pg", errors.New("connection refused"))
 		fw.fail("clusters", "pg", errors.New("connection refused"))
-		Eventually(notified.Load).Should(BeEquivalentTo(2))
-		Consistently(notified.Load, "100ms").Should(BeEquivalentTo(2))
 		Expect(strings.Count(logs.String(), "watch failed")).To(Equal(1))
 
 		fw.fail("clusters", "pg", errors.New("no route to host"))
-		Eventually(notified.Load).Should(BeEquivalentTo(3))
 		Expect(strings.Count(logs.String(), "watch failed")).To(Equal(2))
 
 		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
 		fw.fail("clusters", "pg", errors.New("no route to host"))
-		Eventually(notified.Load).Should(BeEquivalentTo(4))
+		Expect(strings.Count(logs.String(), "watch failed")).To(Equal(3))
+	})
+
+	It("logs A, 403, A as two failures and never notifies for a watch error", func() {
+		var notified atomic.Int32
+		start()
+		go func() {
+			defer GinkgoRecover()
+			Expect(src.Watch(ctx, nil, func() { notified.Add(1) })).To(Succeed())
+		}()
+		Eventually(notified.Load).Should(BeEquivalentTo(1))
+
+		fw.fail("clusters", "pg", errors.New("connection refused"))
+		Consistently(notified.Load, "100ms").Should(BeEquivalentTo(1))
+		Expect(clk.HasWaiters()).To(BeFalse())
+
+		fw.fail("clusters", "pg", errors.Join(errors.New("forbidden"), sources.ErrDenied))
+		fw.fail("clusters", "pg", errors.New("connection refused"))
+		Expect(strings.Count(logs.String(), "watch failed")).To(Equal(2))
+		Expect(strings.Count(logs.String(), "access to object denied")).To(Equal(1))
 	})
 
 	It("keeps the watches and answers ErrDenied while the exporter is denied and a Cluster event arrives", func() {
@@ -330,7 +439,7 @@ var _ = Describe("Source", func() {
 		fw.fail("telemetryexporters", "default", errors.Join(errors.New("forbidden"), sources.ErrDenied))
 		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
 
-		Expect(fw.active()).To(ConsistOf(before))
+		Consistently(fw.active, "100ms").Should(ConsistOf(before))
 		Expect(src.ReadFile(clusterconfig.QuerySetFile("qs1"))).To(MatchJSON(`{"q":{"query":"SELECT 1"}}`))
 		_, _, err := src.Settings()
 		Expect(err).To(MatchError(sources.ErrDenied))
@@ -346,10 +455,15 @@ var _ = Describe("Source", func() {
 		}))
 		data := map[string]string{"username": "monitor", "password": sensitive}
 		fw.set("secrets", "pw", secret("pw", data))
+		fw.set("secrets", "envsecret", secret("envsecret", map[string]string{"OTEL_EXPORTER_OTLP_TIMEOUT": sensitive}))
+		_, _, err := src.Settings()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(logs.String()).To(ContainSubstring("OTEL_EXPORTER_OTLP_TIMEOUT"))
+
 		fw.set("secrets", "envsecret", secret("envsecret", map[string]string{"OTEL_EXPORTER_OTLP_HEADERS": "k=" + sensitive}))
 		fw.fail("secrets", "pw", errors.Join(errors.New("watch broke"), sources.ErrDenied))
 		fw.fail("secrets", "envsecret", errors.New("watch broke"))
-		_, _, err := src.Settings()
+		_, _, err = src.Settings()
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).NotTo(ContainSubstring(sensitive))
 
@@ -358,10 +472,9 @@ var _ = Describe("Source", func() {
 		Expect(logs.String()).NotTo(ContainSubstring(base64.StdEncoding.EncodeToString([]byte(sensitive))))
 	})
 
-	It("waits for the token file", func() {
+	It("waits for the token file and logs the first wait with the stat error", func() {
 		dir := GinkgoT().TempDir()
-		s, err := kubesource.New(kubesource.Options{Namespace: "ns", Cluster: "pg", APIServer: "https://x", TokenDir: dir, Clock: clk})
-		Expect(err).NotTo(HaveOccurred())
+		s := kubesource.New(kubesource.Options{Namespace: "ns", Cluster: "pg", APIServer: "https://x", TokenDir: dir, Clock: clk})
 		found := make(chan bool, 1)
 		go func() { found <- s.WaitForToken(ctx) }()
 
@@ -373,13 +486,14 @@ var _ = Describe("Source", func() {
 		Eventually(clk.HasWaiters).Should(BeTrue())
 		clk.Step(5 * time.Second)
 		Eventually(found).Should(Receive(BeTrue()))
+		Expect(strings.Count(logs.String(), "waiting for the sidecar token")).To(Equal(1))
+		Expect(logs.String()).To(ContainSubstring("no such file or directory"))
 	})
 })
 
 var _ = Describe("Source.Sensitive", func() {
 	It("is true for secret/ names only", func() {
-		src, err := kubesource.New(kubesource.Options{Namespace: "ns", Cluster: "c", APIServer: "https://x", TokenDir: "/t"})
-		Expect(err).NotTo(HaveOccurred())
+		src := kubesource.New(kubesource.Options{Namespace: "ns", Cluster: "c", APIServer: "https://x", TokenDir: "/t"})
 		Expect(src.Sensitive("secret/s/k")).To(BeTrue())
 		Expect(src.Sensitive("configmap/s/k")).To(BeFalse())
 		Expect(src.Sensitive("metricqueryset/s")).To(BeFalse())

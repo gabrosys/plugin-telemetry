@@ -18,11 +18,13 @@ const (
 
 	passwordHost    = "127.0.0.1"
 	passwordKey     = "password"
-	usernameKey     = "username"
 	clientCertKey   = "tls.crt"
 	clientKeyKey    = "tls.key"
 	defaultDatabase = "postgres"
 )
+
+// PasswordUsernameKey is the key of the passwordSecret that holds the user name.
+const PasswordUsernameKey = "username"
 
 // Inputs are what the settings are built from; the sidecar fills them from its watches.
 type Inputs struct {
@@ -115,7 +117,7 @@ func applyAuth(s *settings.Settings, in Inputs) error {
 		return errors.New("password mode needs the passwordSecret parameter")
 	}
 	if in.PasswordUsername == "" {
-		return fmt.Errorf("password Secret %q: key %q is empty", in.Params.PasswordSecret, usernameKey)
+		return fmt.Errorf("password Secret %q: key %q is empty", in.Params.PasswordSecret, PasswordUsernameKey)
 	}
 	s.Postgres.Host = passwordHost
 	s.Postgres.User = in.PasswordUsername

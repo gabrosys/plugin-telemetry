@@ -22,7 +22,7 @@ type KubeSource = kubeSource
 
 // SetKubeSources replaces the constructors of the Kubernetes source and of its snapshot, and returns the function that restores them.
 func SetKubeSources(
-	run func(kubesource.Options) (KubeSource, error),
+	run func(kubesource.Options) KubeSource,
 	snap func(context.Context, kubesource.Options) (engine.Config, error),
 ) (restore func()) {
 	prevRun, prevSnap := newKubeSource, snapshotKubeSource

@@ -63,12 +63,24 @@ func (f *fakeWatcher) active() []string {
 	return out
 }
 
+// handler waits for the watch on resource/name, which the Source starts on its own goroutine.
 func (f *fakeWatcher) handler(resource, name string) kubesource.Handler {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	w, ok := f.handlers[watchKey(resource, name)]
-	Expect(ok).To(BeTrue(), fmt.Sprintf("no watch on %s/%s; active: %v", resource, name, f.handlersLocked()))
-	return w.h
+	GinkgoHelper()
+	var h kubesource.Handler
+	Eventually(func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		w, ok := f.handlers[watchKey(resource, name)]
+		if ok {
+			h = w.h
+		}
+		return ok
+	}).Should(BeTrue(), func() string {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return fmt.Sprintf("no watch on %s/%s; active: %v", resource, name, f.handlersLocked())
+	})
+	return h
 }
 
 func (f *fakeWatcher) handlersLocked() []string {
@@ -80,10 +92,12 @@ func (f *fakeWatcher) handlersLocked() []string {
 }
 
 func (f *fakeWatcher) set(resource, name string, obj *unstructured.Unstructured) {
+	GinkgoHelper()
 	f.handler(resource, name).Set(obj)
 }
 
 func (f *fakeWatcher) fail(resource, name string, err error) {
+	GinkgoHelper()
 	f.handler(resource, name).Fail(err)
 }
 

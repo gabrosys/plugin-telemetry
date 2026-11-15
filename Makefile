@@ -94,14 +94,14 @@ dev-down: $(KIND) ## Delete the kind environment
 	$(DEV_ENV) hack/dev-env.sh down
 
 .PHONY: kind-load
-kind-load: $(KIND) ## Load the plugin image into kind, pull the collector image on its nodes and record the plugin digest reference in bin/image-ref
+kind-load: image dev-up $(KIND) ## Load the plugin image into kind, pull the collector image on its nodes and record the plugin digest reference in bin/image-ref
 	$(KIND) load docker-image $(IMG) --name $(KIND_CLUSTER)
 	for node in $$($(KIND) get nodes --name $(KIND_CLUSTER)); do docker exec $$node crictl pull $(COLLECTOR_IMAGE) || exit 1; done
+	mkdir -p $(BIN)
 	KIND=$(KIND) hack/kind-image-ref.sh $(KIND_CLUSTER) $(IMG) > $(BIN)/image-ref
 
 .PHONY: deploy
-deploy: $(KUBECTL) ## Deploy the plugin to the kind environment (after image and kind-load)
-	@test -s $(BIN)/image-ref || { echo "run make image kind-load first" >&2; exit 1; }
+deploy: kind-load $(KUBECTL) ## Build and load the image, then deploy the plugin to the kind environment
 	KUBECTL=$(KUBECTL) KIND_CLUSTER=$(KIND_CLUSTER) BIN=$(BIN) COLLECTOR_IMAGE=$(COLLECTOR_IMAGE) POSTGRES_IMAGE=$(POSTGRES_IMAGE) \
 		hack/deploy.sh "$$(cat $(BIN)/image-ref)"
 
@@ -110,13 +110,9 @@ ginkgo-run = $(GO) run github.com/onsi/ginkgo/v2/ginkgo run --tags e2e -v --fail
 	--procs=$(or $(E2E_PROCS_$(1)),1) --timeout=$(or $(E2E_TIMEOUT_$(1)),30m) $(if $(E2E_FOCUS),--focus="$$E2E_FOCUS") ./$(2)/...
 
 .PHONY: $(E2E_TARGETS)
-$(E2E_TARGETS): e2e-%: dev-up
+$(E2E_TARGETS): e2e-%: deploy
 	E2E_KUBE_CONTEXT=kind-$(KIND_CLUSTER) CNPG_VERSION=$(CNPG_VERSION) POSTGRES_IMAGE=$(POSTGRES_IMAGE) \
 		$(call ginkgo-run,$*,test/e2e/$*)
-
-e2e-spikes: image kind-load deploy
-e2e-admission: image kind-load deploy
-e2e-plugin: image kind-load deploy
 
 .PHONY: e2e-engine
 e2e-engine: build ## Run the engine e2e suite with Docker, without kind (E2E_FOCUS=<regex>)

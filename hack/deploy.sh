@@ -12,7 +12,7 @@ metrics_endpoint=http://collector.telemetry-e2e.svc:4318
 
 kctl() { "$KUBECTL" --context "kind-${KIND_CLUSTER}" "$@"; }
 
-if [[ $# -ne 1 || $1 != *@sha256:* ]]; then
+if [[ $# -ne 1 || ! $1 =~ ^[^@]+@sha256:[0-9a-f]{64}$ ]]; then
 	echo "usage: $0 REPO@sha256:DIGEST" >&2
 	exit 2
 fi
@@ -31,7 +31,7 @@ cat >"$dir/kustomization.yaml" <<YAML
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - ../../config
+  - $(realpath --relative-to="$dir" "$root/config")
   - collector.yaml
 patches:
   - target:
@@ -43,6 +43,7 @@ patches:
         value: --metrics-endpoint=$metrics_endpoint
 images:
   - name: ghcr.io/gabrosys/plugin-telemetry
+    newName: ${ref%@*}
     digest: $digest
 configMapGenerator:
   - name: telemetry-sidecar-image
@@ -53,9 +54,11 @@ generatorOptions:
   disableNameSuffixHash: true
 YAML
 
+# --force-conflicts takes back fields a hand edit took over, such as the sidecar image ConfigMap.
 kctl apply --server-side --force-conflicts -k "$root/config/crd"
 kctl wait --for=condition=Established \
 	crd/metricquerysets.telemetry.gabrosys.github.io crd/telemetryexporters.telemetry.gabrosys.github.io --timeout=60s
+# --force-conflicts takes back fields a hand edit took over, such as the sidecar image ConfigMap.
 kctl apply --server-side --force-conflicts -k "$dir"
 kctl wait --for=condition=Ready certificate --all -n cnpg-system --timeout=120s
 kctl rollout status deployment/plugin-telemetry -n cnpg-system --timeout=180s

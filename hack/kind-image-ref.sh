@@ -13,7 +13,12 @@ fi
 
 cluster=$1
 image=$2
-repo=${image%:*}
+if [[ ${image##*/} == *:* ]]; then
+	repo=${image%:*}
+else
+	repo=$image
+	image=$image:latest
+fi
 
 nodes=$("$KIND" get nodes --name "$cluster")
 [[ -n $nodes ]] || {

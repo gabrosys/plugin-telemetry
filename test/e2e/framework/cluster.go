@@ -2,12 +2,14 @@ package framework
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -27,6 +29,26 @@ func NewCluster(namespace, name, image string) *apiv1.Cluster {
 			StorageConfiguration: apiv1.StorageConfiguration{Size: "1Gi"},
 		},
 	}
+}
+
+// TouchAnnotation is the annotation Touch sets; any edit makes CloudNativePG reconcile the Cluster.
+const TouchAnnotation = "e2e.telemetry.gabrosys.github.io/touch"
+
+// Touch merge-patches TouchAnnotation to value and returns the write's resourceVersion; API errors are returned for Eventually.
+func Touch(ctx context.Context, c client.Client, key client.ObjectKey, value string) (string, error) {
+	body, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{"annotations": map[string]string{TouchAnnotation: value}},
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode the touch patch: %w", err)
+	}
+
+	cluster := &apiv1.Cluster{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name}}
+	if err := c.Patch(ctx, cluster, client.RawPatch(types.MergePatchType, body)); err != nil {
+		return "", fmt.Errorf("touch cluster %s: %w", key, err)
+	}
+
+	return cluster.ResourceVersion, nil
 }
 
 // ClusterReady reports whether the Cluster's Ready condition is true and all

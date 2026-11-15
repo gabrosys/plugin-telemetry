@@ -119,37 +119,6 @@ func Points(lines []Line, name string) []Point {
 	return out
 }
 
-// ResourcePoint is a Point and the attributes of the resource that reported it.
-type ResourcePoint struct {
-	Resource map[string]string
-	Point
-}
-
-// ResourcePoints returns the number data points of the metric called name with their resource, in file order.
-func ResourcePoints(lines []Line, name string) []ResourcePoint {
-	var out []ResourcePoint
-	for _, l := range lines {
-		for _, rm := range l.Request.GetResourceMetrics() {
-			resource := Attributes(rm.GetResource().GetAttributes())
-			for _, sm := range rm.GetScopeMetrics() {
-				for _, m := range sm.GetMetrics() {
-					if m.GetName() != name {
-						continue
-					}
-					dps := append(slices.Clone(m.GetGauge().GetDataPoints()), m.GetSum().GetDataPoints()...)
-					for _, dp := range dps {
-						out = append(out, ResourcePoint{
-							Resource: resource,
-							Point:    Point{Time: unixNano(dp.GetTimeUnixNano()), Attrs: Attributes(dp.GetAttributes()), Value: value(dp)},
-						})
-					}
-				}
-			}
-		}
-	}
-	return out
-}
-
 // HistogramPoint is one explicit-bucket histogram data point.
 type HistogramPoint struct {
 	Time  time.Time

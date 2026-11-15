@@ -91,14 +91,8 @@ var _ = Describe("security: a CloudNativePG Cluster named like an identity", fun
 		}
 
 		// CloudNativePG asks for the status on a reconcile, which an annotation edit triggers.
-		var cl apiv1.Cluster
-		Expect(c.Get(ctx, key(owner), &cl)).To(Succeed())
-		patch := client.MergeFrom(cl.DeepCopy())
-		if cl.Annotations == nil {
-			cl.Annotations = map[string]string{}
-		}
-		cl.Annotations[touchAnnot] = "collision"
-		Expect(c.Patch(ctx, &cl, patch)).To(Succeed())
+		_, err = framework.Touch(ctx, c, key(owner), "collision")
+		Expect(err).NotTo(HaveOccurred())
 		Eventually(func(g Gomega, ctx SpecContext) {
 			st := status(g, ctx, owner)
 			g.Expect(st.Identity).To(Equal("pending"))

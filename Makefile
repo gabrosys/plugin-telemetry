@@ -49,7 +49,9 @@ DEV_ENV := KIND=$(KIND) KUBECTL=$(KUBECTL) CMCTL=$(CMCTL) KIND_CLUSTER=$(KIND_CL
 
 IMG ?= ghcr.io/gabrosys/plugin-telemetry:$(VERSION)
 PLATFORMS ?= linux/amd64,linux/arm64
-# image-multiarch needs the containerd image store or a docker-container builder.
+# buildx passes SOURCE_DATE_EPOCH to the build as a build arg; with rewrite-timestamp it fixes every timestamp in the image.
+export SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null || echo 0)
+# image needs the containerd image store (unpack=false); image-multiarch needs it or a docker-container builder.
 BUILDX_BUILDER ?=
 
 .PHONY: help
@@ -77,14 +79,15 @@ generate: ## Regenerate docs/self-metrics.md, the deepcopy code and the CRDs
 
 .PHONY: image
 image: ## Build the image for the local platform and load it into Docker
-	docker buildx build --load --build-arg VERSION=$(VERSION) -t $(IMG) .
+	docker buildx build --output type=image,name=$(IMG),rewrite-timestamp=true,unpack=false \
+		--provenance=false --build-arg VERSION=$(VERSION) .
 
 .PHONY: image-multiarch
 image-multiarch: ## Build all platforms with an SBOM into bin/image-oci
 	rm -rf $(BIN)/image-oci
 	docker buildx build $(if $(BUILDX_BUILDER),--builder $(BUILDX_BUILDER)) \
-		--platform $(PLATFORMS) --sbom=true --build-arg VERSION=$(VERSION) \
-		--output type=oci,dest=$(BIN)/image-oci,tar=false .
+		--platform $(PLATFORMS) --sbom=true --provenance=false --build-arg VERSION=$(VERSION) \
+		--output type=oci,dest=$(BIN)/image-oci,tar=false,rewrite-timestamp=true .
 
 .PHONY: dev-up
 dev-up: $(KIND) $(KUBECTL) $(CMCTL) ## Create the kind environment (CNPG_VERSION=v1.30.1|main)

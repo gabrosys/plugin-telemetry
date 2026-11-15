@@ -45,27 +45,40 @@ type Lines struct {
 	lines []Line
 }
 
+// Decode decodes the complete lines of chunk and returns them with the bytes consumed, through the last
+// newline. A trailing line without a newline is left for the caller to present again.
+func Decode(chunk []byte) (lines []Line, consumed int, err error) {
+	for {
+		i := bytes.IndexByte(chunk[consumed:], '\n')
+		if i < 0 {
+			return lines, consumed, nil
+		}
+		raw := chunk[consumed : consumed+i]
+		if len(bytes.TrimSpace(raw)) > 0 {
+			req := &colmetricpb.ExportMetricsServiceRequest{}
+			if err := unmarshal.Unmarshal(raw, req); err != nil {
+				return nil, 0, fmt.Errorf("decode the line at byte %d: %w", consumed, err)
+			}
+			lines = append(lines, Line{Time: latest(req), Request: req})
+		}
+		consumed += i + 1
+	}
+}
+
 // Update decodes the complete lines of file past those decoded before; file is the whole file.
 // A trailing line without a newline is left for the next call.
 func (l *Lines) Update(file []byte) error {
 	if len(file) < l.read {
 		return fmt.Errorf("%w: %d bytes decoded, %d now", ErrShrank, l.read, len(file))
 	}
-	for {
-		i := bytes.IndexByte(file[l.read:], '\n')
-		if i < 0 {
-			return nil
-		}
-		raw := file[l.read : l.read+i]
-		if len(bytes.TrimSpace(raw)) > 0 {
-			req := &colmetricpb.ExportMetricsServiceRequest{}
-			if err := unmarshal.Unmarshal(raw, req); err != nil {
-				return fmt.Errorf("decode the line at byte %d: %w", l.read, err)
-			}
-			l.lines = append(l.lines, Line{Time: latest(req), Request: req})
-		}
-		l.read += i + 1
+	lines, consumed, err := Decode(file[l.read:])
+	if err != nil {
+		return fmt.Errorf("decode the file past byte %d: %w", l.read, err)
 	}
+	l.lines = append(l.lines, lines...)
+	l.read += consumed
+
+	return nil
 }
 
 // All returns the lines decoded so far, in file order.

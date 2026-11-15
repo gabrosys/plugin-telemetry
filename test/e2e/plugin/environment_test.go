@@ -27,17 +27,17 @@ const (
 	setStatusInCluster      = "TYPE_SET_STATUS_IN_CLUSTER"
 	hookCallsMetric         = "cnpg_otel_plugin_hook_calls_total"
 	pluginServiceName       = "plugin-telemetry"
-	collectorTailLines      = 200
 	environmentTimeout      = 3 * time.Minute
 	environmentPollInterval = 2 * time.Second
 )
 
 var _ = Describe("the plugin environment", Ordered, func() {
 	var (
-		c     client.Client
-		cfg   *rest.Config
-		ns    string
-		start time.Time
+		c      client.Client
+		cfg    *rest.Config
+		reader *framework.CollectorReader
+		ns     string
+		start  time.Time
 	)
 
 	BeforeAll(func(ctx SpecContext) {
@@ -45,6 +45,7 @@ var _ = Describe("the plugin environment", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		c, cfg, err = framework.NewClients(env.KubeContext)
 		Expect(err).NotTo(HaveOccurred())
+		reader = framework.NewCollectorReader(cfg)
 
 		Eventually(framework.PluginAvailable).WithContext(ctx).WithArguments(c).
 			WithTimeout(environmentTimeout).WithPolling(environmentPollInterval).Should(BeTrue())
@@ -91,7 +92,7 @@ var _ = Describe("the plugin environment", Ordered, func() {
 
 	It("the plugin's self-metrics reach the collector with the plugin resource", func(ctx SpecContext) {
 		Eventually(func(g Gomega, ctx SpecContext) {
-			lines, err := framework.CollectorLinesSince(ctx, cfg, collectorTailLines, start)
+			lines, err := reader.Since(ctx, start)
 			g.Expect(err).NotTo(HaveOccurred())
 
 			var plugin []map[string]string

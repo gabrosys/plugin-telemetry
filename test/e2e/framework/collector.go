@@ -4,11 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path"
-	"regexp"
-	"slices"
 	"strconv"
-	"strings"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -27,6 +24,7 @@ const (
 	collectorNamespace  = "telemetry-e2e"
 	collectorName       = "collector"
 	collectorReader     = "reader"
+	collectorContainer  = "collector"
 	collectorFile       = "/data/metrics.jsonl"
 	collectorReadyPoll  = 2 * time.Second
 	collectorReadyLimit = 3 * time.Minute
@@ -56,73 +54,37 @@ func CollectorReady(ctx context.Context, c client.Client) error {
 	return nil
 }
 
-// CollectorLines reads the last n lines of the collector's files, the rotated backups included.
-func CollectorLines(ctx context.Context, cfg *rest.Config, n int) ([]otlp.Line, error) {
-	return readCollector(ctx, cfg, n, time.Time{})
+// CollectorReader reads the file the collector's file exporter writes. Rotation is off, so each Pod has one file
+// and every line is read once.
+type CollectorReader struct {
+	cfg *rest.Config
+
+	mu      sync.Mutex // guards offsets and lines
+	offsets map[collectorRun]int
+	lines   []otlp.Line
 }
 
-// CollectorLinesSince reads the last n lines of the collector's files, the rotated backups included,
-// and keeps those whose Time is at or after since.
-func CollectorLinesSince(ctx context.Context, cfg *rest.Config, n int, since time.Time) ([]otlp.Line, error) {
-	return readCollector(ctx, cfg, n, since)
+// collectorRun names one run of a collector Pod: the exporter truncates its file when the container restarts.
+type collectorRun struct {
+	uid      types.UID
+	restarts int32
 }
 
-// rotatedFile matches the backups of the collector's file exporter: <name>-<UTC time>-size<ext>.
-// Source: opentelemetry-collector-contrib v0.165.0 exporter/fileexporter/README.md, "File Rotation".
-var rotatedFile = regexp.MustCompile(`^metrics-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}-size\.jsonl$`)
-
-// RotatedFiles returns the paths of the backups in an `ls -1` listing of the collector's directory, oldest
-// first: the time in their names has a fixed width, so the name order is the time order.
-func RotatedFiles(listing string) []string {
-	var names []string
-	for name := range strings.Lines(listing) {
-		if name = strings.TrimSpace(name); rotatedFile.MatchString(name) {
-			names = append(names, name)
-		}
-	}
-	slices.Sort(names)
-
-	files := make([]string, len(names))
-	for i, name := range names {
-		files[i] = path.Join(path.Dir(collectorFile), name)
-	}
-
-	return files
+// NewCollectorReader returns a reader of the collector Pods' files.
+func NewCollectorReader(cfg *rest.Config) *CollectorReader {
+	return &CollectorReader{cfg: cfg, offsets: map[collectorRun]int{}}
 }
 
-// ReadFiles reads at most n complete lines from files, given oldest first with the current file last.
-// It asks the newest file for n lines and each older one only for what is left, then parses each file
-// on its own, so a last line without a newline is skipped in every file. Lines before since are dropped.
-func ReadFiles(files []string, read func(file string, n int) (string, error), n int, since time.Time) ([]otlp.Line, error) {
-	outputs := make([]string, len(files))
-	left := n
-	for i := len(files) - 1; i >= 0 && left > 0; i-- {
-		out, err := read(files[i], left)
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", files[i], err)
-		}
-		outputs[i] = out
-		left -= strings.Count(out, "\n")
-	}
+// Since reads what each running collector Pod wrote since the last call and returns every line read so far whose
+// Time is at or after since, in read order. Safe for concurrent use.
+func (r *CollectorReader) Since(ctx context.Context, since time.Time) ([]otlp.Line, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	var all []otlp.Line
-	for _, out := range outputs {
-		lines, err := ParseLines(out)
-		if err != nil {
-			return nil, err
-		}
-		all = append(all, lines...)
-	}
-
-	return otlp.Since(all, since), nil
-}
-
-func readCollector(ctx context.Context, cfg *rest.Config, n int, since time.Time) ([]otlp.Line, error) {
-	cs, err := kubernetes.NewForConfig(cfg)
+	cs, err := kubernetes.NewForConfig(r.cfg)
 	if err != nil {
 		return nil, fmt.Errorf("create clientset: %w", err)
 	}
-
 	pods, err := cs.CoreV1().Pods(collectorNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: "app.kubernetes.io/name=" + collectorName,
 	})
@@ -130,49 +92,44 @@ func readCollector(ctx context.Context, cfg *rest.Config, n int, since time.Time
 		return nil, fmt.Errorf("list collector pods: %w", err)
 	}
 
-	for _, pod := range pods.Items {
+	running := 0
+	for i := range pods.Items {
+		pod := &pods.Items[i]
 		if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
 			continue
 		}
-
-		name := types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}
-		listing, _, err := Exec(ctx, cfg, name, collectorReader, []string{"ls", "-1", path.Dir(collectorFile)})
-		if err != nil {
-			return nil, fmt.Errorf("list the collector directory: %w", err)
+		running++
+		if err := r.read(ctx, pod); err != nil {
+			return nil, err
 		}
-
-		files := append(RotatedFiles(listing), collectorFile)
-		lines, err := ReadFiles(files, func(file string, count int) (string, error) {
-			out, _, err := Exec(ctx, cfg, name, collectorReader, []string{"tail", "-n", strconv.Itoa(count), file})
-
-			return out, err
-		}, n, since)
-		if err != nil {
-			return nil, fmt.Errorf("read the collector files: %w", err)
-		}
-
-		return lines, nil
+	}
+	if running == 0 {
+		return nil, fmt.Errorf("%w in %s", ErrNoCollectorPod, collectorNamespace)
 	}
 
-	return nil, fmt.Errorf("%w in %s", ErrNoCollectorPod, collectorNamespace)
+	return otlp.Since(r.lines, since), nil
 }
 
-// ParseLinesSince is ParseLines keeping the lines whose Time is at or after since.
-func ParseLinesSince(out string, since time.Time) ([]otlp.Line, error) {
-	lines, err := ParseLines(out)
+// read appends the lines the collector in pod wrote past the offset of its run.
+func (r *CollectorReader) read(ctx context.Context, pod *corev1.Pod) error {
+	run := collectorRun{uid: pod.UID}
+	for _, st := range pod.Status.ContainerStatuses {
+		if st.Name == collectorContainer {
+			run.restarts = st.RestartCount
+		}
+	}
+
+	name := types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}
+	out, _, err := Exec(ctx, r.cfg, name, collectorReader, []string{"tail", "-c", "+" + strconv.Itoa(r.offsets[run]+1), collectorFile})
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("read the collector file of %s: %w", name, err)
 	}
-
-	return otlp.Since(lines, since), nil
-}
-
-// ParseLines decodes the output of tail on the collector's file. A last line without a newline is skipped.
-func ParseLines(out string) ([]otlp.Line, error) {
-	var l otlp.Lines
-	if err := l.Update([]byte(out)); err != nil {
-		return nil, fmt.Errorf("decode the collector file: %w", err)
+	lines, consumed, err := otlp.Decode([]byte(out))
+	if err != nil {
+		return fmt.Errorf("decode the collector file of %s: %w", name, err)
 	}
+	r.offsets[run] += consumed
+	r.lines = append(r.lines, lines...)
 
-	return l.All(), nil
+	return nil
 }

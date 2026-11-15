@@ -27,9 +27,6 @@ const (
 	// parityWindow and parityExports give our series several query runs, so constants stand out from gauges.
 	parityWindow  = 70 * time.Second
 	parityExports = 7
-	// parityTail covers parityWindow, and probeTail one export, for every resource that exports to the collector.
-	parityTail = 120
-	probeTail  = 20
 	// alignQuery is the query of CNPG's default monitoring whose sample times AC7 aligns.
 	alignQuery = "pg_stat_database"
 	// Our sample may be this old at the scrape: 1 s off the interval for CNPG's whole seconds, 1 s for the scrape.
@@ -50,6 +47,7 @@ type parityTarget struct {
 	env     framework.Env
 	c       client.Client
 	cfg     *rest.Config
+	reader  *framework.CollectorReader
 	ns      string
 	cluster string
 	mode    string
@@ -81,7 +79,7 @@ func itParity(target func() parityTarget) {
 		Eventually(func(g Gomega, ctx SpecContext) {
 			g.Expect(time.Since(scraped)).To(BeNumerically(">", cnpgQueriesTTL), "CNPG still serves the cache of the scrape at %s", scraped)
 
-			probe, err := framework.CollectorLinesSince(ctx, t.cfg, probeTail, start)
+			probe, err := t.reader.Since(ctx, start)
 			g.Expect(err).NotTo(HaveOccurred())
 			probe = otlp.ForResource(probe, "service.namespace", t.ns)
 			times := exportTimes(otlp.ForResource(probe, "k8s.pod.name", primary))
@@ -105,7 +103,7 @@ func itParity(target func() parityTarget) {
 					"CNPG sampled at %s, our %s at %s", cnpgSampled, alignQuery, sampled)
 			}
 
-			all, err := framework.CollectorLinesSince(ctx, t.cfg, parityTail, start.Add(-parityWindow))
+			all, err := t.reader.Since(ctx, start.Add(-parityWindow))
 			g.Expect(err).NotTo(HaveOccurred())
 			lines = upTo(otlp.ForResource(all, "service.namespace", t.ns), newest)
 			g.Expect(len(exportTimes(otlp.ForResource(lines, "k8s.pod.name", primary)))).To(BeNumerically(">=", parityExports),

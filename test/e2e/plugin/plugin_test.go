@@ -51,7 +51,6 @@ const (
 	extraAttribute = "plugin.e2e.extra"
 	extraValue     = "extra-value"
 	resourceLabel  = "cnpg.cluster.label."
-	collectorTail  = 300
 	exportInterval = 10 * time.Second
 
 	clusterTimeout = 10 * time.Minute
@@ -166,6 +165,7 @@ func describeMode(m mode) {
 			env     framework.Env
 			c       client.Client
 			cfg     *rest.Config
+			reader  *framework.CollectorReader
 			ns      string
 			cluster *apiv1.Cluster
 
@@ -236,7 +236,7 @@ func describeMode(m mode) {
 		}
 
 		lines := func(g Gomega, ctx context.Context, since time.Time) []otlp.Line {
-			out, err := framework.CollectorLinesSince(ctx, cfg, collectorTail, since)
+			out, err := reader.Since(ctx, since)
 			g.Expect(err).NotTo(HaveOccurred())
 
 			return out
@@ -354,6 +354,7 @@ func describeMode(m mode) {
 			Expect(err).NotTo(HaveOccurred())
 			c, cfg, err = framework.NewClients(env.KubeContext)
 			Expect(err).NotTo(HaveOccurred())
+			reader = framework.NewCollectorReader(cfg)
 
 			Eventually(framework.PluginAvailable).WithContext(ctx).WithArguments(c).
 				WithTimeout(environmentTimeout).WithPolling(environmentPollInterval).Should(BeTrue())
@@ -578,7 +579,7 @@ func describeMode(m mode) {
 					g.Expect(podsExporting(ls, "cnpg_e2e_primary_one")).To(ConsistOf(cl.Status.CurrentPrimary))
 				}).WithContext(ctx).WithTimeout(3 * time.Minute).WithPolling(specPoll).Should(Succeed())
 
-				ls, err := framework.CollectorLinesSince(ctx, cfg, collectorTail, exporterCreated)
+				ls, err := reader.Since(ctx, exporterCreated)
 				Expect(err).NotTo(HaveOccurred())
 				byPod := map[string]otlp.Export{}
 				for _, e := range exports(ls) {
@@ -923,7 +924,7 @@ func describeMode(m mode) {
 		}, SpecTimeout(6*time.Minute))
 
 		itParity(func() parityTarget {
-			return parityTarget{env: env, c: c, cfg: cfg, ns: ns, cluster: cname, mode: m.name}
+			return parityTarget{env: env, c: c, cfg: cfg, reader: reader, ns: ns, cluster: cname, mode: m.name}
 		})
 
 		It("AC5: deleting the TelemetryExporter stops exports, and the status says missing after the next reconcile", func(ctx SpecContext) {

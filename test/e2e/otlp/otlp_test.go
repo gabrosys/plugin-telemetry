@@ -49,6 +49,29 @@ var _ = Describe("Lines", func() {
 	})
 })
 
+var _ = Describe("Decode", func() {
+	It("decodes the complete lines and reports the bytes up to the last newline", func() {
+		lines, consumed, err := otlp.Decode([]byte(counterLine + gaugeLine + counterLine[:10]))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lines).To(HaveLen(2))
+		Expect(lines[0].Time).To(Equal(time.Unix(2, 0)))
+		Expect(lines[1].Time).To(Equal(time.Unix(3, 0)))
+		Expect(consumed).To(Equal(len(counterLine + gaugeLine)))
+	})
+
+	It("decodes nothing from a chunk without a newline", func() {
+		lines, consumed, err := otlp.Decode([]byte(counterLine[:10]))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lines).To(BeEmpty())
+		Expect(consumed).To(BeZero())
+	})
+
+	It("names the byte offset of a line that is not OTLP JSON", func() {
+		_, _, err := otlp.Decode([]byte("not json\n"))
+		Expect(err).To(MatchError(ContainSubstring("decode the line at byte 0")))
+	})
+})
+
 var _ = Describe("readers", func() {
 	var lines []otlp.Line
 

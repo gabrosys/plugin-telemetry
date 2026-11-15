@@ -29,9 +29,6 @@ data:
       file:
         path: /data/metrics.jsonl
         format: json
-        rotation:
-          max_megabytes: 10
-          max_backups: 3
       debug:
         verbosity: basic
 

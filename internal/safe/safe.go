@@ -48,7 +48,7 @@ func repeated(what, text string) bool {
 	return false
 }
 
-// Reset forgets every panic logged, so specs don't depend on each other's order.
+// Reset forgets every panic logged. It is for specs, so they don't depend on each other's order.
 func Reset() {
 	mu.Lock()
 	defer mu.Unlock()

@@ -229,7 +229,8 @@ func (e *Executor) collect(ctx context.Context, tx pgx.Tx, job planner.Job, res 
 	}
 	defer rows.Close()
 
-	// seen holds at most maxSeries + 1 series IDs; a series past that is counted but not remembered.
+	// seen holds at most maxSeries + 1 series IDs; a series past that is counted but not remembered, so WouldBe
+	// can overcount one that repeats. Limits are validated >= 1, so the bound holds whenever a cap is set.
 	var (
 		fields    []pgconn.FieldDescription
 		columns   []string

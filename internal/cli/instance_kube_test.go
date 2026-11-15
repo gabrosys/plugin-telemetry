@@ -18,7 +18,6 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/kubesource"
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
-	"github.com/gabrosys/plugin-telemetry/internal/sources"
 )
 
 // fakeKube is a Kubernetes source over the settings of a testdata file, with virtual file names.
@@ -70,7 +69,7 @@ func (f *fakeKube) ReadFile(name string) ([]byte, error) {
 	return nil, &fs.PathError{Op: "read", Path: name, Err: fs.ErrNotExist}
 }
 
-func (f *fakeKube) Watch(ctx context.Context, _ []string, _ func(), _ ...sources.WatchOption) error {
+func (f *fakeKube) Watch(ctx context.Context, _ func() []string, _ func()) error {
 	<-ctx.Done()
 	return nil
 }

@@ -23,8 +23,9 @@ type Config interface {
 	Settings() (settings.Settings, []byte, error)
 	// ReadFile reads a file the settings name: fs.ErrNotExist when missing, sources.ErrDenied on a 403.
 	ReadFile(name string) ([]byte, error)
-	// Watch calls notify, debounced, after any change to the settings or to files, and returns nil when ctx ends.
-	Watch(ctx context.Context, files []string, notify func(), opts ...sources.WatchOption) error
+	// Watch calls notify once it is watching, then after changes to the settings or the files files()
+	// lists; it returns nil only when ctx ends.
+	Watch(ctx context.Context, files func() []string, notify func()) error
 }
 
 // fileConfig reads the settings from a YAML file and every other file from the file system.
@@ -57,8 +58,9 @@ func (fileConfig) ReadFile(name string) ([]byte, error) {
 }
 
 // Watch also watches the settings file.
-func (c fileConfig) Watch(ctx context.Context, files []string, notify func(), opts ...sources.WatchOption) error {
-	if err := sources.Watch(ctx, append([]string{c.path}, files...), watchDebounce, notify, opts...); err != nil {
+func (c fileConfig) Watch(ctx context.Context, files func() []string, notify func()) error {
+	withSettings := func() []string { return append([]string{c.path}, files()...) }
+	if err := sources.Watch(ctx, withSettings, notify); err != nil {
 		return fmt.Errorf("watch files: %w", err)
 	}
 	return nil

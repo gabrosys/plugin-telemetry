@@ -9,7 +9,6 @@ import (
 	"maps"
 	"math/rand/v2"
 	"os"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,14 +32,11 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
 	"github.com/gabrosys/plugin-telemetry/internal/snapshot"
-	"github.com/gabrosys/plugin-telemetry/internal/sources"
 	"github.com/gabrosys/plugin-telemetry/internal/version"
 )
 
 const (
-	// watchDebounce is the quiet time after a file change before the engine reacts.
-	watchDebounce = time.Second
-	// watchRetry is the wait before another attempt to watch the configuration files.
+	// watchRetry is the wait before a Watch that returned early is started again.
 	watchRetry = 5 * time.Second
 	// connectTimeout bounds a PostgreSQL connection attempt.
 	connectTimeout = 5 * time.Second
@@ -62,6 +58,9 @@ const (
 // ErrNilConfig is returned by Run when Options.Config is nil.
 var ErrNilConfig = errors.New("no configuration given")
 
+// errWatchEnded stands for the error of a Watch that returned nil before the engine stopped.
+var errWatchEnded = errors.New("the watch ended before the engine stopped")
+
 // Options configure Run.
 type Options struct {
 	Config Config              // where the settings and the files they name are read
@@ -75,10 +74,15 @@ type Options struct {
 // When the Config has nothing to run (ErrNoConfiguration) the engine stops everything and idles
 // until it has.
 func Run(ctx context.Context, o Options) error {
+	return RunWith(ctx, o, nil)
+}
+
+// RunWith is Run with gather in place of the facts round's PostgreSQL queries; nil means those queries.
+func RunWith(ctx context.Context, o Options, gather func(context.Context, settings.Settings) (planner.Facts, error)) error {
 	if o.Config == nil {
 		return ErrNilConfig
 	}
-	e, err := newEngine(ctx, o)
+	e, err := newEngine(ctx, o, gather)
 	if err != nil {
 		return err
 	}
@@ -90,23 +94,19 @@ func Run(ctx context.Context, o Options) error {
 type runner struct {
 	spec   poolSpec
 	limits settings.Limits
-	pool   *sharedPool
+	pool   *pg.Pool
 	exec   *executor.Executor
 }
 
-// sharedPool counts the runs in flight on a pool, whichever runner started them, so a replaced
-// pool closes after all of them.
-type sharedPool struct {
-	*pg.Pool
-	inflight sync.WaitGroup
+// poolSpec is what a pool is built from besides the limits.
+type poolSpec struct {
+	postgres    settings.Postgres
+	idleTimeout time.Duration
+	maxBackoff  time.Duration // the planning cycle
 }
 
-// poolSpec is what a pool is built from.
-type poolSpec struct {
-	postgres                  settings.Postgres
-	queryTimeout, lockTimeout time.Duration
-	idleTimeout               time.Duration
-	maxBackoff                time.Duration // the planning cycle
+func newPoolSpec(s settings.Settings, idle time.Duration) poolSpec {
+	return poolSpec{postgres: s.Postgres, idleTimeout: idle, maxBackoff: s.PlanInterval}
 }
 
 // loopRun is a running export loop.
@@ -116,18 +116,12 @@ type loopRun struct {
 	done   chan struct{}
 }
 
-// watchRun is a running file watcher.
-type watchRun struct {
-	files  []string
-	cancel context.CancelFunc
-	done   chan struct{}
-}
-
 type engine struct {
 	cfg    Config
 	clk    clock.Clock
 	rnd    *rand.Rand // control goroutine only
 	getenv func(string) string
+	gather func(context.Context, settings.Settings) (planner.Facts, error)
 
 	stats  *selfmetrics.Stats
 	store  *snapshot.Store
@@ -140,35 +134,30 @@ type engine struct {
 	up      atomic.Int64                   // 1 or 0 after the last facts round, -1 before the first
 	cluster atomic.Pointer[string]         // the cluster label of upMetric; nil before a valid configuration
 	server  atomic.Pointer[semver.Version] // from the last successful facts round
-	changed chan struct{}                  // a watched file changed
+	files   atomic.Pointer[[]string]       // what the watch covers besides the settings
+	changed chan struct{}                  // the watch saw a change
 	early   chan struct{}                  // a run lost its connection
 
-	mu      sync.Mutex // guards runner, which only the control goroutine writes
-	runner  *runner
-	retired sync.WaitGroup // replaced runners waiting for their runs
+	mu     sync.Mutex // guards runner, which only the control goroutine writes
+	runner *runner
 
 	// The fields below belong to the control goroutine.
-	watcher        *watchRun
-	pendingWatch   []string // files to watch once a retry succeeds
-	retryTimer     clock.Timer
-	factsTimer     clock.Timer
-	earlyTimer     clock.Timer
-	lastFacts      time.Time
-	factsFailures  int      // consecutive failed facts rounds the timer drove
-	factsErrs      errorLog // the facts errors logged, keyed by the default database
-	exp            *export.Exporter
-	exporterFiles  []string
-	exporterDigest string
-	loop           *loopRun
-	idleReason     string // the ErrNoConfiguration reason last logged
+	loop          *loopRun
+	factsTimer    clock.Timer
+	earlyTimer    clock.Timer
+	lastFacts     time.Time
+	factsFailures int      // consecutive failed facts rounds the timer drove
+	factsErrs     errorLog // the facts errors logged, keyed by the default database
+	idleReason    string   // the ErrNoConfiguration reason last logged
 }
 
-func newEngine(ctx context.Context, o Options) (*engine, error) {
+func newEngine(ctx context.Context, o Options, gather func(context.Context, settings.Settings) (planner.Facts, error)) (*engine, error) {
 	e := &engine{
 		cfg:     o.Config,
 		clk:     o.Clock,
 		rnd:     o.Rand,
 		getenv:  o.Getenv,
+		gather:  gather,
 		stats:   selfmetrics.NewStats(),
 		store:   snapshot.New(0),
 		changed: make(chan struct{}, 1),
@@ -184,6 +173,9 @@ func newEngine(ctx context.Context, o Options) (*engine, error) {
 	if e.getenv == nil {
 		e.getenv = os.Getenv
 	}
+	if e.gather == nil {
+		e.gather = e.gatherFacts
+	}
 
 	e.reader = sdkmetric.NewManualReader(sdkmetric.WithProducer(export.NewProducer(e.store, e.clk, e.duplicates)))
 	e.mp = newMeterProvider(e.reader)
@@ -193,7 +185,7 @@ func newEngine(ctx context.Context, o Options) (*engine, error) {
 	}
 
 	e.sched = scheduler.New(e.clk, e.newRand(), e.runJob, e.skipped)
-	e.plan = newReplanner(o.Config, e.stats, e.store, &e.errs, e.sched.Update, e)
+	e.plan = newReplanner(o.Config, e.stats, e.store, &e.errs, e.sched.Update)
 	return e, nil
 }
 
@@ -236,7 +228,7 @@ func (e *engine) newRand() *rand.Rand {
 	return rand.New(rand.NewPCG(e.rnd.Uint64(), e.rnd.Uint64())) //nolint:gosec // jitter, not security
 }
 
-// run is the control goroutine: it reacts to file changes, facts rounds and failed runs until ctx ends.
+// run is the control goroutine: it reacts to changes, facts rounds and failed runs until ctx ends.
 func (e *engine) run(ctx context.Context) {
 	logger := log.FromContext(ctx)
 	logger.Info("starting the metrics engine", "config", e.cfg.Name(), "version", version.Version)
@@ -249,10 +241,14 @@ func (e *engine) run(ctx context.Context) {
 			logger.Error(err, "run the scheduler")
 		}
 	}()
-	defer e.shutdown(ctx, stopSched, schedDone)
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		e.watch(ctx)
+	}()
+	defer e.shutdown(ctx, stopSched, schedDone, watchDone)
 
-	e.watch(ctx, nil)
-	e.reload(ctx)
+	e.onChange(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -265,41 +261,51 @@ func (e *engine) run(ctx context.Context) {
 			e.onEarlyFacts(ctx)
 		case <-timerC(e.earlyTimer):
 			e.factsRound(ctx, false)
-		case <-timerC(e.retryTimer):
-			e.retryWatch(ctx)
 		}
 	}
 }
 
-// shutdown stops the export loop, the scheduler, the pool, the exporter, the watcher and the meter provider.
-func (e *engine) shutdown(ctx context.Context, stopSched context.CancelFunc, schedDone <-chan struct{}) {
+// watch runs the Config's watch until ctx ends, starting it again watchRetry after it returns early.
+func (e *engine) watch(ctx context.Context) {
+	files := func() []string {
+		if f := e.files.Load(); f != nil {
+			return *f
+		}
+		return nil
+	}
+	for {
+		err := e.cfg.Watch(ctx, files, e.notify)
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			err = errWatchEnded
+		}
+		t := e.clk.NewTimer(watchRetry)
+		log.FromContext(ctx).Error(err, "watch the configuration", "restartIn", watchRetry)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-t.C():
+		}
+	}
+}
+
+// shutdown stops the export loop, the scheduler, the pool, the watch and the meter provider.
+func (e *engine) shutdown(ctx context.Context, stopSched context.CancelFunc, schedDone, watchDone <-chan struct{}) {
 	logger := log.FromContext(ctx)
 	ctx = context.WithoutCancel(ctx)
-	for _, t := range []*clock.Timer{&e.factsTimer, &e.earlyTimer, &e.retryTimer} {
-		stopTimer(t)
-	}
+	stopTimer(&e.factsTimer)
+	stopTimer(&e.earlyTimer)
 
 	e.stopLoop()
 	stopSched()
 	<-schedDone
-
-	e.mu.Lock()
-	r := e.runner
-	e.runner = nil
-	e.mu.Unlock()
-	e.retired.Wait()
-	if r != nil {
+	if r := e.setRunner(nil); r != nil {
 		r.pool.Close()
 	}
-
-	if e.exp != nil {
-		sctx, cancel := context.WithTimeout(ctx, shutdownTimeout)
-		if err := e.exp.Shutdown(sctx); err != nil {
-			logger.Error(err, "shut down the exporter")
-		}
-		cancel()
-	}
-	e.stopWatch()
+	<-watchDone
 
 	sctx, cancel := context.WithTimeout(ctx, shutdownTimeout)
 	defer cancel()
@@ -309,69 +315,39 @@ func (e *engine) shutdown(ctx context.Context, stopSched context.CancelFunc, sch
 	logger.Info("metrics engine stopped")
 }
 
-// reload loads the configuration and logs why it was not applied.
-func (e *engine) reload(ctx context.Context) {
-	err := e.plan.reload(ctx)
-	if err == nil {
-		e.idleReason = ""
-		return
-	}
+// onChange reloads the configuration and logs why it was not applied.
+func (e *engine) onChange(ctx context.Context) {
+	err := e.reload(ctx)
 	logger := log.FromContext(ctx)
-	if errors.Is(err, ErrNoConfiguration) {
+	switch {
+	case err == nil:
+		if e.plan.current != nil {
+			e.idleReason = ""
+		}
+	case errors.Is(err, ErrNoConfiguration):
 		if reason := err.Error(); reason != e.idleReason {
 			e.idleReason = reason
 			logger.Info("no configuration, waiting for one", "config", e.cfg.Name(), "reason", reason)
 		}
-		return
-	}
-	e.idleReason = ""
-	if e.plan.current == nil {
+	case e.plan.current == nil:
+		e.idleReason = ""
 		logger.Error(err, "invalid configuration, waiting for a valid one", "config", e.cfg.Name())
-		return
-	}
-	logger.Error(err, "invalid configuration, keeping the one in force", "config", e.cfg.Name(), "generation", e.plan.generation)
-}
-
-// onChange rebuilds the exporter and reloads the configuration, each only if its files changed.
-func (e *engine) onChange(ctx context.Context) {
-	if e.exp != nil {
-		if d := digestOf(e.cfg.ReadFile, e.exporterFiles); d != e.exporterDigest {
-			e.exporterDigest = d
-			ex := e.plan.current.settings.Exporter
-			if exp, err := export.NewExporter(ctx, ex, e.cfg.ReadFile); err != nil {
-				log.FromContext(ctx).Error(err, "rebuild the exporter, keeping the current one")
-			} else {
-				e.loop.l.SetExporter(exp, ex.Interval, ex.MaxPointsPerRequest) //nolint:contextcheck // SetExporter takes no context
-				e.exp = exp
-				log.FromContext(ctx).Info("rebuilt the exporter after its files changed")
-			}
-		}
-	}
-	if e.plan.changed() {
-		e.reload(ctx)
+	default:
+		e.idleReason = ""
+		logger.Error(err, "invalid configuration, keeping the one in force", "config", e.cfg.Name(), "generation", e.plan.generation)
 	}
 }
 
-// apply sets up the exporter, the export loop, the pool and the snapshot cap for next.
+// apply sets up next in place of prev, which is nil the first time: it builds the exporter when its
+// settings, its files or the resource changed, swaps the pool when the connection settings, the limits,
+// the idle timeout or the planning cycle changed, and hands the exporter to the export loop. On error
+// nothing has changed.
 func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
-	if next == nil {
-		e.teardown(ctx)
-		return nil
-	}
 	s := next.settings
-	first := prev == nil
-	var old settings.Settings
-	if !first {
-		old = prev.settings
-	}
-	resourceChanged := first || old.Cluster != s.Cluster || old.Namespace != s.Namespace ||
-		!maps.Equal(old.ResourceAttributes, s.ResourceAttributes)
-	exporterChanged := first || old.Exporter != s.Exporter
-
+	resourceChanged := prev == nil || prev.settings.Cluster != s.Cluster || prev.settings.Namespace != s.Namespace ||
+		!maps.Equal(prev.settings.ResourceAttributes, s.ResourceAttributes)
 	var exp *export.Exporter
-	files, digest := exporterFiles(s.Exporter), e.exporterDigest
-	if resourceChanged || exporterChanged {
-		digest = digestOf(e.cfg.ReadFile, files)
+	if resourceChanged || prev.settings.Exporter != s.Exporter || prev.exporterDigest != next.exporterDigest {
 		var err error
 		if exp, err = export.NewExporter(ctx, s.Exporter, e.cfg.ReadFile); err != nil {
 			return fmt.Errorf("create the exporter: %w", err)
@@ -382,26 +358,60 @@ func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 	cluster := s.Cluster
 	e.cluster.Store(&cluster)
 	e.store.SetMaxSeriesTotal(s.Limits.MaxSeriesTotal)
-	poolReplaced := e.setRunner(ctx, s, next.idleTimeout)
+	newPool := e.runner == nil || e.runner.spec != newPoolSpec(s, next.idleTimeout) || e.runner.limits != s.Limits
+	if newPool {
+		e.swapPool(ctx, s, next.idleTimeout)
+	}
 	if exp != nil {
 		if resourceChanged {
-			// The loop takes the resource at creation; the old loop shuts the old exporter down.
-			e.startLoop(ctx, export.Resource(s, e.getenv), exp, s.Exporter)
-		} else {
-			e.loop.l.SetExporter(exp, s.Exporter.Interval, s.Exporter.MaxPointsPerRequest) //nolint:contextcheck // SetExporter takes no context
+			// The loop takes the resource at creation; the old loop shuts its exporters down.
+			e.startLoop(ctx, export.Resource(s, e.getenv))
 		}
-		e.exp, e.exporterFiles, e.exporterDigest = exp, files, digest
+		e.loop.l.SetExporter(exp, s.Exporter.Interval, s.Exporter.MaxPointsPerRequest) //nolint:contextcheck // SetExporter takes no context
 	}
-	// A planInterval change replaces the pool too, as the pool's backoff is capped at it.
-	if first || poolReplaced {
+	if newPool {
 		e.factsFailures = 0
 		e.setFactsTimer(0)
 	}
 	return nil
 }
 
-// teardown stops the export loop, the facts rounds and the pool, and closes the exporter.
-func (e *engine) teardown(ctx context.Context) {
+// swapPool makes a pool and an executor for s the runner and closes the old pool at once: its idle
+// connections now, its busy ones when their runs release them.
+func (e *engine) swapPool(ctx context.Context, s settings.Settings, idle time.Duration) {
+	pc := PostgresConfig(s)
+	pc.ReadFile = e.cfg.ReadFile
+	pool := pg.NewPool(pc, s.Postgres.MaxConnections, idle, e.clk,
+		pg.WithLogger(log.FromContext(ctx).GetLogger()), pg.WithMaxBackoff(s.PlanInterval))
+	next := &runner{
+		spec:   newPoolSpec(s, idle),
+		limits: s.Limits,
+		pool:   pool,
+		exec:   executor.New(pool, s.Limits, e.serverVersion, e.clk),
+	}
+	if old := e.setRunner(next); old != nil {
+		old.pool.Close()
+	}
+}
+
+// setRunner makes r the runner and returns the one it replaces.
+func (e *engine) setRunner(r *runner) *runner {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	old := e.runner
+	e.runner = r
+	return old
+}
+
+// currentRunner returns the runner, nil without a configuration.
+func (e *engine) currentRunner() *runner {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.runner
+}
+
+// teardown stops the export loop, the facts rounds and the pool.
+func (e *engine) teardown() {
 	stopTimer(&e.factsTimer)
 	stopTimer(&e.earlyTimer)
 	e.stopLoop()
@@ -410,27 +420,8 @@ func (e *engine) teardown(ctx context.Context) {
 	e.server.Store(nil)
 	e.factsFailures = 0
 	e.factsErrs.retain(func(snapshot.Key) bool { return false })
-
-	e.mu.Lock()
-	r := e.runner
-	e.runner = nil
-	e.mu.Unlock()
-	if r != nil {
-		e.retired.Add(1)
-		go func() {
-			defer e.retired.Done()
-			r.pool.inflight.Wait()
-			r.pool.Close()
-		}()
-	}
-
-	if e.exp != nil {
-		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
-		if err := e.exp.Shutdown(sctx); err != nil {
-			log.FromContext(ctx).Error(err, "shut down the exporter")
-		}
-		cancel()
-		e.exp, e.exporterFiles, e.exporterDigest = nil, nil, ""
+	if r := e.setRunner(nil); r != nil {
+		r.pool.Close()
 	}
 }
 
@@ -447,53 +438,12 @@ func PostgresConfig(s settings.Settings) pg.Config {
 	}
 }
 
-// setRunner makes the runner match s, building a new pool when the connection settings or the idle
-// timeout changed. The replaced runner's pool closes once its runs end.
-func (e *engine) setRunner(ctx context.Context, s settings.Settings, idle time.Duration) (poolReplaced bool) {
-	spec := poolSpec{
-		postgres: s.Postgres, queryTimeout: s.Limits.QueryTimeout, lockTimeout: s.Limits.LockTimeout,
-		idleTimeout: idle, maxBackoff: s.PlanInterval,
-	}
-	cur := e.runner
-	if cur != nil && cur.spec == spec && cur.limits == s.Limits {
-		return false
-	}
-	var pool *sharedPool
-	if cur != nil && cur.spec == spec {
-		pool = cur.pool
-	} else {
-		pc := PostgresConfig(s)
-		pc.ReadFile = e.cfg.ReadFile
-		pool = &sharedPool{Pool: pg.NewPool(pc, s.Postgres.MaxConnections, idle, e.clk,
-			pg.WithLogger(log.FromContext(ctx).GetLogger()), pg.WithMaxBackoff(spec.maxBackoff))}
-	}
-	next := &runner{spec: spec, limits: s.Limits, pool: pool, exec: executor.New(pool.Pool, s.Limits, e.serverVersion, e.clk)}
-
-	e.mu.Lock()
-	e.runner = next
-	e.mu.Unlock()
-	if cur == nil {
-		return true
-	}
-	if cur.pool == pool {
-		return false
-	}
-	e.retired.Add(1)
-	go func() {
-		defer e.retired.Done()
-		cur.pool.inflight.Wait()
-		cur.pool.Close()
-	}()
-	return true
-}
-
 func (e *engine) serverVersion() *semver.Version { return e.server.Load() }
 
-// startLoop replaces the export loop with one that exports with res through exp.
-func (e *engine) startLoop(ctx context.Context, res *resource.Resource, exp *export.Exporter, s settings.Exporter) {
+// startLoop replaces the export loop with one that exports with res, once it has an exporter.
+func (e *engine) startLoop(ctx context.Context, res *resource.Resource) {
 	e.stopLoop()
 	l := export.NewLoop(e.reader, res, e.clk, e.newRand(), e.stats)
-	l.SetExporter(exp, s.Interval, s.MaxPointsPerRequest) //nolint:contextcheck // SetExporter takes no context
 	lctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
@@ -517,14 +467,11 @@ func (e *engine) stopLoop() {
 
 // runJob is the scheduler's RunFunc.
 func (e *engine) runJob(ctx context.Context, job planner.Job) {
-	r, done := e.takeRunner()
+	r := e.currentRunner()
 	if r == nil {
 		return
 	}
-	res := func() executor.Result {
-		defer done()
-		return r.exec.Run(ctx, job)
-	}()
+	res := r.exec.Run(ctx, job)
 	defer e.recoverRecord(ctx, res)
 	e.record(ctx, res)
 }
@@ -542,18 +489,6 @@ func (e *engine) recoverRecord(ctx context.Context, res executor.Result) {
 	e.store.Delete(snapshot.Key{Query: job.Query, Database: job.Database})
 	e.stats.QueryRun(job.Query, job.Database, selfmetrics.OutcomeError, res.Duration, res.Started)
 	e.stats.Series(e.store.Series())
-}
-
-// takeRunner returns the current runner with one more run in flight, and the function that ends that run.
-func (e *engine) takeRunner() (*runner, func()) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	r := e.runner
-	if r == nil {
-		return nil, nil
-	}
-	r.pool.inflight.Add(1)
-	return r, r.pool.inflight.Done
 }
 
 // record stores the result of a run that is still planned and counts it.
@@ -590,7 +525,9 @@ func (e *engine) record(ctx context.Context, res executor.Result) {
 		case selfmetrics.OutcomeCapped:
 			e.store.Delete(key)
 			e.stats.QueryCapped(job.Query, job.Database, res.WouldBe)
-		case selfmetrics.OutcomeError, selfmetrics.OutcomeTimeout, selfmetrics.OutcomeSkipped, selfmetrics.OutcomeDenied:
+		case selfmetrics.OutcomeSkipped:
+			// A run caught in a pool swap keeps the entry of the run before it.
+		case selfmetrics.OutcomeError, selfmetrics.OutcomeTimeout, selfmetrics.OutcomeDenied:
 			e.store.Delete(key)
 			if res.Err != nil {
 				e.errs.Failed(logger, job.Query, job.Database, res.Err)
@@ -654,7 +591,7 @@ func (e *engine) factsRound(ctx context.Context, timed bool) {
 	s := cur.settings
 	e.lastFacts = e.clk.Now()
 
-	facts, err := e.gatherFacts(ctx, s)
+	facts, err := e.gather(ctx, s)
 	e.runner.pool.CloseIdle()
 	logger := log.FromContext(ctx)
 	key := snapshot.Key{Database: s.Postgres.Database}
@@ -693,6 +630,7 @@ func (e *engine) setUp(ok bool) {
 	e.up.Store(up)
 }
 
+// gatherFacts reads the facts from PostgreSQL through the runner's pool. Call it on the control goroutine.
 func (e *engine) gatherFacts(ctx context.Context, s settings.Settings) (planner.Facts, error) {
 	// Long enough to wait for one run to free a connection, connect and run the facts queries.
 	ctx, cancel := context.WithTimeout(ctx, connectTimeout+2*(s.Limits.QueryTimeout+runGrace))
@@ -742,90 +680,7 @@ func timerC(t clock.Timer) <-chan time.Time {
 	return t.C()
 }
 
-// watch makes the watcher cover files. The current watcher stays until the new one is ready;
-// if the new one fails, it is retried after watchRetry.
-func (e *engine) watch(ctx context.Context, files []string) {
-	files = uniqueFiles(files)
-	if e.watcher != nil && slices.Equal(e.watcher.files, files) {
-		e.pendingWatch = nil
-		stopTimer(&e.retryTimer)
-		return
-	}
-	w, err := e.startWatch(ctx, files)
-	if err != nil {
-		if ctx.Err() != nil {
-			return
-		}
-		if !slices.Equal(e.pendingWatch, files) {
-			log.FromContext(ctx).Error(err, "watch the configuration files", "files", files, "retryEvery", watchRetry)
-		}
-		e.pendingWatch = files
-		if e.retryTimer == nil {
-			e.retryTimer = e.clk.NewTimer(watchRetry)
-		}
-		return
-	}
-	swapped := e.watcher != nil
-	e.stopWatch()
-	e.watcher, e.pendingWatch = w, nil
-	stopTimer(&e.retryTimer)
-	if swapped {
-		// An edit during the swap may have reached only the old watcher, so look at the files again.
-		e.notify()
-	}
-}
-
-// retryWatch retries a failed watch and reloads once it works, since changes may have been missed.
-func (e *engine) retryWatch(ctx context.Context) {
-	e.retryTimer = nil
-	if e.pendingWatch == nil {
-		return
-	}
-	e.watch(ctx, e.pendingWatch)
-	if e.pendingWatch == nil {
-		e.reload(ctx)
-	}
-}
-
-// startWatch starts a watcher on files and returns once it is ready.
-func (e *engine) startWatch(ctx context.Context, files []string) (*watchRun, error) {
-	logger := log.FromContext(ctx)
-	wctx, cancel := context.WithCancel(ctx)
-	ready := make(chan struct{})
-	result := make(chan error, 1)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		result <- e.cfg.Watch(wctx, files, e.notify,
-			sources.WithReady(func() { close(ready) }),
-			sources.WithErrorHandler(func(err error) {
-				// A watcher error can mean lost events, so look at the files again.
-				logger.Error(err, "watch the configuration files")
-				e.notify()
-			}))
-	}()
-	select {
-	case <-ready:
-		return &watchRun{files: files, cancel: cancel, done: done}, nil
-	case err := <-result:
-		cancel()
-		if err == nil {
-			err = errors.New("the watcher stopped before it was ready")
-		}
-		return nil, fmt.Errorf("start the watcher: %w", err)
-	}
-}
-
-func (e *engine) stopWatch() {
-	if e.watcher == nil {
-		return
-	}
-	e.watcher.cancel()
-	<-e.watcher.done
-	e.watcher = nil
-}
-
-// notify tells the control goroutine that a watched file changed.
+// notify tells the control goroutine that the watch saw a change.
 func (e *engine) notify() {
 	select {
 	case e.changed <- struct{}{}:

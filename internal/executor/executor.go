@@ -40,7 +40,7 @@ const (
 // Result is the outcome of one Run.
 type Result struct {
 	Job     planner.Job
-	Outcome selfmetrics.Outcome // ok, error, timeout, capped, denied
+	Outcome selfmetrics.Outcome // ok, error, timeout, capped, denied, skipped
 	Samples []queries.Sample    // nil unless ok
 	WouldBe int                 // capped: series counted before giving up
 	Dropped map[queries.DropReason]int
@@ -67,8 +67,11 @@ func New(pool *pg.Pool, limits settings.Limits, server func() *semver.Version, c
 }
 
 // Classify maps an error to an outcome: SQLSTATE 57014 or 55P03, or a context deadline, is timeout;
-// SQLSTATE 42501 is denied.
+// SQLSTATE 42501 is denied; a closed pool, which a pool swap leaves behind, is skipped.
 func Classify(err error) selfmetrics.Outcome {
+	if errors.Is(err, pg.ErrPoolClosed) {
+		return selfmetrics.OutcomeSkipped
+	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		switch pgErr.Code {

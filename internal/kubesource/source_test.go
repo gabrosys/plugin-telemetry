@@ -245,76 +245,74 @@ var _ = Describe("Source", func() {
 	})
 
 	Describe("Watch", func() {
-		It("notifies once, debounced, after a burst of events", func() {
+		It("notifies once watching, then once, debounced, after a burst of events", func() {
 			var notified atomic.Int32
-			readyCh := make(chan struct{})
 			done := make(chan error, 1)
 			start()
 			go func() {
-				done <- src.Watch(ctx, nil, func() { notified.Add(1) }, sources.WithReady(func() { close(readyCh) }))
+				done <- src.Watch(ctx, nil, func() { notified.Add(1) })
 			}()
-			Eventually(readyCh).Should(BeClosed())
+			Eventually(notified.Load).Should(BeEquivalentTo(1))
 
 			fw.set("clusters", "pg", enabledCluster(map[string]any{}))
 			fw.set("telemetryexporters", "default", exporter(nil))
 			fw.set("clusters", "pg", enabledCluster(map[string]any{"sidecarCPU": "100m"}))
 			Eventually(clk.HasWaiters).Should(BeTrue())
+			// A wake still queued after the first one re-arms the timer; let Watch take it before stepping.
+			time.Sleep(100 * time.Millisecond)
 
 			clk.Step(999 * time.Millisecond)
-			Consistently(notified.Load, "100ms").Should(BeZero())
-			clk.Step(time.Millisecond)
-			Eventually(notified.Load).Should(BeEquivalentTo(1))
 			Consistently(notified.Load, "100ms").Should(BeEquivalentTo(1))
+			clk.Step(time.Millisecond)
+			Eventually(notified.Load).Should(BeEquivalentTo(2))
+			Consistently(notified.Load, "100ms").Should(BeEquivalentTo(2))
 
 			fw.set("telemetryexporters", "default", exporter(nil))
 			Eventually(clk.HasWaiters).Should(BeTrue())
 			clk.Step(time.Second)
-			Eventually(notified.Load).Should(BeEquivalentTo(2))
+			Eventually(notified.Load).Should(BeEquivalentTo(3))
 		})
 
-		It("reports watch errors other than a 403 to the error handler and returns nil when ctx ends", func() {
-			errs := make(chan error, 4)
-			readyCh := make(chan struct{})
+		It("notifies at once after a watch error other than a 403 and returns nil when ctx ends", func() {
+			var notified atomic.Int32
 			done := make(chan error, 1)
 			wctx, cancel := context.WithCancel(ctx)
 			start()
 			go func() {
-				done <- src.Watch(wctx, nil, func() {}, sources.WithReady(func() { close(readyCh) }),
-					sources.WithErrorHandler(func(err error) { errs <- err }))
+				done <- src.Watch(wctx, nil, func() { notified.Add(1) })
 			}()
-			Eventually(readyCh).Should(BeClosed())
+			Eventually(notified.Load).Should(BeEquivalentTo(1))
 
 			fw.fail("clusters", "pg", errors.New("connection refused"))
-			Eventually(errs).Should(Receive(MatchError(ContainSubstring("connection refused"))))
+			Eventually(notified.Load).Should(BeEquivalentTo(2))
 
 			cancel()
 			Eventually(done).Should(Receive(BeNil()))
 		})
 	})
 
-	It("logs and forwards a repeated watch error once, and again when the error changes", func() {
-		errs := make(chan error, 8)
-		readyCh := make(chan struct{})
+	It("logs a repeated watch error once and notifies for it once, and again when the error changes", func() {
+		var notified atomic.Int32
+		done := make(chan error, 1)
 		start()
 		go func() {
-			_ = src.Watch(ctx, nil, func() {}, sources.WithReady(func() { close(readyCh) }),
-				sources.WithErrorHandler(func(err error) { errs <- err }))
+			done <- src.Watch(ctx, nil, func() { notified.Add(1) })
 		}()
-		Eventually(readyCh).Should(BeClosed())
+		Eventually(notified.Load).Should(BeEquivalentTo(1))
 
 		fw.fail("clusters", "pg", errors.New("connection refused"))
 		fw.fail("clusters", "pg", errors.New("connection refused"))
-		Eventually(errs).Should(Receive())
-		Consistently(errs, "100ms").ShouldNot(Receive())
+		Eventually(notified.Load).Should(BeEquivalentTo(2))
+		Consistently(notified.Load, "100ms").Should(BeEquivalentTo(2))
 		Expect(strings.Count(logs.String(), "watch failed")).To(Equal(1))
 
 		fw.fail("clusters", "pg", errors.New("no route to host"))
-		Eventually(errs).Should(Receive(MatchError(ContainSubstring("no route to host"))))
+		Eventually(notified.Load).Should(BeEquivalentTo(3))
 		Expect(strings.Count(logs.String(), "watch failed")).To(Equal(2))
 
 		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
 		fw.fail("clusters", "pg", errors.New("no route to host"))
-		Eventually(errs).Should(Receive())
+		Eventually(notified.Load).Should(BeEquivalentTo(4))
 	})
 
 	It("keeps the watches and answers ErrDenied while the exporter is denied and a Cluster event arrives", func() {

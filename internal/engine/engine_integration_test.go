@@ -4,20 +4,17 @@ package engine_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"maps"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
-	"slices"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
-	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"go.yaml.in/yaml/v4"
 	"k8s.io/utils/clock"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
@@ -144,94 +141,6 @@ func (f *fixture) run() {
 	})
 }
 
-// point is one exported data point.
-type point struct {
-	attrs map[string]string
-	value float64
-	at    time.Time
-}
-
-func attrMap(kvs []*commonpb.KeyValue) map[string]string {
-	out := make(map[string]string, len(kvs))
-	for _, kv := range kvs {
-		switch v := kv.GetValue().GetValue().(type) {
-		case *commonpb.AnyValue_StringValue:
-			out[kv.GetKey()] = v.StringValue
-		case *commonpb.AnyValue_IntValue:
-			out[kv.GetKey()] = strconv.FormatInt(v.IntValue, 10)
-		default:
-			out[kv.GetKey()] = kv.GetValue().String()
-		}
-	}
-	return out
-}
-
-func numberValue(p *metricpb.NumberDataPoint) float64 {
-	if v, ok := p.GetValue().(*metricpb.NumberDataPoint_AsInt); ok {
-		return float64(v.AsInt)
-	}
-	return p.GetAsDouble()
-}
-
-// points returns the data points of the metric called name in the requests received at or after since, in order.
-func points(srv *otlptest.Server, name string, since time.Time) []point {
-	var out []point
-	for _, req := range srv.Requests() {
-		if req.Received.Before(since) {
-			continue
-		}
-		for _, rm := range req.Metrics.GetResourceMetrics() {
-			for _, sm := range rm.GetScopeMetrics() {
-				for _, m := range sm.GetMetrics() {
-					if m.GetName() != name {
-						continue
-					}
-					dps := append(m.GetGauge().GetDataPoints(), m.GetSum().GetDataPoints()...)
-					for _, dp := range dps {
-						out = append(out, point{attrs: attrMap(dp.GetAttributes()), value: numberValue(dp), at: req.Received})
-					}
-				}
-			}
-		}
-	}
-	return out
-}
-
-// last returns the last value of the series of name whose attributes include want.
-func last(srv *otlptest.Server, name string, want map[string]string) (float64, bool) {
-	value, found := 0.0, false
-	for _, p := range points(srv, name, time.Time{}) {
-		if matches(p.attrs, want) {
-			value, found = p.value, true
-		}
-	}
-	return value, found
-}
-
-// metricNames lists the names of the metrics received, sorted.
-func metricNames(srv *otlptest.Server) []string {
-	seen := map[string]bool{}
-	for _, req := range srv.Requests() {
-		for _, rm := range req.Metrics.GetResourceMetrics() {
-			for _, sm := range rm.GetScopeMetrics() {
-				for _, m := range sm.GetMetrics() {
-					seen[m.GetName()] = true
-				}
-			}
-		}
-	}
-	return slices.Sorted(maps.Keys(seen))
-}
-
-func matches(attrs, want map[string]string) bool {
-	for k, v := range want {
-		if attrs[k] != v {
-			return false
-		}
-	}
-	return true
-}
-
 func expectUp(srv *otlptest.Server, want float64) func(Gomega) {
 	return func(g Gomega) {
 		up, ok := last(srv, "cnpg_collector_up", map[string]string{"cluster": "it"})
@@ -322,6 +231,63 @@ var _ = Describe("Run", Ordered, func() {
 	})
 })
 
+// sessions counts the backends of user in state, other than the probe's own; an empty state counts every one.
+func sessions(ctx context.Context, user, state string) (n int, err error) {
+	cc, err := pg.ConnConfig(server.MonitorConfig(GinkgoT().TempDir()), "postgres")
+	if err != nil {
+		return 0, err
+	}
+	conn, err := pgx.ConnectConfig(ctx, cc)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { err = errors.Join(err, conn.Close(context.WithoutCancel(ctx))) }()
+	err = conn.QueryRow(ctx, "SELECT count(*) FROM pg_stat_activity WHERE usename = $1 AND ($2 = '' OR state = $2) AND pid <> pg_backend_pid()",
+		user, state).Scan(&n)
+	return n, err
+}
+
+// holdQuery keeps a connection of the pool busy for 5 s.
+const holdQuery = `hold_probe:
+  query: SELECT 1 AS value FROM pg_sleep(5)
+  metrics:
+    - value:
+        usage: GAUGE
+        description: Holds a connection.
+`
+
+var _ = Describe("Run on a change of the postgres user", func() {
+	It("closes the old pool's connections at once on a postgres settings change", func(ctx SpecContext) {
+		const other, otherPassword = "other_monitor", "other-password"
+		Expect(server.Exec(ctx, "CREATE ROLE "+other+" LOGIN PASSWORD '"+otherPassword+"'")).To(Succeed())
+		Expect(server.Exec(ctx, "GRANT pg_monitor TO "+other)).To(Succeed())
+		DeferCleanup(func(ctx SpecContext) { Expect(server.Exec(ctx, "DROP ROLE "+other)).To(Succeed()) })
+
+		f := newFixture(time.Second)
+		writeFile(f.extra, holdQuery)
+		writeFile(f.config, f.valid)
+		f.run()
+		Eventually(expectUp(f.srv, 1)).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+		// A run of hold_probe is in flight while other runs leave idle connections in the pool.
+		Eventually(func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "active") }).
+			WithTimeout(15 * time.Second).WithPolling(50 * time.Millisecond).Should(BeNumerically(">", 0))
+		Eventually(func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "idle") }).
+			WithTimeout(5 * time.Second).WithPolling(50 * time.Millisecond).Should(BeNumerically(">", 0))
+
+		dir := filepath.Dir(f.config)
+		writeFile(filepath.Join(dir, "other.pw"), otherPassword+"\n")
+		changed := strings.Replace(f.valid, "user: "+pgtest.MonitorUser+"\n", "user: "+other+"\n", 1)
+		changed = strings.Replace(changed, server.MonitorConfig(dir).PasswordFile, filepath.Join(dir, "other.pw"), 1)
+		Expect(changed).NotTo(Equal(f.valid))
+		writeFile(f.config, changed)
+
+		Eventually(func() (int, error) { return sessions(ctx, other, "") }).
+			WithTimeout(10 * time.Second).WithPolling(50 * time.Millisecond).Should(BeNumerically(">", 0))
+		Eventually(func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "idle") }).
+			WithTimeout(2 * time.Second).WithPolling(50 * time.Millisecond).Should(BeZero())
+	}, SpecTimeout(time.Minute))
+})
+
 // resourceHas reports whether a request received at or after since has a resource attribute key=value.
 func resourceHas(srv *otlptest.Server, since time.Time, key, value string) bool {
 	for _, req := range srv.Requests() {
@@ -407,6 +373,42 @@ var _ = Describe("Run when the exporter files change", func() {
 		info := points(f.srv, "cnpg_otel_config_info", time.Time{})
 		Expect(info[len(info)-1].attrs).To(HaveKeyWithValue("generation", "1"))
 	})
+})
+
+var _ = Describe("Run on a source change", func() {
+	It("keeps the snapshot entries of unchanged queries across a replan", func(SpecContext) {
+		f := newFixture(time.Second)
+		writeFile(filepath.Join(filepath.Dir(f.config), "default-queries.yaml"), "")
+		writeFile(f.extra, alphaBeta)
+		// An hour between runs: after the first run of each query only the snapshot entry keeps exporting it.
+		valid := strings.Replace(f.valid, fmt.Sprintf("defaultInterval: %s\n", queryInterval), "defaultInterval: 1h\n", 1)
+		Expect(valid).NotTo(Equal(f.valid))
+		writeFile(f.config, valid)
+		f.run()
+		Eventually(func(g Gomega) {
+			g.Expect(points(f.srv, "cnpg_alpha_value", time.Time{})).NotTo(BeEmpty())
+			g.Expect(points(f.srv, "cnpg_beta_value", time.Time{})).NotTo(BeEmpty())
+		}).WithTimeout(20 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+
+		writeFile(f.extra, strings.Replace(alphaBeta, "SELECT 2", "SELECT 20", 1))
+		var replanned time.Time
+		Eventually(func() bool {
+			for _, p := range points(f.srv, "cnpg_otel_config_info", time.Time{}) {
+				if p.attrs["generation"] == "2" {
+					replanned = p.at
+					return true
+				}
+			}
+			return false
+		}).WithTimeout(10 * time.Second).WithPolling(50 * time.Millisecond).Should(BeTrue())
+		Eventually(func() []float64 { return values(points(f.srv, "cnpg_beta_value", replanned.Add(time.Nanosecond))) }).
+			WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(ContainElement(20.0))
+
+		after, withAlpha := requestsSince(f.srv, replanned.Add(time.Nanosecond), "cnpg_alpha_value")
+		Expect(after).To(BeNumerically(">", 0))
+		Expect(withAlpha).To(Equal(after), "alpha's entry stays although alpha does not run again")
+		Expect(values(points(f.srv, "cnpg_beta_value", replanned.Add(time.Nanosecond)))).To(HaveEach(20.0), "beta's old entry is dropped")
+	}, SpecTimeout(time.Minute))
 })
 
 const slowQuery = `slow_probe:

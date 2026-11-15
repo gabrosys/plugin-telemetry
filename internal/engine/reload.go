@@ -28,21 +28,14 @@ const idleGrace = 10 * time.Second
 
 // configuration is a loaded configuration with the definitions of its queries.
 type configuration struct {
-	settings    settings.Settings
-	result      sources.Result
-	defs        []queries.Definition // in the order of result.Entries
-	idleTimeout time.Duration        // of the connection pool
+	settings       settings.Settings
+	result         sources.Result
+	defs           []queries.Definition // in the order of result.Entries
+	idleTimeout    time.Duration        // of the connection pool
+	exporterDigest string               // of the files the exporter reads
 }
 
-// components are what a configuration sets up besides the plan.
-type components interface {
-	// watch makes the watcher cover files besides the settings; it is called before the sources are read.
-	watch(ctx context.Context, files []string)
-	// apply sets up next; prev is nil the first time. A nil next tears everything down. On error nothing has changed.
-	apply(ctx context.Context, prev, next *configuration) error
-}
-
-// replanner loads the configuration and rebuilds the plan when the configuration or the facts change.
+// replanner holds the configuration in force and rebuilds the plan when it or the facts change.
 // whilePlanned may be called from any goroutine; every other method runs on the engine's control goroutine.
 type replanner struct {
 	cfg    Config
@@ -50,84 +43,102 @@ type replanner struct {
 	store  *snapshot.Store
 	errs   *errorLog
 	update func(planner.Plan)
-	comps  components
 
 	loader      *sources.Loader
 	loaderFiles []string
 	current     *configuration // nil until the first valid configuration
 	facts       *planner.Facts // nil until the first facts round
 	generation  uint64
-	digest      string   // of the settings bytes and digestFiles as the last load read them; empty forces the next load
-	digestFiles []string // the sources the settings name
+	digest      string // of the settings bytes, the sources and the exporter files the last reload read
 
 	mu      sync.RWMutex            // guards planned; whilePlanned holds it while a result is written
 	planned map[snapshot.Key]string // the fingerprint of each planned job
 }
 
-func newReplanner(
-	cfg Config, stats *selfmetrics.Stats, store *snapshot.Store, errs *errorLog, update func(planner.Plan), comps components,
-) *replanner {
-	return &replanner{cfg: cfg, stats: stats, store: store, errs: errs, update: update, comps: comps}
+func newReplanner(cfg Config, stats *selfmetrics.Stats, store *snapshot.Store, errs *errorLog, update func(planner.Plan)) *replanner {
+	return &replanner{cfg: cfg, stats: stats, store: store, errs: errs, update: update}
 }
 
-// changed reports whether the settings or the files the last load read have changed since.
-func (r *replanner) changed() bool {
-	if r.digest == "" {
-		return true
-	}
-	_, data, err := r.cfg.Settings()
-	h := sha256.New()
-	addSettings(h, data, err)
-	addFiles(h, r.cfg.ReadFile, r.digestFiles)
-	return hex.EncodeToString(h.Sum(nil)) != r.digest
-}
-
-// reload loads the settings and the sources and, when they differ from the configuration in force,
-// applies them and replans. On error the configuration in force stays.
-func (r *replanner) reload(ctx context.Context) error {
+// reload reads the settings and digests them with the sources and the exporter files. When the
+// digest changed it loads the sources, defines the queries, applies, commits and replans; a change of
+// the exporter files alone rebuilds the exporter with no new generation. On error nothing in force changes.
+func (e *engine) reload(ctx context.Context) error {
+	r, read := e.plan, e.cfg.ReadFile
 	logger := log.FromContext(ctx)
 
 	// The settings and each file enter the digest before they are read, so a change during the load triggers another one.
 	h := sha256.New()
-	s, data, err := r.cfg.Settings()
+	s, data, err := e.cfg.Settings()
 	addSettings(h, data, err)
 	if errors.Is(err, ErrNoConfiguration) {
-		r.digest, r.digestFiles = hex.EncodeToString(h.Sum(nil)), nil
-		r.comps.watch(ctx, nil)
+		r.digest = hex.EncodeToString(h.Sum(nil))
+		e.files.Store(nil)
 		if r.current != nil {
+			e.teardown()
 			r.idle(ctx)
 		}
 		return fmt.Errorf("load settings: %w", err)
 	}
-	settingsOutcome := selfmetrics.OutcomeOK
 	if err != nil {
-		settingsOutcome = selfmetrics.OutcomeError
-	}
-	r.stats.ConfigLoad(r.cfg.Name(), settingsOutcome, 0)
-	if err != nil {
-		r.digest, r.digestFiles = hex.EncodeToString(h.Sum(nil)), nil
+		d := hex.EncodeToString(h.Sum(nil))
+		if d == r.digest {
+			return nil
+		}
+		r.digest = d
+		r.stats.ConfigLoad(r.cfg.Name(), selfmetrics.OutcomeError, 0)
 		return fmt.Errorf("load settings: %w", err)
 	}
 
-	r.comps.watch(ctx, watchedFiles(s))
-	addFiles(h, r.cfg.ReadFile, s.Sources)
-	r.digest, r.digestFiles = hex.EncodeToString(h.Sum(nil)), slices.Clone(s.Sources)
+	cur := r.current
+	files := watchedFiles(s)
+	if cur != nil {
+		// Until s is in force, a change to the files of either can fix or replace it.
+		files = uniqueFiles(append(files, watchedFiles(cur.settings)...))
+	}
+	e.files.Store(&files)
+	addFiles(h, read, s.Sources)
+	exporterDigest := digestOf(read, exporterFiles(s.Exporter))
+	h.Write([]byte(exporterDigest))
+	d := hex.EncodeToString(h.Sum(nil))
+	if d == r.digest {
+		return nil
+	}
+	r.digest = d
+	r.stats.ConfigLoad(r.cfg.Name(), selfmetrics.OutcomeOK, 0)
 
 	if r.loader == nil || !slices.Equal(r.loaderFiles, s.Sources) {
-		r.loader, r.loaderFiles = sources.NewLoader(r.cfg.ReadFile, s.Sources, LoaderOptions(r.cfg)...), slices.Clone(s.Sources)
+		r.loader, r.loaderFiles = sources.NewLoader(read, s.Sources, LoaderOptions(r.cfg)...), slices.Clone(s.Sources)
 	}
 	res := r.loader.Load()
 	r.recordLoad(logger, res)
 
-	if r.current != nil && res.Hash == r.current.result.Hash && reflect.DeepEqual(s, r.current.settings) {
+	same := cur != nil && res.Hash == cur.result.Hash && reflect.DeepEqual(s, cur.settings)
+	if same && exporterDigest == cur.exporterDigest {
 		return nil
 	}
-	next := define(s, res)
-	if err := r.comps.apply(ctx, r.current, next); err != nil {
-		r.digest = ""
+	var next *configuration
+	if same {
+		c := *cur
+		next = &c
+	} else {
+		next = define(s, res)
+	}
+	next.exporterDigest = exporterDigest
+	if err := e.apply(ctx, cur, next); err != nil {
+		if same {
+			logger.Error(err, "reload the exporter files")
+			return nil
+		}
 		return fmt.Errorf("apply configuration: %w", err)
 	}
+	if same {
+		r.current = next
+		logger.Info("reloaded the exporter files")
+		return nil
+	}
 	r.commit(logger, next)
+	files = watchedFiles(next.settings)
+	e.files.Store(&files)
 	r.replan(ctx)
 	return nil
 }
@@ -218,12 +229,8 @@ func (r *replanner) replan(ctx context.Context) {
 	r.publish(ctx, planner.Build(r.current.defs, r.current.settings, *r.facts))
 }
 
-// idle drops the configuration in force and everything it set up, and hands the scheduler an empty plan.
+// idle drops the configuration in force and hands the scheduler an empty plan.
 func (r *replanner) idle(ctx context.Context) {
-	// Tearing down cannot fail.
-	if err := r.comps.apply(ctx, r.current, nil); err != nil {
-		log.FromContext(ctx).Error(err, "tear down the configuration")
-	}
 	r.current, r.facts, r.loader, r.loaderFiles = nil, nil, nil, nil
 	r.publish(ctx, planner.Plan{})
 }
@@ -238,7 +245,20 @@ func (r *replanner) publish(ctx context.Context, p planner.Plan) {
 		keep[selfmetrics.QueryDatabase{Query: j.Query, Database: j.Database}] = true
 	}
 
+	r.setPlanned(p, planned, keep)
+
+	logger := log.FromContext(ctx)
+	for _, s := range p.Skips {
+		logger.Debug("query not planned", "query", s.Query, "database", s.Database, "reason", s.Reason)
+	}
+	logger.Info("plan updated", "jobs", len(p.Jobs), "skipped", len(p.Skips))
+	r.update(p)
+}
+
+// setPlanned makes planned the planned jobs and drops what p no longer has, while no result is written.
+func (r *replanner) setPlanned(p planner.Plan, planned map[snapshot.Key]string, keep map[selfmetrics.QueryDatabase]bool) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.planned = planned
 	for _, j := range p.Jobs {
 		r.stats.QueryInterval(j.Query, j.Interval)
@@ -253,14 +273,6 @@ func (r *replanner) publish(ctx context.Context, p planner.Plan) {
 		_, ok := planned[k]
 		return ok
 	})
-	r.mu.Unlock()
-
-	logger := log.FromContext(ctx)
-	for _, s := range p.Skips {
-		logger.Debug("query not planned", "query", s.Query, "database", s.Database, "reason", s.Reason)
-	}
-	logger.Info("plan updated", "jobs", len(p.Jobs), "skipped", len(p.Skips))
-	r.update(p)
 }
 
 // whilePlanned calls fn if job is in the plan with its fingerprint, and holds off replans until fn returns.

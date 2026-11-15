@@ -458,10 +458,11 @@ func (s *Source) wakeLocked() {
 	}
 }
 
-// Watch calls notify, debounced, after any event on a watched object. It returns nil when ctx ends.
-func (s *Source) Watch(ctx context.Context, _ []string, notify func(), opts ...sources.WatchOption) error {
-	ready, onError := sources.WatchHooks(opts...)
-	sub := &subscriber{wake: make(chan struct{}, 1), onError: onError}
+// Watch calls notify once it is watching, then, debounced, after any event on a watched object, and at
+// once after a watch error other than a 403, which can mean lost events. It ignores files: the objects
+// it watches follow the settings. It returns nil when ctx ends.
+func (s *Source) Watch(ctx context.Context, _ func() []string, notify func()) error {
+	sub := &subscriber{wake: make(chan struct{}, 1), onError: func(error) { notify() }}
 	s.mu.Lock()
 	s.subs[sub] = struct{}{}
 	s.mu.Unlock()
@@ -477,7 +478,7 @@ func (s *Source) Watch(ctx context.Context, _ []string, notify func(), opts ...s
 	}
 	defer timer.Stop()
 
-	ready()
+	notify()
 	for {
 		select {
 		case <-ctx.Done():

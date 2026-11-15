@@ -1,55 +1,26 @@
 package engine_test
 
 import (
-	"errors"
+	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
-	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
-	"github.com/jackc/pgx/v5/pgconn"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/gabrosys/plugin-telemetry/internal/engine"
-	"github.com/gabrosys/plugin-telemetry/internal/executor"
 	"github.com/gabrosys/plugin-telemetry/internal/export"
-	"github.com/gabrosys/plugin-telemetry/internal/pg"
+	"github.com/gabrosys/plugin-telemetry/internal/export/otlptest"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
-	"github.com/gabrosys/plugin-telemetry/internal/queries"
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
 )
-
-var _ = Describe("A run result", func() {
-	DescribeTable("asks for an early facts round only when the run lost its connection",
-		func(ctx SpecContext, res executor.Result, early bool) {
-			res.Job = planner.Job{Query: "backends", Database: "app", Fingerprint: "f"}
-			got, err := engine.EarlyFactsAfter(ctx, res)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(got).To(Equal(early))
-		},
-		Entry("a refused password", executor.Result{
-			Outcome: selfmetrics.OutcomeError, Err: &pgconn.PgError{Code: "28P01"}, ConnectionLost: true,
-		}, true),
-		Entry("a backoff", executor.Result{
-			Outcome: selfmetrics.OutcomeError, Err: fmt.Errorf("acquire: %w", pg.ErrBackoff), ConnectionLost: true,
-		}, true),
-		Entry("a column mismatch", executor.Result{
-			Outcome: selfmetrics.OutcomeError, Err: queries.ErrColumnMismatch,
-		}, false),
-		Entry("a statement timeout", executor.Result{
-			Outcome: selfmetrics.OutcomeTimeout, Err: &pgconn.PgError{Code: "57014"},
-		}, false),
-		Entry("a success", executor.Result{Outcome: selfmetrics.OutcomeOK}, false),
-	)
-})
 
 var _ = Describe("The meter provider", func() {
 	It("exports 3000 series of one self-metric without the overflow attribute", func(ctx SpecContext) {
@@ -87,29 +58,111 @@ var _ = Describe("The meter provider", func() {
 })
 
 var _ = Describe("cnpg_collector_up", func() {
-	It("isn't reported before the first facts round", func(ctx SpecContext) {
-		_, found, err := engine.CollectorUp(ctx)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(found).To(BeFalse())
+	It("is absent before the first facts round, then follows the last one", func() {
+		release := make(chan struct{})
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url, time.Second), httpFiles()) },
+			func(ctx context.Context, round int) (planner.Facts, error) {
+				switch round {
+				case 0:
+					select {
+					case <-release:
+					case <-ctx.Done():
+						return planner.Facts{}, ctx.Err()
+					}
+					return memPrimary, nil
+				default:
+					return unreachable(ctx, round)
+				}
+			})
+		h.advance(func() bool { return len(h.requests()) >= 2 })
+		Expect(points(h.srv, "cnpg_collector_up", time.Time{})).To(BeEmpty())
+
+		close(release)
+		h.advance(h.has("cnpg_collector_up", map[string]string{"cluster": "mem"}, 1))
+		h.advance(h.has("cnpg_collector_up", map[string]string{"cluster": "mem"}, 0))
+		up := points(h.srv, "cnpg_collector_up", time.Time{})
+		Expect(up[len(up)-1].attrs).To(Equal(map[string]string{"cluster": "mem"}))
+	})
+})
+
+// gaps returns the time between consecutive entries of times.
+func gaps(times []time.Time) []time.Duration {
+	out := make([]time.Duration, 0, len(times))
+	for i := 1; i < len(times); i++ {
+		out = append(out, times[i].Sub(times[i-1]))
+	}
+	return out
+}
+
+var _ = Describe("Facts rounds", func() {
+	It("back off 1s, 2s, 4s ... capped at the planning cycle, and start over on a new pool", func() {
+		// A day between exports keeps the export loop's timer out of the way; then the engine waits on two
+		// timers, the export loop's and the facts timer, whenever it is idle.
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url, 24*time.Hour), httpFiles()) }, unreachable)
+		idle := func() {
+			GinkgoHelper()
+			Eventually(h.clk.Waiters).WithTimeout(5 * time.Second).Should(Equal(2))
+		}
+		// drive moves the clock forward by d in steps of 100 ms, letting the engine settle after each.
+		drive := func(d time.Duration) {
+			GinkgoHelper()
+			for elapsed := time.Duration(0); elapsed <= d; elapsed += 100 * time.Millisecond {
+				idle()
+				h.clk.Step(100 * time.Millisecond)
+			}
+			idle()
+		}
+
+		drive(40 * time.Second)
+		Expect(gaps(h.roundTimes())).To(Equal([]time.Duration{
+			time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second,
+		}))
+
+		before := len(h.roundTimes())
+		h.cfg.set(func() { h.cfg.doc = strings.Replace(h.cfg.doc, "port: 1\n", "port: 2\n", 1) })
+		h.reload()
+		Expect(h.logged(`"msg"="configuration applied"`)).To(Equal(2))
+		drive(4 * time.Second)
+		Expect(gaps(h.roundTimes()[before:])).To(Equal([]time.Duration{time.Second, 2 * time.Second}))
 	})
 
-	It("follows the last facts round and has no unit", func(ctx SpecContext) {
-		value := func(rounds ...bool) int64 {
-			GinkgoHelper()
-			m, found, err := engine.CollectorUp(ctx, rounds...)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(found).To(BeTrue())
-			Expect(m.Unit).To(BeEmpty())
-			Expect(m.Description).To(Equal("1 if PostgreSQL is up, 0 otherwise."))
-			gauge, ok := m.Data.(metricdata.Gauge[int64])
-			Expect(ok).To(BeTrue())
-			Expect(gauge.DataPoints).To(HaveLen(1))
-			Expect(gauge.DataPoints[0].Attributes.ToSlice()).To(Equal([]attribute.KeyValue{attribute.String("cluster", "c")}))
-			return gauge.DataPoints[0].Value
+	It("keep earlyFactsGap after a round when runs that lose their connection ask for one", func() {
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url, time.Second), httpFiles()) }, primary)
+		h.advance(func() bool { return len(h.roundTimes()) >= 5 })
+		rounds := h.roundTimes()
+		Expect(rounds[len(rounds)-1].Sub(rounds[0])).To(BeNumerically("<", 30*time.Second), "rounds came early, not on the timer")
+		for _, gap := range gaps(rounds) {
+			Expect(gap).To(BeNumerically(">=", time.Second))
 		}
-		Expect(value(false)).To(Equal(int64(0)))
-		Expect(value(false, true)).To(Equal(int64(1)))
-		Expect(value(true, false)).To(Equal(int64(0)))
+	})
+
+	It("stop writing a job's self-metrics once it leaves the plan", func() {
+		var dropApp atomic.Bool
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url, time.Second), httpFiles()) },
+			func(context.Context, int) (planner.Facts, error) {
+				if dropApp.Load() {
+					return planner.Facts{Version: memPrimary.Version, Databases: []string{"postgres"}}, nil
+				}
+				return memPrimary, nil
+			})
+		onApp := func(req otlptest.Request) bool {
+			for _, p := range requestPoints(req, "cnpg_otel_query_runs_total") {
+				if p.attrs["database"] == "app" {
+					return true
+				}
+			}
+			return false
+		}
+		h.advance(func() bool { reqs := h.requests(); return len(reqs) > 0 && onApp(reqs[len(reqs)-1]) })
+
+		dropApp.Store(true)
+		h.advance(func() bool { return h.logged(`"msg"="plan updated"`) >= 2 })
+		h.advance(func() bool { reqs := h.requests(); return len(reqs) > 0 && !onApp(reqs[len(reqs)-1]) })
+		since := len(h.requests())
+		h.advance(func() bool { return len(h.requests()) >= since+5 })
+		for _, req := range h.requests()[since:] {
+			Expect(onApp(req)).To(BeFalse())
+		}
 	})
 })
 
@@ -130,80 +183,6 @@ var _ = Describe("Run bookkeeping", func() {
 		}
 		Expect(panics).To(HaveLen(1))
 		Expect(panics[0]).To(And(ContainSubstring(`"query"="backends"`), ContainSubstring(`"database"="app"`)))
-	})
-})
-
-var _ = Describe("Pool replacement", func() {
-	It("closes the old pool only after every run started on it ends, across runners that share it", func(ctx SpecContext) {
-		p, err := engine.NewPools(ctx)
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(p.Close)
-
-		s := engine.Unreachable()
-		Expect(p.Apply(ctx, s)).To(BeTrue())
-		first, end := p.Begin()
-		s.Limits.MaxRowsPerQuery = 5
-		Expect(p.Apply(ctx, s)).To(BeFalse(), "a limits-only change keeps the pool")
-		s.Postgres.MaxConnections = 3
-		Expect(p.Apply(ctx, s)).To(BeTrue())
-
-		closed := func() bool {
-			_, _, err := first.Acquire(ctx, "app")
-			return errors.Is(err, pg.ErrPoolClosed)
-		}
-		Consistently(closed).WithTimeout(300 * time.Millisecond).Should(BeFalse())
-		end()
-		Eventually(closed).Should(BeTrue())
-	})
-})
-
-var _ = Describe("The watcher", func() {
-	It("looks at the files again after a swap", func(ctx SpecContext) {
-		dir := GinkgoT().TempDir()
-		a, b := filepath.Join(dir, "a.yaml"), filepath.Join(dir, "b.yaml")
-		notified, err := engine.WatchSwapNotifies(ctx, []string{a}, []string{a, b})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(notified).To(BeTrue())
-	})
-})
-
-// gaps returns the time between consecutive entries of times.
-func gaps(times []time.Duration) []time.Duration {
-	out := make([]time.Duration, 0, len(times))
-	for i := 1; i < len(times); i++ {
-		out = append(out, times[i]-times[i-1])
-	}
-	return out
-}
-
-var _ = Describe("Facts rounds during an outage", func() {
-	var rounds *engine.FactsRounds
-
-	BeforeEach(func(ctx SpecContext) {
-		var err error
-		rounds, err = engine.NewFactsRounds(ctrllog.IntoContext(ctx, logr.Discard()), 30*time.Second)
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(rounds.Close)
-	})
-
-	It("back off 1s, 2s, 4s ... on the timer whatever the early rounds in between", func(ctx SpecContext) {
-		timed, early := rounds.Run(ctrllog.IntoContext(ctx, logr.Discard()), 40*time.Second, true)
-		Expect(early).To(BeNumerically(">", 20))
-		Expect(timed).NotTo(BeEmpty())
-		Expect(timed[0]).To(BeZero())
-		Expect(gaps(timed)).To(Equal([]time.Duration{
-			time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second,
-		}))
-	})
-
-	It("start the failure count over when the pool is replaced", func(ctx SpecContext) {
-		quiet := ctrllog.IntoContext(ctx, logr.Discard())
-		timed, _ := rounds.Run(quiet, 8*time.Second, false)
-		Expect(timed).To(Equal([]time.Duration{0, time.Second, 3 * time.Second, 7 * time.Second}))
-
-		Expect(rounds.ReplacePool(quiet)).To(BeTrue())
-		timed, _ = rounds.Run(quiet, 4*time.Second, false)
-		Expect(timed).To(Equal([]time.Duration{0, time.Second, 3 * time.Second}))
 	})
 })
 

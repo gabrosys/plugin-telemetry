@@ -272,6 +272,16 @@ var _ = Describe("Executor", func() {
 			Expect(res.Samples).To(BeNil())
 		})
 
+		It("stops remembering series past maxSeriesPerQuery + 1 and still counts the later ones", func(ctx SpecContext) {
+			l.MaxSeriesPerQuery = 2
+			res := newExecutor(pool, l).Run(ctx, jobFor(
+				"SELECT x AS datname, 1 AS value FROM unnest(ARRAY['a','b','c','c','c','d','d']) x"))
+			Expect(res.Err).NotTo(HaveOccurred())
+			Expect(res.Outcome).To(Equal(selfmetrics.OutcomeCapped))
+			Expect(res.WouldBe).To(Equal(5))
+			Expect(res.Dropped[queries.DropDuplicate]).To(Equal(2))
+		})
+
 		It("cancels the statement at the row cap instead of draining it", func(ctx SpecContext) {
 			l.MaxRowsPerQuery = 3
 			capExec := newExecutor(pool, l)

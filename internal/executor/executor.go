@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
@@ -230,6 +229,7 @@ func (e *Executor) collect(ctx context.Context, tx pgx.Tx, job planner.Job, res 
 	}
 	defer rows.Close()
 
+	// seen holds at most maxSeries + 1 series IDs; a series past that is counted but not remembered.
 	var (
 		fields    []pgconn.FieldDescription
 		columns   []string
@@ -280,12 +280,14 @@ func (e *Executor) collect(ctx context.Context, tx pgx.Tx, job planner.Job, res 
 			res.Dropped[reason] += n
 		}
 		for _, s := range samples {
-			key := seriesKey(s)
-			if _, dup := seen[key]; dup {
+			id := queries.SeriesID(s.Metric, s.Labels)
+			if _, dup := seen[id]; dup {
 				res.Dropped[queries.DropDuplicate]++
 				continue
 			}
-			seen[key] = struct{}{}
+			if maxSeries <= 0 || len(seen) <= maxSeries {
+				seen[id] = struct{}{}
+			}
 			series++
 			if maxSeries > 0 && series > maxSeries {
 				overCap = true
@@ -324,19 +326,6 @@ func cancelStatement(ctx context.Context, conn *pgx.Conn) error {
 // logCleanup logs an error that does not change the outcome of the run.
 func logCleanup(ctx context.Context, job planner.Job, msg string, err error) {
 	log.FromContext(ctx).GetLogger().V(1).Info(msg, "query", job.Query, "database", job.Database, "error", err.Error())
-}
-
-// seriesKey is the metric name and the labels, which are sorted by key.
-func seriesKey(s queries.Sample) string {
-	var b strings.Builder
-	b.WriteString(s.Metric)
-	for _, l := range s.Labels {
-		b.WriteByte(0)
-		b.WriteString(l.Key)
-		b.WriteByte('=')
-		b.WriteString(l.Value)
-	}
-	return b.String()
 }
 
 // connectionFailed reports whether the connection must be discarded: the pool does not ping idle

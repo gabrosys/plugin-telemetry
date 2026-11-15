@@ -12,6 +12,7 @@ var (
 // Exposed for controller_test.go.
 var (
 	SpecChanged         = specChanged
+	OwnedObjects        = ownedObjects
 	ExportersToClusters = exportersToClusters
 )
 

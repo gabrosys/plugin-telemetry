@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
@@ -14,6 +15,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -25,6 +27,9 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/podpatch"
 )
 
+// ownedObjects drops create events: the plugin's own creates would re-trigger the Cluster before its cache holds them.
+var ownedObjects = predicate.Funcs{CreateFunc: func(event.CreateEvent) bool { return false }}
+
 // specChanged passes creates, deletes and updates that change metadata.generation.
 var specChanged = predicate.GenerationChangedPredicate{}
 
@@ -35,6 +40,8 @@ type IdentityController struct {
 	Client   client.Client
 	Identity *identity.Ensurer
 	Metrics  *PluginMetrics // nil records nothing
+
+	blocked sync.Map // Clusters whose "in the way" line was logged and hasn't cleared; keyed by namespaced name
 }
 
 // requeueInTheWay is the wait before Ensure retries after an object in the way; the cache may catch up
@@ -51,10 +58,18 @@ func (c *IdentityController) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	c.Metrics.IdentityReconcile(outcome)
 
-	if errors.Is(err, identity.ErrInTheWay) {
-		log.FromContext(ctx).Info("identity controller", "outcome", outcomeInTheWay, "reason", err.Error())
+	logger := log.FromContext(ctx)
+	switch {
+	case errors.Is(err, identity.ErrInTheWay):
+		if _, seen := c.blocked.LoadOrStore(req.NamespacedName, struct{}{}); !seen {
+			logger.Info("identity controller", "outcome", outcomeInTheWay, "reason", err.Error())
+		}
 
 		return ctrl.Result{RequeueAfter: requeueInTheWay}, nil
+	case err == nil:
+		if _, was := c.blocked.LoadAndDelete(req.NamespacedName); was {
+			logger.Info("identity controller", "outcome", outcomeInTheWay+" cleared", "cluster", req.NamespacedName)
+		}
 	}
 
 	return ctrl.Result{}, err
@@ -114,10 +129,10 @@ func (c *IdentityController) SetupWithManager(mgr manager.Manager) error {
 		For(&apiv1.Cluster{}, builder.WithPredicates(specChanged)).
 		Watches(&v1alpha1.TelemetryExporter{}, handler.EnqueueRequestsFromMapFunc(exportersToClusters(c.Client)),
 			builder.WithPredicates(specChanged)).
-		Owns(&corev1.ServiceAccount{}).
-		Owns(&rbacv1.Role{}).
-		Owns(&rbacv1.RoleBinding{}).
-		Owns(&corev1.Secret{}).
+		Owns(&corev1.ServiceAccount{}, builder.WithPredicates(ownedObjects)).
+		Owns(&rbacv1.Role{}, builder.WithPredicates(ownedObjects)).
+		Owns(&rbacv1.RoleBinding{}, builder.WithPredicates(ownedObjects)).
+		Owns(&corev1.Secret{}, builder.WithPredicates(ownedObjects)).
 		Complete(c)
 	if err != nil {
 		return fmt.Errorf("set up identity controller: %w", err)

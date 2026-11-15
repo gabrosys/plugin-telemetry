@@ -34,17 +34,17 @@ type Ensurer struct {
 var ErrInTheWay = errors.New("in the way of the identity")
 
 // step is one object: its empty cache copy, the desired object, whether the copy matches it, and its apply
-// configuration pinned to a uid.
+// configuration pinned to a uid and resourceVersion.
 type step struct {
 	cached client.Object
 	want   client.Object
 	same   func() bool
-	apply  func(uid types.UID) runtime.ApplyConfiguration
+	apply  func(uid types.UID, version string) runtime.ApplyConfiguration
 }
 
 // Ensure visits ServiceAccount, Role, RoleBinding and token Secret in order. An object the cache lacks gets a
 // plain Create with FieldOwner; AlreadyExists ends the pass with ErrInTheWay. A cached object that differs is
-// applied with FieldOwner, ForceOwnership and its cached uid. It returns what it wrote, as Kind/name.
+// applied with FieldOwner, ForceOwnership, its cached uid and its cached resourceVersion. It returns what it wrote, as Kind/name.
 func (e *Ensurer) Ensure(ctx context.Context, c *apiv1.Cluster, refs clusterconfig.Refs) ([]string, error) {
 	want, err := Desired(c, refs)
 	if err != nil {
@@ -54,9 +54,12 @@ func (e *Ensurer) Ensure(ctx context.Context, c *apiv1.Cluster, refs clusterconf
 	var wrote []string
 	for _, s := range steps(want) {
 		name := label(s.cached)
-		err := e.Reader.Get(ctx, client.ObjectKeyFromObject(s.cached), s.cached)
+		found, err := e.cachedGet(ctx, s.cached)
+		if err != nil {
+			return wrote, err
+		}
 		switch {
-		case apierrors.IsNotFound(err):
+		case !found:
 			err = e.Writer.Create(ctx, s.want, client.FieldOwner(FieldOwner))
 			if apierrors.IsAlreadyExists(err) {
 				return wrote, fmt.Errorf("%w: %s: %w", ErrInTheWay, name, err)
@@ -64,16 +67,13 @@ func (e *Ensurer) Ensure(ctx context.Context, c *apiv1.Cluster, refs clusterconf
 			if err != nil {
 				return wrote, fmt.Errorf("create %s in %s: %w", name, c.Namespace, err)
 			}
-		case err != nil:
-			return wrote, fmt.Errorf("get %s in %s: %w", name, c.Namespace, err)
+		case wrongToken(s.cached):
+			return wrote, fmt.Errorf("%w: %s has another type than %s", ErrInTheWay, name, corev1.SecretTypeServiceAccountToken)
+		case s.same():
+			continue
 		default:
-			if secret, ok := s.cached.(*corev1.Secret); ok && secret.Type != want.Token.Type {
-				return wrote, fmt.Errorf("%w: %s has type %s", ErrInTheWay, name, secret.Type)
-			}
-			if s.same() {
-				continue
-			}
-			err = e.Writer.Apply(ctx, s.apply(s.cached.GetUID()), client.FieldOwner(FieldOwner), client.ForceOwnership)
+			err = e.Writer.Apply(ctx, s.apply(s.cached.GetUID(), s.cached.GetResourceVersion()),
+				client.FieldOwner(FieldOwner), client.ForceOwnership)
 			if err != nil {
 				return wrote, fmt.Errorf("apply %s in %s: %w", name, c.Namespace, err)
 			}
@@ -104,16 +104,13 @@ func (e *Ensurer) Remove(ctx context.Context, namespace, cluster string) (int, e
 	var errs []error
 	removed := 0
 	for _, obj := range Members(namespace, cluster) {
-		err := e.Reader.Get(ctx, client.ObjectKeyFromObject(obj), obj)
-		if apierrors.IsNotFound(err) {
-			continue
-		}
+		found, err := e.cachedGet(ctx, obj)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("get %s in %s: %w", label(obj), namespace, err))
+			errs = append(errs, err)
 
 			continue
 		}
-		if secret, ok := obj.(*corev1.Secret); ok && secret.Type != corev1.SecretTypeServiceAccountToken {
+		if !found || wrongToken(obj) {
 			continue
 		}
 		err = e.deleteExact(ctx, obj)
@@ -134,26 +131,42 @@ func (e *Ensurer) Pending(ctx context.Context, namespace, cluster string) ([]str
 	var lines []string
 	for _, obj := range Members(namespace, cluster) {
 		name := label(obj)
-		err := e.Reader.Get(ctx, client.ObjectKeyFromObject(obj), obj)
-		if apierrors.IsNotFound(err) {
-			lines = append(lines, name+" is not in the plugin's cache: not created yet, or not the plugin's")
-
-			continue
-		}
+		found, err := e.cachedGet(ctx, obj)
 		if err != nil {
-			return nil, fmt.Errorf("get %s in %s: %w", name, namespace, err)
+			return nil, err
 		}
-		secret, ok := obj.(*corev1.Secret)
+		secret, isSecret := obj.(*corev1.Secret)
 		switch {
-		case !ok:
-		case secret.Type != corev1.SecretTypeServiceAccountToken:
+		case !found:
+			lines = append(lines, name+" is not in the plugin's cache: not created yet, or not the plugin's")
+		case wrongToken(obj):
 			lines = append(lines, fmt.Sprintf("%s has type %s, not %s: delete it", name, secret.Type, corev1.SecretTypeServiceAccountToken))
-		case len(secret.Data[corev1.ServiceAccountTokenKey]) == 0:
+		case isSecret && len(secret.Data[corev1.ServiceAccountTokenKey]) == 0:
 			lines = append(lines, name+" has no data.token yet")
 		}
 	}
 
 	return lines, nil
+}
+
+// cachedGet reads obj from the cache; found is false for NotFound.
+func (e *Ensurer) cachedGet(ctx context.Context, obj client.Object) (bool, error) {
+	err := e.Reader.Get(ctx, client.ObjectKeyFromObject(obj), obj)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get %s in %s: %w", label(obj), obj.GetNamespace(), err)
+	}
+
+	return true, nil
+}
+
+// wrongToken reports whether obj is a Secret that is not a service-account token.
+func wrongToken(obj client.Object) bool {
+	secret, ok := obj.(*corev1.Secret)
+
+	return ok && secret.Type != corev1.SecretTypeServiceAccountToken
 }
 
 // deleteExact deletes obj only while it has the UID and resourceVersion it was read with.
@@ -192,8 +205,8 @@ func steps(w Objects) []step {
 			cached: sa,
 			want:   w.ServiceAccount,
 			same:   func() bool { return sameMeta(w.ServiceAccount.ObjectMeta, sa.ObjectMeta) },
-			apply: func(uid types.UID) runtime.ApplyConfiguration {
-				return corev1ac.ServiceAccount(w.ServiceAccount.Name, w.ServiceAccount.Namespace).WithUID(uid).
+			apply: func(uid types.UID, version string) runtime.ApplyConfiguration {
+				return corev1ac.ServiceAccount(w.ServiceAccount.Name, w.ServiceAccount.Namespace).WithUID(uid).WithResourceVersion(version).
 					WithLabels(w.ServiceAccount.Labels).WithOwnerReferences(ownerRefs(w.ServiceAccount.OwnerReferences)...)
 			},
 		},
@@ -203,8 +216,8 @@ func steps(w Objects) []step {
 			same: func() bool {
 				return sameMeta(w.Role.ObjectMeta, role.ObjectMeta) && equality.Semantic.DeepEqual(w.Role.Rules, role.Rules)
 			},
-			apply: func(uid types.UID) runtime.ApplyConfiguration {
-				return rbacv1ac.Role(w.Role.Name, w.Role.Namespace).WithUID(uid).
+			apply: func(uid types.UID, version string) runtime.ApplyConfiguration {
+				return rbacv1ac.Role(w.Role.Name, w.Role.Namespace).WithUID(uid).WithResourceVersion(version).
 					WithLabels(w.Role.Labels).WithOwnerReferences(ownerRefs(w.Role.OwnerReferences)...).
 					WithRules(policyRules(w.Role.Rules)...)
 			},
@@ -216,8 +229,8 @@ func steps(w Objects) []step {
 				return sameMeta(w.RoleBinding.ObjectMeta, binding.ObjectMeta) &&
 					w.RoleBinding.RoleRef == binding.RoleRef && slices.Equal(w.RoleBinding.Subjects, binding.Subjects)
 			},
-			apply: func(uid types.UID) runtime.ApplyConfiguration {
-				return rbacv1ac.RoleBinding(w.RoleBinding.Name, w.RoleBinding.Namespace).WithUID(uid).
+			apply: func(uid types.UID, version string) runtime.ApplyConfiguration {
+				return rbacv1ac.RoleBinding(w.RoleBinding.Name, w.RoleBinding.Namespace).WithUID(uid).WithResourceVersion(version).
 					WithLabels(w.RoleBinding.Labels).WithOwnerReferences(ownerRefs(w.RoleBinding.OwnerReferences)...).
 					WithRoleRef(rbacv1ac.RoleRef().WithAPIGroup(w.RoleBinding.RoleRef.APIGroup).
 						WithKind(w.RoleBinding.RoleRef.Kind).WithName(w.RoleBinding.RoleRef.Name)).
@@ -231,8 +244,8 @@ func steps(w Objects) []step {
 				return sameMeta(w.Token.ObjectMeta, token.ObjectMeta) &&
 					token.Annotations[corev1.ServiceAccountNameKey] == w.Token.Annotations[corev1.ServiceAccountNameKey]
 			},
-			apply: func(uid types.UID) runtime.ApplyConfiguration {
-				return corev1ac.Secret(w.Token.Name, w.Token.Namespace).WithUID(uid).
+			apply: func(uid types.UID, version string) runtime.ApplyConfiguration {
+				return corev1ac.Secret(w.Token.Name, w.Token.Namespace).WithUID(uid).WithResourceVersion(version).
 					WithType(w.Token.Type).WithAnnotations(w.Token.Annotations).
 					WithLabels(w.Token.Labels).WithOwnerReferences(ownerRefs(w.Token.OwnerReferences)...)
 			},
@@ -252,8 +265,10 @@ func sameMeta(want, cached metav1.ObjectMeta) bool {
 		}
 	}
 
-	return slices.ContainsFunc(cached.OwnerReferences, func(ref metav1.OwnerReference) bool {
-		return equality.Semantic.DeepEqual(ref, want.OwnerReferences[0])
+	return !slices.ContainsFunc(want.OwnerReferences, func(w metav1.OwnerReference) bool {
+		return !slices.ContainsFunc(cached.OwnerReferences, func(ref metav1.OwnerReference) bool {
+			return equality.Semantic.DeepEqual(ref, w)
+		})
 	})
 }
 

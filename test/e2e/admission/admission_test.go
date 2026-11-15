@@ -301,6 +301,24 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		Expect(err).To(MatchError(ContainSubstring("uid mismatch")))
 	})
 
+	It("refuses an apply whose body carries a stale resourceVersion, and accepts the stored one", func(ctx SpecContext) {
+		var stored corev1.ServiceAccount
+		Expect(c.Get(ctx, client.ObjectKey{Namespace: ns, Name: telemetryName}, &stored)).To(Succeed())
+
+		applyAt := func(version string) error {
+			_, err := plugin.CoreV1().ServiceAccounts(ns).Apply(ctx,
+				corev1ac.ServiceAccount(telemetryName, ns).WithUID(stored.UID).WithResourceVersion(version),
+				metav1.ApplyOptions{FieldManager: identity.FieldOwner, Force: true, DryRun: dryRun})
+
+			return err
+		}
+
+		Expect(applyAt(stored.ResourceVersion)).To(Succeed())
+		err := applyAt("1")
+		Expect(err).To(Satisfy(apierrors.IsConflict))
+		Expect(err).To(MatchError(ContainSubstring("the object has been modified")))
+	})
+
 	It("denies an update that points adm.telemetry-token at another account", func(ctx SpecContext) {
 		var secret corev1.Secret
 		Expect(c.Get(ctx, client.ObjectKey{Namespace: ns, Name: telemetryToken}, &secret)).To(Succeed())

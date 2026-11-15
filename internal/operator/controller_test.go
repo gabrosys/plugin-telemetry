@@ -2,10 +2,14 @@ package operator_test
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -25,6 +29,8 @@ import (
 func requestFor(namespace, name string) reconcile.Request {
 	return reconcile.Request{NamespacedName: client.ObjectKey{Namespace: namespace, Name: name}}
 }
+
+var errCreate = errors.New("create refused")
 
 var _ = Describe("IdentityController", func() {
 	var (
@@ -204,6 +210,47 @@ var _ = Describe("IdentityController", func() {
 		Expect(writes.Load()).To(BeZero())
 	})
 
+	It("drops create events of the owned objects and keeps updates, deletes and generic events", func() {
+		sa := &corev1.ServiceAccount{}
+
+		Expect(operator.OwnedObjects.Create(event.CreateEvent{Object: sa})).To(BeFalse())
+		Expect(operator.OwnedObjects.Update(event.UpdateEvent{ObjectOld: sa, ObjectNew: sa})).To(BeTrue())
+		Expect(operator.OwnedObjects.Delete(event.DeleteEvent{Object: sa})).To(BeTrue())
+		Expect(operator.OwnedObjects.Generic(event.GenericEvent{Object: sa})).To(BeTrue())
+	})
+
+	It("logs an object in the way once when it starts and once when it clears", func(ctx context.Context) {
+		var lines []string
+		sink := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{})
+		ctx = logr.NewContext(ctx, sink)
+		blocker := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg.telemetry"}}
+		build(newCluster("ns", "pg", ours(nil)), blocker)
+		ctrl.Identity = &identity.Ensurer{Reader: newClient(nil, interceptor.Funcs{}), Writer: c}
+		count := func(outcome string) int {
+			n := 0
+			for _, l := range lines {
+				if strings.Contains(l, `"outcome"="`+outcome+`"`) {
+					n++
+				}
+			}
+
+			return n
+		}
+
+		for range 3 {
+			res, err := ctrl.Reconcile(ctx, requestFor("ns", "pg"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(Equal(5 * time.Second))
+		}
+		Expect(count("in the way")).To(Equal(1))
+
+		Expect(c.Delete(ctx, blocker)).To(Succeed())
+		ctrl.Identity = &identity.Ensurer{Reader: c, Writer: c}
+		reconcileOnce(ctx, "ns", "pg")
+		reconcileOnce(ctx, "ns", "pg")
+		Expect(count("in the way cleared")).To(Equal(1))
+	})
+
 	It("registers with a manager", func() {
 		mgr, err := operator.NewManager(&rest.Config{Host: discoveryServer().URL}, "cnpg-system", "telemetry-sidecar-image")
 		Expect(err).NotTo(HaveOccurred())
@@ -215,13 +262,13 @@ var _ = Describe("IdentityController", func() {
 	It("returns the Ensure error so the workqueue backs off", func(ctx context.Context) {
 		failing := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{
 			Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
-				return errApply
+				return errCreate
 			},
 		})
 		ctrl = &operator.IdentityController{Client: failing, Identity: &identity.Ensurer{Reader: failing, Writer: failing}}
 
 		res, err := ctrl.Reconcile(ctx, requestFor("ns", "pg"))
-		Expect(err).To(MatchError(ContainSubstring("apply refused")))
+		Expect(err).To(MatchError(errCreate))
 		Expect(res).To(Equal(reconcile.Result{}))
 	})
 })

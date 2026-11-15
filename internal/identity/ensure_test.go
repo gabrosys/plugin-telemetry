@@ -91,6 +91,7 @@ var _ = Describe("Ensurer", func() {
 		objs := []client.Object{want.ServiceAccount, want.Role, want.RoleBinding, want.Token}
 		for _, o := range objs {
 			o.SetUID(types.UID("uid-" + kindName(o)))
+			o.SetResourceVersion("17")
 		}
 
 		return objs
@@ -184,6 +185,7 @@ var _ = Describe("Ensurer", func() {
 			meta, ok := applies[drifted]["metadata"].(map[string]any)
 			Expect(ok).To(BeTrue())
 			Expect(meta).To(HaveKeyWithValue("uid", "uid-"+drifted))
+			Expect(meta).To(HaveKeyWithValue("resourceVersion", "17"))
 			Expect(applies[drifted]).NotTo(HaveKey("data"))
 			Expect(applies[drifted]).NotTo(HaveKey("stringData"))
 			Expect(applyOpts.AsPatchOptions().FieldManager).To(Equal(manager))
@@ -211,6 +213,25 @@ var _ = Describe("Ensurer", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(wrote).To(BeEmpty())
 		Expect(calls).To(BeEmpty())
+	})
+
+	It("refuses to re-label an object whose label the API server's copy has lost since the cache read", func() {
+		drifted := func(o *identity.Objects) { o.Role.Rules[0].ResourceNames = nil }
+		server := cached(drifted)
+		server[1].SetLabels(nil)
+		server[1].SetResourceVersion("18")
+		build(server...)
+		ensurer.Reader = fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).WithObjects(cached(drifted)...).Build()
+
+		_, err := ensurer.Ensure(ctx, newCluster(), refs())
+		Expect(err).To(Satisfy(apierrors.IsConflict))
+		meta, ok := applies[roleName]["metadata"].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(meta).To(HaveKeyWithValue("resourceVersion", "17"))
+
+		var role rbacv1.Role
+		Expect(c.Get(ctx, client.ObjectKey{Namespace: identityNS, Name: "pg.telemetry"}, &role)).To(Succeed())
+		Expect(role.Labels).To(BeEmpty())
 	})
 
 	It("stops the pass with ErrInTheWay when a create finds the object already there", func() {
@@ -312,8 +333,9 @@ var _ = Describe("Ensurer", func() {
 			Expect(cacheB.Create(ctx, obj)).To(Succeed())
 		}
 
-		_, err = b.Ensure(ctx, newCluster(), refs())
+		wrote, err = b.Ensure(ctx, newCluster(), refs())
 		Expect(err).NotTo(HaveOccurred())
+		Expect(wrote).To(BeEmpty())
 		Expect(b.Pending(ctx, identityNS, "pg")).To(BeEmpty())
 
 		var roles rbacv1.RoleList

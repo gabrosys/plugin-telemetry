@@ -297,6 +297,20 @@ var _ = Describe("Status.SetStatusInCluster", func() {
 		Expect(resp.GetJsonStatus()).To(BeEmpty())
 	})
 
+	It("never returns an error when only the identity read fails", func() {
+		funcs.Get = func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, o ...client.GetOption) error {
+			if _, ok := obj.(*v1alpha1.TelemetryExporter); ok {
+				return c.Get(ctx, key, obj, o...)
+			}
+
+			return errApply
+		}
+
+		resp, err := status().SetStatusInCluster(ctx, hookStatusRequest(cluster))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.GetJsonStatus()).To(BeEmpty())
+	})
+
 	It("never returns an error when the cache fails", func() {
 		funcs.Get = func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
 			return errApply

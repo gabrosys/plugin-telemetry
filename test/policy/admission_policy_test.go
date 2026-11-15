@@ -1,11 +1,16 @@
 package policy_test
 
 import (
+	"context"
 	"fmt"
+	"sort"
 	"strings"
 
+	"github.com/cloudnative-pg/cnpg-i/pkg/identity"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/gabrosys/plugin-telemetry/internal/operator"
 )
 
 var _ = Describe("the admission policies", func() {
@@ -27,5 +32,24 @@ var _ = Describe("the admission policies", func() {
 			}
 		}
 		Expect(checked).To(Equal(7))
+	})
+})
+
+var _ = Describe("the plugin Service", func() {
+	It("names the declared capabilities, so a change of them changes the Service and CNPG registers the plugin again", func(ctx context.Context) {
+		resp, err := operator.Identity{}.GetPluginCapabilities(ctx, &identity.GetPluginCapabilitiesRequest{})
+		Expect(err).NotTo(HaveOccurred())
+
+		var declared []string
+		for _, c := range resp.GetCapabilities() {
+			name := strings.TrimSuffix(strings.TrimPrefix(c.GetService().GetType().String(), "TYPE_"), "_SERVICE")
+			declared = append(declared, strings.ToLower(name))
+		}
+		sort.Strings(declared)
+
+		manifests, err := readManifests("config/service.yaml")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(find(manifests, "Service").Metadata.Annotations).To(
+			HaveKeyWithValue("telemetry.gabrosys.github.io/capabilities", strings.Join(declared, ",")))
 	})
 })

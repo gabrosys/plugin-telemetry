@@ -26,14 +26,19 @@ type manifest struct {
 	Kind      string `yaml:"kind"`
 	Namespace string `yaml:"namespace"`
 	Metadata  struct {
-		Name      string `yaml:"name"`
-		Namespace string `yaml:"namespace"`
+		Name        string            `yaml:"name"`
+		Namespace   string            `yaml:"namespace"`
+		Annotations map[string]string `yaml:"annotations"`
 	} `yaml:"metadata"`
 	ConfigMapGenerator []struct {
 		Name      string `yaml:"name"`
 		Namespace string `yaml:"namespace"`
 	} `yaml:"configMapGenerator"`
 	Spec struct {
+		MatchConditions []struct {
+			Name       string `yaml:"name"`
+			Expression string `yaml:"expression"`
+		} `yaml:"matchConditions"`
 		Validations []struct {
 			Message string `yaml:"message"`
 		} `yaml:"validations"`

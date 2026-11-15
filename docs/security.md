@@ -38,7 +38,7 @@ Other facts:
 - The plugin never writes the Cluster. It returns its status to CloudNativePG, which stores it (`internal/operator/status.go` `Status.SetStatusInCluster`). The ClusterRole grants only read on `clusters`.
 - The sidecar's token volume is optional, so the Pod starts before the token exists. The sidecar waits for the token file, polls every 5 s and logs `waiting for the sidecar token` once (`internal/podpatch/podpatch.go` `Apply`, `internal/kubesource/source.go` `Source.waitForToken`).
 - The sidecar sees only its own token. An empty volume hides the Pod's default token from it (`internal/podpatch/podpatch.go` `Apply`, `sidecar`).
-- Release 0.4.0 named these objects `<cluster>-telemetry` (`internal/metadata/metadata.go` `identitySuffix` at tag v0.4.0). The plugin does not remove them. They have an owner reference to their Cluster, so they go when the Cluster goes. Their rights stay until then.
+- Release 0.4.0 named these objects `<cluster>-telemetry` (`internal/metadata/metadata.go` `identitySuffix` at tag v0.4.0). The plugin does not remove them. They have an owner reference to their Cluster, so they go when the Cluster goes. Their rights stay until then. To remove them earlier, run `kubectl --context <context> --namespace <namespace> delete serviceaccount/<cluster>-telemetry role/<cluster>-telemetry rolebinding/<cluster>-telemetry secret/<cluster>-telemetry-token`.
 
 ## The plugin's rights
 
@@ -60,6 +60,8 @@ Each sidecar runs with its own ServiceAccount. Its own rights are the read rules
 ## The admission policies
 
 `config/admission-policy.yaml` defines three ValidatingAdmissionPolicies (ValidatingAdmissionPolicy v1), each with a binding that denies. All three have `failurePolicy: Fail` and bind every namespace. They ship in the default manifest (`config/kustomization.yaml`) and need Kubernetes 1.34 or later, the project's floor. Where they are not installed or not enforced, the ClusterRole table above is the only limit on the plugin.
+
+On a first install, the default render lists the policies and their bindings after the Deployment, so the API server may not enforce them yet when the plugin Pods start. The Pods wait for the cert-manager Secrets of `config/certificates.yaml`, which the render lists last, and the plugin then syncs its caches before it writes, so the gap is seconds. To close it, apply the policies first: `kubectl apply -f config/admission-policy.yaml`, then the rest.
 
 Two of them match a request only when the user is a ServiceAccount whose name is `plugin-telemetry` or ends in `.telemetry`, in any namespace (`system:serviceaccount:*:plugin-telemetry` and `system:serviceaccount:*:*.telemetry`, match condition `plugin-or-identity-account`). No namespace is named, so the policies follow the plugin when CloudNativePG runs outside `cnpg-system`. They bind the plugin and the sidecar accounts, and no other user. A ServiceAccount named `plugin-telemetry` in another namespace is bound too.
 
@@ -89,9 +91,11 @@ Two of them match a request only when the user is a ServiceAccount whose name is
 
 A Cluster name is a DNS-1035 label (CloudNativePG v1.30.1 `internal/webhook/v1/cluster_webhook.go` `validateName`) and `spec.serviceAccountName` matches `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` (v1.30.1 `api/v1/cluster_types.go`, `ClusterSpec.ServiceAccountName`). Neither can hold a dot, so a Cluster cannot be named, or run as an account named, like an identity object.
 
-## Who may write a TelemetryExporter
+## Who chooses the Secrets the sidecar reads
 
 The plugin grants each sidecar read access to every Secret and ConfigMap that the exporter names: the headers Secret, the TLS CA, the client certificate, and the `envFrom` ConfigMap and Secret (`internal/clusterconfig/refs.go` `References`). The sidecar sends the headers to the endpoint that the exporter sets. Whoever may create or change a TelemetryExporter can therefore make the sidecar read those Secrets in the exporter's namespace and send the headers to an endpoint they choose. Grant that right only to those who may read those Secrets.
+
+Whoever may write a Cluster chooses Secrets as well. The plugin parameter `passwordSecret` and `spec.monitoring.customQueriesSecret` also go into the Role, so the sidecar may read them (`internal/clusterconfig/refs.go` `References`). The sidecar reads the first as the Postgres password and the second as query definitions. Grant the right to write Clusters only to those who may read those Secrets.
 
 ## Values that other outputs show
 
@@ -112,4 +116,5 @@ Never shown: header values, the password and key material. Header values from th
 - A token Secret of type `kubernetes.io/service-account-token` does not expire, and it stays after the plugin that wrote it is gone. Tokens written before a fix, or by a compromised plugin, persist until someone deletes them.
 - A `*.telemetry` account inherits every right that is bound to the groups `system:serviceaccounts` or `system:serviceaccounts:<namespace>`. The roles policy limits the Roles the plugin writes, not these group bindings. A compromised plugin can create such an account in a namespace where the group holds rights and read its token.
 - A compromised plugin can write a token Secret for any existing `*.telemetry` account, including one that someone else bound to broader rights, and read the token. The identities policy checks the name of the account, not who owns it.
+- CloudNativePG applies the plugin's Pod patch to every Pod of an opted-in Cluster (`internal/operator/lifecycle.go` `Lifecycle.LifecycleHook`). A compromised plugin controls that patch, so it can run its own code in the PostgreSQL Pods. The policies limit its API writes, not what it puts into the patch.
 - The CloudNativePG instance manager serves an API on `localhost:8010` without authentication (CloudNativePG v1.30.1 `pkg/management/url/url.go`). The Pod's containers share one network namespace, so the sidecar can call it. This is a CloudNativePG property the plugin does not change.

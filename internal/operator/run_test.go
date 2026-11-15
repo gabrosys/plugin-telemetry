@@ -27,7 +27,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -178,7 +180,7 @@ var _ = Describe("Run", func() {
 	)
 
 	deps := func() operator.Deps {
-		return operator.Deps{Cache: caches, Reconciler: &operator.Reconciler{}, Status: &operator.Status{}}
+		return operator.Deps{Cache: caches, Status: &operator.Status{}}
 	}
 
 	start := func() {
@@ -282,32 +284,15 @@ var _ = Describe("Run", func() {
 			Expect(resp.GetLifecycleCapabilities()[0].GetKind()).To(Equal("Pod"))
 		})
 
-		It("serves ReconcilerHooks.GetCapabilities with KIND_CLUSTER", func() {
+		It("answers Unimplemented to ReconcilerHooks.GetCapabilities", func() {
 			conn, err := dial(goodTLS())
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(conn.Close)
 			ctx, c := context.WithTimeout(context.Background(), 5*time.Second)
 			defer c()
-			resp, err := reconciler.NewReconcilerHooksClient(conn).
+			_, err = reconciler.NewReconcilerHooksClient(conn).
 				GetCapabilities(ctx, &reconciler.ReconcilerHooksCapabilitiesRequest{})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.GetReconcilerCapabilities()).To(HaveLen(1))
-			Expect(resp.GetReconcilerCapabilities()[0].GetKind()).To(Equal(reconciler.ReconcilerHooksCapability_KIND_CLUSTER))
-		})
-
-		It("answers CONTINUE to Pre and Post", func() {
-			conn, err := dial(goodTLS())
-			Expect(err).NotTo(HaveOccurred())
-			DeferCleanup(conn.Close)
-			ctx, c := context.WithTimeout(context.Background(), 5*time.Second)
-			defer c()
-			client := reconciler.NewReconcilerHooksClient(conn)
-			pre, err := client.Pre(ctx, &reconciler.ReconcilerHooksRequest{})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(pre.GetBehavior()).To(Equal(reconciler.ReconcilerHooksResult_BEHAVIOR_CONTINUE))
-			post, err := client.Post(ctx, &reconciler.ReconcilerHooksRequest{})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(post.GetBehavior()).To(Equal(reconciler.ReconcilerHooksResult_BEHAVIOR_CONTINUE))
+			Expect(status.Code(err)).To(Equal(codes.Unimplemented))
 		})
 
 		It("serves Operator.GetCapabilities with only RPC_TYPE_SET_STATUS_IN_CLUSTER", func() {
@@ -444,7 +429,6 @@ var _ = Describe("Run", func() {
 			}, waiter, d)).To(MatchError(operator.ErrInvalidDeps))
 		},
 		Entry("no cache", func(d *operator.Deps) { d.Cache = nil }),
-		Entry("no reconciler", func(d *operator.Deps) { d.Reconciler = nil }),
 		Entry("no status", func(d *operator.Deps) { d.Status = nil }),
 	)
 

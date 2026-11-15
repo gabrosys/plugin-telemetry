@@ -31,7 +31,7 @@ var _ = Describe("Identity", func() {
 		Expect(resp.GetDescription()).NotTo(BeEmpty())
 	})
 
-	It("declares the lifecycle service, the reconciler hooks and the operator service", func(ctx context.Context) {
+	It("declares the lifecycle and operator services only", func(ctx context.Context) {
 		resp, err := srv.GetPluginCapabilities(ctx, &identity.GetPluginCapabilitiesRequest{})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -41,7 +41,6 @@ var _ = Describe("Identity", func() {
 		}
 		Expect(types).To(ConsistOf(
 			identity.PluginCapability_Service_TYPE_LIFECYCLE_SERVICE,
-			identity.PluginCapability_Service_TYPE_RECONCILER_HOOKS,
 			identity.PluginCapability_Service_TYPE_OPERATOR_SERVICE,
 		))
 	})

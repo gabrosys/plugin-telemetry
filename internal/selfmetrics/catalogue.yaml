@@ -90,7 +90,7 @@
   name: cnpg_otel_plugin_hook_calls_total
   instrument: counter
   unit: "{call}"
-  description: Hook calls by service (lifecycle, reconciler, operator), operation (create, evaluate, pre, post, set_status) and outcome (patched, unchanged, skipped, applied, error, noop, status).
+  description: Hook calls by service (lifecycle, operator), operation (create, evaluate, set_status) and outcome (patched, unchanged, skipped, error, noop, status).
   attributes: [service, operation, outcome]
 - component: plugin
   name: cnpg_otel_plugin_hook_duration_seconds

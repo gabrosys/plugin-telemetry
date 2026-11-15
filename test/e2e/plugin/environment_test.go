@@ -87,7 +87,7 @@ var _ = Describe("the plugin environment", Ordered, Serial, ContinueOnFailure, f
 		Expect(framework.MatchesCNPGVersion(img, env.CNPGVersion)).To(BeTrue(), img)
 	}, SpecTimeout(time.Minute))
 
-	It("CNPG reports the reconciler hooks and SetStatusInCluster for a Cluster using the plugin", func(ctx SpecContext) {
+	It("CNPG reports SetStatusInCluster and no reconciler hooks", func(ctx SpecContext) {
 		Eventually(func(g Gomega, ctx SpecContext) {
 			var cluster apiv1.Cluster
 			g.Expect(c.Get(ctx, client.ObjectKey{Namespace: ns, Name: clusterName}, &cluster)).To(Succeed())
@@ -96,7 +96,7 @@ var _ = Describe("the plugin environment", Ordered, Serial, ContinueOnFailure, f
 				return ps.Name == metadata.PluginName
 			})
 			g.Expect(i).To(BeNumerically(">=", 0), "no pluginStatus entry for %s", metadata.PluginName)
-			g.Expect(cluster.Status.PluginStatus[i].Capabilities).To(ContainElement(reconcilerHooks))
+			g.Expect(cluster.Status.PluginStatus[i].Capabilities).NotTo(ContainElement(reconcilerHooks))
 			g.Expect(cluster.Status.PluginStatus[i].OperatorCapabilities).To(ContainElement(setStatusInCluster))
 
 			status, ok, err := framework.PluginStatus(&cluster)

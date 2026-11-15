@@ -7,7 +7,6 @@ import (
 
 	"github.com/cloudnative-pg/cnpg-i/pkg/lifecycle"
 	cnpgoperator "github.com/cloudnative-pg/cnpg-i/pkg/operator"
-	"github.com/cloudnative-pg/cnpg-i/pkg/reconciler"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"go.opentelemetry.io/otel/attribute"
@@ -79,11 +78,11 @@ var _ = Describe("PluginMetrics", func() {
 
 		m.Hook("lifecycle", "create", "patched", 20*time.Millisecond)
 		m.Hook("lifecycle", "create", "patched", 40*time.Millisecond)
-		m.Hook("reconciler", "pre", "applied", time.Second)
+		m.Hook("operator", "set_status", "status", time.Second)
 
 		Expect(counts(m, hookCalls)).To(Equal(map[string]int64{
-			"operation=create,outcome=patched,service=lifecycle": 2,
-			"operation=pre,outcome=applied,service=reconciler":   1,
+			"operation=create,outcome=patched,service=lifecycle":   2,
+			"operation=set_status,outcome=status,service=operator": 1,
 		}))
 
 		got, ok := metricByName(m, hookDuration)
@@ -99,7 +98,7 @@ var _ = Describe("PluginMetrics", func() {
 			case "operation=create,service=lifecycle":
 				Expect(p.Count).To(BeEquivalentTo(2))
 				Expect(p.Sum).To(BeNumerically("~", 0.06, 1e-9))
-			case "operation=pre,service=reconciler":
+			case "operation=set_status,service=operator":
 				Expect(p.Count).To(BeEquivalentTo(1))
 			default:
 				Fail("unexpected attributes " + attrKey(p.Attributes))
@@ -246,28 +245,6 @@ var _ = Describe("hooks recording metrics", func() {
 			"operation=create,outcome=patched,service=lifecycle":   1,
 			"operation=evaluate,outcome=skipped,service=lifecycle": 1,
 			"operation=evaluate,outcome=error,service=lifecycle":   1,
-		}))
-	})
-
-	It("records the reconciler hooks", func(ctx context.Context) {
-		c := newClient(nil, interceptor.Funcs{})
-		r := &operator.Reconciler{Identity: &identity.Ensurer{Reader: c, Live: c, Writer: c}, Cache: c, Metrics: m}
-		cluster := newCluster("ns", "pg", ours(nil))
-
-		_, err := r.Pre(ctx, hookRequest(cluster))
-		Expect(err).NotTo(HaveOccurred())
-		_, err = r.Pre(ctx, hookRequest(cluster))
-		Expect(err).NotTo(HaveOccurred())
-		_, err = r.Post(ctx, hookRequest(cluster))
-		Expect(err).NotTo(HaveOccurred())
-		_, err = r.Post(ctx, &reconciler.ReconcilerHooksRequest{})
-		Expect(err).NotTo(HaveOccurred())
-
-		Expect(counts(m, hookCalls)).To(Equal(map[string]int64{
-			"operation=pre,outcome=applied,service=reconciler":   1,
-			"operation=pre,outcome=unchanged,service=reconciler": 1,
-			"operation=post,outcome=skipped,service=reconciler":  1,
-			"operation=post,outcome=error,service=reconciler":    1,
 		}))
 	})
 

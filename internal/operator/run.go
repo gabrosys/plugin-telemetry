@@ -8,7 +8,6 @@ import (
 	"github.com/cloudnative-pg/cnpg-i-machinery/pkg/pluginhelper/http"
 	"github.com/cloudnative-pg/cnpg-i/pkg/lifecycle"
 	"github.com/cloudnative-pg/cnpg-i/pkg/operator"
-	"github.com/cloudnative-pg/cnpg-i/pkg/reconciler"
 	"github.com/cloudnative-pg/machinery/pkg/log"
 	"google.golang.org/grpc"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -19,7 +18,7 @@ var (
 	// ErrInvalidOptions is returned when an Options field is empty.
 	ErrInvalidOptions = errors.New("server address, server cert, server key and client CA are all required")
 	// ErrInvalidDeps is returned when a Deps field the server needs is nil.
-	ErrInvalidDeps = errors.New("cache, reconciler and status are required")
+	ErrInvalidDeps = errors.New("cache and status are required")
 	// ErrCacheNotSynced is returned when the cache stops without syncing while ctx is still live.
 	ErrCacheNotSynced = errors.New("cache did not sync")
 	// ErrServerStopped is returned when the server stops while ctx is still live.
@@ -42,22 +41,21 @@ type ImageWaiter interface {
 
 // Deps are the collaborators the services share.
 type Deps struct {
-	Cache      cache.Cache
-	Client     client.Client
-	Reconciler *Reconciler
-	Status     *Status
+	Cache  cache.Cache
+	Client client.Client
+	Status *Status
 	// Metrics records the lifecycle hook calls; nil records nothing.
 	Metrics *PluginMetrics
 }
 
-// Run waits for the image and the cache, then serves Identity, OperatorLifecycle, ReconcilerHooks and
-// Operator until ctx ends. It returns nil when ctx ends and ErrServerStopped if the server stops first.
+// Run waits for the image and the cache, then serves Identity, OperatorLifecycle and Operator until ctx
+// ends. It returns nil when ctx ends and ErrServerStopped if the server stops first.
 // The cache must be started by the caller.
 func Run(ctx context.Context, opts Options, images ImageWaiter, deps Deps) error {
 	if opts.ServerAddress == "" || opts.ServerCertPath == "" || opts.ServerKeyPath == "" || opts.ClientCAPath == "" {
 		return ErrInvalidOptions
 	}
-	if deps.Cache == nil || deps.Reconciler == nil || deps.Status == nil {
+	if deps.Cache == nil || deps.Status == nil {
 		return ErrInvalidDeps
 	}
 
@@ -96,7 +94,6 @@ func Run(ctx context.Context, opts Options, images ImageWaiter, deps Deps) error
 		Enrichers: []http.ServerEnricher{
 			func(s *grpc.Server) error {
 				lifecycle.RegisterOperatorLifecycleServer(s, &Lifecycle{Images: images, Metrics: deps.Metrics})
-				reconciler.RegisterReconcilerHooksServer(s, deps.Reconciler)
 				operator.RegisterOperatorServer(s, deps.Status)
 
 				return nil

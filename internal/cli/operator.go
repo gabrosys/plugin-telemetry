@@ -30,7 +30,7 @@ func newOperatorCommand() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "operator",
-		Short: "Serve the CNPG-I Identity, OperatorLifecycle, ReconcilerHooks and Operator services over mTLS",
+		Short: "Serve the CNPG-I Identity, OperatorLifecycle and Operator services over mTLS",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if namespace == "" {
@@ -87,14 +87,8 @@ func newOperatorCommand() *cobra.Command {
 			})
 			g.Go(func() error {
 				return operator.Run(gctx, opts, store, operator.Deps{
-					Cache:  mgr.GetCache(),
-					Client: mgr.GetClient(),
-					Reconciler: &operator.Reconciler{
-						Identity: ensurer,
-						Cache:    mgr.GetCache(),
-						Timeout:  operator.DefaultPreTimeout,
-						Metrics:  metrics,
-					},
+					Cache:   mgr.GetCache(),
+					Client:  mgr.GetClient(),
 					Status:  &operator.Status{Reader: mgr.GetCache(), Identity: ensurer, Metrics: metrics},
 					Metrics: metrics,
 				})

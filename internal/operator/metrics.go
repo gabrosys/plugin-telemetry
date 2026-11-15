@@ -27,22 +27,23 @@ import (
 
 // Values of the service and operation attributes of the hook metrics.
 const (
-	serviceLifecycle  = "lifecycle"
-	serviceReconciler = "reconciler"
-	serviceOperator   = "operator"
+	serviceLifecycle = "lifecycle"
+	serviceOperator  = "operator"
 
 	operationCreate    = "create"
 	operationEvaluate  = "evaluate"
-	operationPre       = "pre"
-	operationPost      = "post"
 	operationSetStatus = "set_status"
 )
 
-// Outcomes of SetStatusInCluster and of identity reconciles, as recorded.
+// Outcomes of SetStatusInCluster, as recorded, and of identity reconciles, as recorded or logged.
 const (
-	outcomeNoop   = "noop"
-	outcomeStatus = "status"
-	outcomeOK     = "ok"
+	outcomeNoop      = "noop"
+	outcomeStatus    = "status"
+	outcomeOK        = "ok"
+	outcomeApplied   = "applied"
+	outcomeError     = "error"
+	outcomeRefused   = "refused"
+	outcomeBackedOff = "backed off"
 )
 
 const (

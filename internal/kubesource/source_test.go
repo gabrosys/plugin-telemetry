@@ -204,6 +204,31 @@ var _ = Describe("Source", func() {
 		watching("clusters/pg", "telemetryexporters/default", "secrets/h2")
 	})
 
+	DescribeTable("forgets the references of the last settings that built once there is no configuration",
+		func(idle *unstructured.Unstructured, missingExporter string, still ...string) {
+			start()
+			fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+			fw.set("telemetryexporters", "default", exporter(map[string]any{
+				"exporter": map[string]any{"endpoint": "http://c:4318", "headers": map[string]any{"name": "h1", "key": "h"}},
+			}))
+			fw.set("secrets", "h1", secret("h1", map[string]string{"h": "k=1"}))
+			_, _, err := src.Settings()
+			Expect(err).NotTo(HaveOccurred())
+
+			fw.set("clusters", "pg", idle)
+			if missingExporter != "" {
+				fw.set("telemetryexporters", missingExporter, nil)
+			}
+			Eventually(func() error { _, _, err := src.Settings(); return err }).Should(MatchError(engine.ErrNoConfiguration))
+			watching(still...)
+		},
+		Entry("the exporter is missing", enabledCluster(map[string]any{"exporter": "other"}), "other",
+			"clusters/pg", "telemetryexporters/other"),
+		Entry("the plugin is disabled",
+			cluster(clusterOpts{plugins: []any{pluginEntry(map[string]any{}, map[string]any{"enabled": false})}}), "",
+			"clusters/pg"),
+	)
+
 	It("drops reports from a watch that was stopped", func() {
 		withQuerySet := exporter(map[string]any{
 			"exporter": map[string]any{"endpoint": "http://c:4318"},
@@ -387,8 +412,9 @@ var _ = Describe("Source", func() {
 			}).Should(Equal(2))
 			Consistently(count, "100ms").Should(Equal(2))
 			mu.Lock()
-			Expect(notified[1].Sub(burst)).To(BeNumerically(">=", time.Second))
+			second := notified[1]
 			mu.Unlock()
+			Expect(second.Sub(burst)).To(BeNumerically(">=", time.Second))
 
 			fw.set("telemetryexporters", "default", exporter(nil))
 			Eventually(clk.HasWaiters).Should(BeTrue())

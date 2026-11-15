@@ -36,7 +36,7 @@ import (
 const (
 	debounce       = time.Second
 	tokenPollTime  = 5 * time.Second
-	snapshotRounds = 3 // the Cluster, then the exporter, then the exporter's references
+	snapshotRounds = 3 // the Cluster; the exporter and the Cluster's references; the exporter's references
 )
 
 var errNotSynced = errors.New("watch has not synced")
@@ -102,14 +102,15 @@ func Snapshot(ctx context.Context, o Options) (*Source, error) {
 		return nil, err
 	}
 	if client == nil {
-		return nil, fmt.Errorf("snapshot: %w", ctx.Err())
+		return nil, fmt.Errorf("wait for the sidecar token: %w", ctx.Err())
 	}
 
 	return s.snapshot(ctx, client)
 }
 
 // snapshot gets the wanted objects in rounds: the Cluster, then the exporter and the Cluster's references,
-// then the exporter's. A 404 is a missing object and a 403 a denied one; other errors are returned.
+// then the exporter's. A 404 is a missing object and a 403 a denied one; other errors, and the end of
+// ctx, are returned.
 func (s *Source) snapshot(ctx context.Context, client dynamic.Interface) (*Source, error) {
 	s.mu.Lock()
 	s.log = log.FromContext(ctx)
@@ -117,6 +118,10 @@ func (s *Source) snapshot(ctx context.Context, client dynamic.Interface) (*Sourc
 
 	var failures []error
 	for range snapshotRounds {
+		if err := ctx.Err(); err != nil {
+			failures = append(failures, fmt.Errorf("get the referenced objects: %w", err))
+			break
+		}
 		s.mu.Lock()
 		var gets []key
 		for k := range s.wantedLocked() {
@@ -149,7 +154,7 @@ func (s *Source) snapshot(ctx context.Context, client dynamic.Interface) (*Sourc
 		}
 	}
 	if err := errors.Join(failures...); err != nil {
-		return nil, fmt.Errorf("snapshot: %w", err)
+		return nil, err
 	}
 
 	return s, nil
@@ -204,22 +209,20 @@ func (s *Source) run(ctx context.Context, w watcher) {
 		s.reconcile(ctx, w)
 		select {
 		case <-ctx.Done():
-			s.stopAll()
+			s.reconcile(ctx, nil)
 			return
 		case <-s.replan:
 		}
 	}
 }
 
-type start struct {
-	k key
-	e *entry
-}
-
-// reconcile starts the watches the wanted set adds and stops those it drops.
+// reconcile starts with w the watches the wanted set adds and stops those it drops; a nil w stops all.
 func (s *Source) reconcile(ctx context.Context, w watcher) {
 	s.mu.Lock()
-	wanted := s.wantedLocked()
+	wanted := map[key]struct{}{}
+	if w != nil {
+		wanted = s.wantedLocked()
+	}
 	var stops []func()
 	for k, e := range s.entries {
 		if _, ok := wanted[k]; ok {
@@ -230,12 +233,12 @@ func (s *Source) reconcile(ctx context.Context, w watcher) {
 		}
 		delete(s.entries, k)
 	}
-	var starts []start
+	starts := map[key]*entry{}
 	for k := range wanted {
 		if _, ok := s.entries[k]; !ok {
 			e := &entry{}
 			s.entries[k] = e
-			starts = append(starts, start{k: k, e: e})
+			starts[k] = e
 		}
 	}
 	s.mu.Unlock()
@@ -243,27 +246,11 @@ func (s *Source) reconcile(ctx context.Context, w watcher) {
 	for _, stop := range stops {
 		stop()
 	}
-	for _, st := range starts {
-		stop := w(ctx, resources[st.k.kind], s.o.Namespace, st.k.name, s.handler(st.k, st.e))
+	for k, e := range starts {
+		stop := w(ctx, resources[k.kind], s.o.Namespace, k.name, s.handler(k, e))
 		s.mu.Lock()
-		st.e.stop = stop
+		e.stop = stop
 		s.mu.Unlock()
-	}
-}
-
-func (s *Source) stopAll() {
-	s.mu.Lock()
-	var stops []func()
-	for k, e := range s.entries {
-		if e.stop != nil {
-			stops = append(stops, e.stop)
-		}
-		delete(s.entries, k)
-	}
-	s.mu.Unlock()
-
-	for _, stop := range stops {
-		stop()
 	}
 }
 
@@ -469,7 +456,7 @@ func (s *Source) ReadFile(name string) ([]byte, error) {
 func (*Source) Sensitive(name string) bool { return strings.HasPrefix(name, "secret/") }
 
 // Settings builds the settings from the watched Cluster, exporter and the objects they name, and keeps
-// their references watched until settings that name others build. The bytes are the built settings as
+// their references watched until settings that name others build or there is no configuration. The bytes are the built settings as
 // JSON, which only the engine's digest reads.
 func (s *Source) Settings() (settings.Settings, []byte, error) {
 	s.mu.Lock()
@@ -477,6 +464,10 @@ func (s *Source) Settings() (settings.Settings, []byte, error) {
 
 	in, err := s.inputsLocked()
 	if err != nil {
+		if errors.Is(err, engine.ErrNoConfiguration) && s.lastGood.Cluster != "" {
+			s.lastGood = clusterconfig.Refs{}
+			s.askReplan()
+		}
 		return settings.Settings{}, nil, err
 	}
 	built, warnings, err := clusterconfig.Build(in)

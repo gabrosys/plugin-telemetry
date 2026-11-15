@@ -197,10 +197,27 @@ var _ = Describe("Snapshot", func() {
 			return false, nil, nil
 		})
 		_, err := snapshot()
-		Expect(err).To(MatchError(ContainSubstring("get configmaps envcm")))
+		Expect(err.Error()).To(HavePrefix("get configmaps envcm: "))
 		Expect(strings.Count(err.Error(), "etcd is down")).To(Equal(1))
 		Expect(gets()).To(ContainElement("configmaps/envcm"))
 		Expect(strings.Count(strings.Join(gets(), " "), "configmaps/envcm")).To(Equal(1))
 		Expect(logs.String()).NotTo(ContainSubstring("etcd is down"))
+	})
+
+	It("returns one context error promptly, and logs nothing, when ctx has ended", func() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		cancel()
+		done := make(chan error, 1)
+		go func() {
+			_, err := snapshot()
+			done <- err
+		}()
+		var err error
+		Eventually(done, "1s").Should(Receive(&err))
+		Expect(err).To(MatchError(context.Canceled))
+		Expect(strings.Count(err.Error(), context.Canceled.Error())).To(Equal(1))
+		Expect(gets()).To(BeEmpty())
+		Expect(logs.String()).To(BeEmpty())
 	})
 })

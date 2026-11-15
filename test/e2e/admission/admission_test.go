@@ -5,6 +5,7 @@ package admission_test
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"time"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
@@ -49,13 +50,14 @@ const (
 	probeName         = "probe.telemetry"
 	chainName         = "chain.telemetry"
 	clusterRoleName   = "admission-e2e.telemetry"
+	legacyName        = "legacy.telemetry"
 	timeout           = 2 * time.Minute
 
 	// Parts of the roles policy's messages, one per rule.
-	nameRule     = "named *.telemetry"
+	nameRule     = "named *.telemetry may be"
 	verbsRule    = "only get, list and watch"
-	roleRefRule  = "only to the Role of the same name"
-	subjectsRule = "only the ServiceAccount of the same name"
+	roleRefRule  = "only to the Role of its own name"
+	subjectsRule = "only the ServiceAccount of its own name"
 )
 
 var (
@@ -110,6 +112,16 @@ func pooler(namespace, name string) *apiv1.Pooler {
 // reserved matches an Invalid error raised by the reserved-names policy.
 func reserved() OmegaMatcher {
 	return SatisfyAll(Satisfy(apierrors.IsInvalid), MatchError(ContainSubstring(reservedPolicy)))
+}
+
+// denialText returns what a policy wrote in a denial, after the API server's own "denied request:" prefix.
+func denialText(err error) string {
+	GinkgoHelper()
+	Expect(err).To(HaveOccurred())
+	_, text, found := strings.Cut(err.Error(), "denied request: ")
+	Expect(found).To(BeTrue(), "not a policy denial: %v", err)
+
+	return text
 }
 
 func serviceAccountSubject(namespace, name string) rbacv1.Subject {
@@ -190,32 +202,32 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		}).WithContext(ctx).WithTimeout(timeout).WithPolling(time.Second).Should(Succeed())
 	})
 
-	createToken := func(ctx SpecContext, namespace string, secret *corev1.Secret) error {
+	dryRunCreateSecret := func(ctx SpecContext, namespace string, secret *corev1.Secret) error {
 		_, err := plugin.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{DryRun: dryRun})
 
 		return err
 	}
 
 	It("denies a token Secret for the namespace's default account", func(ctx SpecContext) {
-		Expect(createToken(ctx, ns, tokenSecret(ns, "default-token", "default"))).To(denied())
+		Expect(dryRunCreateSecret(ctx, ns, tokenSecret(ns, "default-token", "default"))).To(denied())
 	})
 
 	It("denies a token Secret for CNPG's adm account", func(ctx SpecContext) {
-		Expect(createToken(ctx, ns, tokenSecret(ns, "adm-token", clusterName))).To(denied())
+		Expect(dryRunCreateSecret(ctx, ns, tokenSecret(ns, "adm-token", clusterName))).To(denied())
 	})
 
 	It("denies a token Secret for kube-system/default", func(ctx SpecContext) {
-		Expect(createToken(ctx, "kube-system", tokenSecret("kube-system", "default-token", "default"))).To(denied())
+		Expect(dryRunCreateSecret(ctx, "kube-system", tokenSecret("kube-system", "default-token", "default"))).To(denied())
 	})
 
 	It("denies an Opaque Secret named adm.telemetry-token", func(ctx SpecContext) {
 		secret := tokenSecret(ns, telemetryToken, telemetryName)
 		secret.Type = corev1.SecretTypeOpaque
-		Expect(createToken(ctx, ns, secret)).To(denied())
+		Expect(dryRunCreateSecret(ctx, ns, secret)).To(denied())
 	})
 
 	It("denies a token Secret whose name isn't <account>-token", func(ctx SpecContext) {
-		Expect(createToken(ctx, ns, tokenSecret(ns, otherToken, telemetryName))).To(denied())
+		Expect(dryRunCreateSecret(ctx, ns, tokenSecret(ns, otherToken, telemetryName))).To(denied())
 	})
 
 	It("denies a ServiceAccount not ending in .telemetry", func(ctx SpecContext) {
@@ -290,8 +302,9 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 	})
 
 	It("denies the plugin's account a TokenRequest for a .telemetry account", func(ctx SpecContext) {
-		grant(ctx, c, "", tokenGrantName, pluginSubject, rbacv1.PolicyRule{
+		grant(ctx, c, ns, tokenGrantName, pluginSubject, rbacv1.PolicyRule{
 			APIGroups: []string{""}, Resources: []string{"serviceaccounts/token"}, Verbs: []string{"create"},
+			ResourceNames: []string{throwawayName},
 		})
 
 		throwaway := serviceAccount(ns, throwawayName)
@@ -356,21 +369,11 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 
 	// apply server-side applies a Role or RoleBinding as the plugin does, with force.
 	apply := func(ctx SpecContext, obj client.Object, dry []string) error {
+		GinkgoHelper()
 		data, err := json.Marshal(obj)
 		Expect(err).NotTo(HaveOccurred())
 
 		return patchAs(ctx, obj, types.ApplyPatchType, data, metav1.PatchOptions{Force: ptr.To(true), DryRun: dry})
-	}
-
-	// disown removes the owner references of a Role or RoleBinding as the plugin's back-off does, by a merge
-	// patch with optimistic lock.
-	disown := func(ctx SpecContext, obj, orig client.Object) error {
-		obj.SetOwnerReferences(nil)
-		patch := client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{})
-		data, err := patch.Data(obj)
-		Expect(err).NotTo(HaveOccurred())
-
-		return patchAs(ctx, obj, patch.Type(), data, metav1.PatchOptions{})
 	}
 
 	createRole := func(ctx SpecContext, role *rbacv1.Role, dry []string) error {
@@ -393,7 +396,15 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 	It("allows the identity's Role and RoleBinding for adm, applied as the plugin applies them", func(ctx SpecContext) {
 		role, binding := shape(ctx, baseRefs)
 		Expect(apply(ctx, role, nil)).To(Succeed())
-		Expect(apply(ctx, binding, nil)).To(Succeed())
+		// RBAC may not yet resolve the new Role the binding refers to.
+		Eventually(func(ctx SpecContext) error {
+			err := apply(ctx, binding, nil)
+			if err != nil && !apierrors.IsNotFound(err) {
+				StopTrying("the RoleBinding apply failed").Wrap(err).Now()
+			}
+
+			return err
+		}).WithContext(ctx).WithTimeout(timeout).WithPolling(time.Second).Should(Succeed())
 	})
 
 	It("allows applying the identity's Role again with a Secret to read", func(ctx SpecContext) {
@@ -468,31 +479,54 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		createBinding(ctx, binding).Should(deniedBy(subjectsRule))
 	})
 
-	It("allows an update that keeps CloudNativePG's write rules in a Role, as the collision back-off does", func(ctx SpecContext) {
-		var role rbacv1.Role
-		Expect(c.Get(ctx, key(telemetryName), &role)).To(Succeed())
-		// CloudNativePG v1.30.1 pkg/specs/roles.go:95-111, a rule the plugin doesn't hold.
-		role.Rules = append(role.Rules, rbacv1.PolicyRule{
-			APIGroups:     []string{apiv1.SchemeGroupVersion.Group},
-			Resources:     []string{"clusters/status"},
-			Verbs:         []string{"get", "patch", "update", "watch"},
-			ResourceNames: []string{clusterName},
-		})
-		role.OwnerReferences = desired(ctx, baseRefs).Role.OwnerReferences
-		Expect(c.Update(ctx, &role)).To(Succeed())
-
-		Expect(disown(ctx, role.DeepCopy(), &role)).To(Succeed())
+	It("denies a RoleBinding whose subject is a User", func(ctx SpecContext) {
+		binding := &rbacv1.RoleBinding{
+			ObjectMeta: meta(probeName),
+			RoleRef:    roleRef("Role", probeName),
+			Subjects:   []rbacv1.Subject{{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: probeName}},
+		}
+		createBinding(ctx, binding).Should(deniedBy(subjectsRule))
 	})
 
-	It("allows an update that keeps a RoleBinding's subjects, as the collision back-off does", func(ctx SpecContext) {
-		var binding rbacv1.RoleBinding
-		Expect(c.Get(ctx, key(telemetryName), &binding)).To(Succeed())
-		// A second subject, which only an unchanged list lets through.
-		binding.Subjects = append(binding.Subjects, serviceAccountSubject(ns, clusterName))
-		binding.OwnerReferences = desired(ctx, baseRefs).RoleBinding.OwnerReferences
-		Expect(c.Update(ctx, &binding)).To(Succeed())
+	It("denies a RoleBinding whose ServiceAccount subject has no namespace", func(ctx SpecContext) {
+		binding := &rbacv1.RoleBinding{
+			ObjectMeta: meta(probeName),
+			RoleRef:    roleRef("Role", probeName),
+			Subjects:   []rbacv1.Subject{serviceAccountSubject("", probeName)},
+		}
+		createBinding(ctx, binding).Should(deniedBy(subjectsRule))
+	})
 
-		Expect(disown(ctx, binding.DeepCopy(), &binding)).To(Succeed())
+	// The objects below are made by an admin, so they hold what the plugin's rules forbid.
+	createAsAdmin := func(ctx SpecContext, obj client.Object) {
+		GinkgoHelper()
+		Expect(c.Create(ctx, obj)).To(Succeed())
+		DeferCleanup(func(ctx SpecContext) {
+			Expect(client.IgnoreNotFound(c.Delete(ctx, obj))).To(Succeed())
+		})
+	}
+	labelPatch := []byte(`{"metadata":{"labels":{"label-only":"patch"}}}`)
+
+	It("denies a label-only patch of a Role that holds a write rule", func(ctx SpecContext) {
+		role := &rbacv1.Role{ObjectMeta: meta(legacyName), Rules: []rbacv1.PolicyRule{createSecrets}}
+		createAsAdmin(ctx, role)
+
+		err := patchAs(ctx, role, types.MergePatchType, labelPatch, metav1.PatchOptions{DryRun: dryRun})
+		Expect(err).To(deniedBy(verbsRule))
+	})
+
+	It("denies a label-only patch of a RoleBinding with a second subject", func(ctx SpecContext) {
+		// An update resolves the Role the binding refers to, and the plugin holds its rule through the grant.
+		createAsAdmin(ctx, &rbacv1.Role{ObjectMeta: meta(legacyName), Rules: []rbacv1.PolicyRule{createSecrets}})
+		binding := &rbacv1.RoleBinding{
+			ObjectMeta: meta(legacyName),
+			RoleRef:    roleRef("Role", legacyName),
+			Subjects:   []rbacv1.Subject{serviceAccountSubject(ns, legacyName), serviceAccountSubject(ns, "default")},
+		}
+		createAsAdmin(ctx, binding)
+
+		err := patchAs(ctx, binding, types.MergePatchType, labelPatch, metav1.PatchOptions{DryRun: dryRun})
+		Expect(err).To(deniedBy(subjectsRule))
 	})
 
 	It("denies a Role with * verbs", func(ctx SpecContext) {
@@ -619,6 +653,17 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		p := pooler(ns, "adm-sa-pooler")
 		p.Spec.ServiceAccountName = telemetryName
 		Expect(c.Create(ctx, p, client.DryRunAll)).To(rejected)
+	})
+
+	It("never repeats the policy name in a denial message", func(ctx SpecContext) {
+		_, identitiesErr := plugin.CoreV1().ServiceAccounts(ns).Create(ctx, serviceAccount(ns, "other"), metav1.CreateOptions{DryRun: dryRun})
+		rolesErr := createRole(ctx, &rbacv1.Role{ObjectMeta: meta("chain"), Rules: []rbacv1.PolicyRule{readConfigMaps}}, dryRun)
+		reservedErr := c.Create(ctx, pooler(ns, telemetryName), client.DryRunAll)
+
+		for policy, err := range map[string]error{policyName: identitiesErr, rolesPolicy: rolesErr, reservedPolicy: reservedErr} {
+			Expect(err).To(MatchError(ContainSubstring("'"+policy+"'")), "the API server names the policy")
+			Expect(denialText(err)).NotTo(ContainSubstring(policy))
+		}
 	})
 
 	It("leaves other users alone", func(ctx SpecContext) {

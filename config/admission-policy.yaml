@@ -17,8 +17,8 @@ spec:
   matchConditions:
     - name: plugin-or-identity-account
       expression: >-
-        request.userInfo.username == 'system:serviceaccount:cnpg-system:plugin-telemetry' ||
-          (request.userInfo.username.startsWith('system:serviceaccount:') &&
+        request.userInfo.username.startsWith('system:serviceaccount:') &&
+          (request.userInfo.username.endsWith(':plugin-telemetry') ||
             request.userInfo.username.endsWith('.telemetry'))
   variables:
     - name: tokenRequest
@@ -68,8 +68,8 @@ spec:
   matchConditions:
     - name: plugin-or-identity-account
       expression: >-
-        request.userInfo.username == 'system:serviceaccount:cnpg-system:plugin-telemetry' ||
-          (request.userInfo.username.startsWith('system:serviceaccount:') &&
+        request.userInfo.username.startsWith('system:serviceaccount:') &&
+          (request.userInfo.username.endsWith(':plugin-telemetry') ||
             request.userInfo.username.endsWith('.telemetry'))
   variables:
     - name: deleting

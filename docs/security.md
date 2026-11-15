@@ -40,7 +40,7 @@ Other facts:
 
 ## The plugin's rights
 
-The plugin runs as ServiceAccount `plugin-telemetry` in `cnpg-system`, bound to one ClusterRole (`config/rbac.yaml`):
+The plugin runs as ServiceAccount `plugin-telemetry` in the namespace of the CloudNativePG operator, `cnpg-system` by default: CloudNativePG finds plugins only there (`config/service.yaml`). It is bound to one ClusterRole (`config/rbac.yaml`):
 
 | API group | Resources | Verbs |
 |---|---|---|
@@ -59,7 +59,7 @@ Each sidecar runs with its own ServiceAccount. Its only rights are the read rule
 
 `config/admission-policy.yaml` defines three ValidatingAdmissionPolicies (ValidatingAdmissionPolicy v1), each with a binding that denies. All three have `failurePolicy: Fail` and bind every namespace. They ship in the default manifest (`config/kustomization.yaml`) and need Kubernetes 1.34 or later, the project's floor. Where they are not installed or not enforced, the ClusterRole table above is the only limit on the plugin.
 
-Two of them match a request only when the user is the plugin (`system:serviceaccount:cnpg-system:plugin-telemetry`) or any ServiceAccount user that ends in `.telemetry` (`system:serviceaccount:*:*.telemetry`, match condition `plugin-or-identity-account`). So they bind the plugin and the sidecar accounts, and no other user.
+Two of them match a request only when the user is a ServiceAccount whose name is `plugin-telemetry` or ends in `.telemetry`, in any namespace (`system:serviceaccount:*:plugin-telemetry` and `system:serviceaccount:*:*.telemetry`, match condition `plugin-or-identity-account`). No namespace is named, so the policies follow the plugin when CloudNativePG runs outside `cnpg-system`. They bind the plugin and the sidecar accounts, and no other user. A ServiceAccount named `plugin-telemetry` in another namespace is bound too.
 
 `plugin-telemetry-identities` covers Secrets and ServiceAccounts (create, update, delete) and TokenRequest (create on `serviceaccounts/token`):
 

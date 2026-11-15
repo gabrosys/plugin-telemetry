@@ -35,6 +35,26 @@ var _ = Describe("the admission policies", func() {
 	})
 })
 
+var _ = Describe("the policies' match conditions", func() {
+	It("find the plugin by account name in any namespace, as CNPG decides where the plugin runs", func() {
+		manifests, err := readManifests("config/admission-policy.yaml")
+		Expect(err).NotTo(HaveOccurred())
+
+		checked := 0
+		for _, m := range manifests {
+			for _, mc := range m.Spec.MatchConditions {
+				where := m.Metadata.Name + " " + mc.Name
+				Expect(mc.Expression).NotTo(ContainSubstring(pluginNamespace), where)
+				Expect(mc.Expression).To(ContainSubstring("startsWith('system:serviceaccount:')"), where)
+				Expect(mc.Expression).To(ContainSubstring("endsWith(':plugin-telemetry')"), where)
+				Expect(mc.Expression).To(ContainSubstring("endsWith('.telemetry')"), where)
+				checked++
+			}
+		}
+		Expect(checked).To(Equal(2))
+	})
+})
+
 var _ = Describe("the plugin Service", func() {
 	It("names the declared capabilities, so a change of them changes the Service and CNPG registers the plugin again", func(ctx context.Context) {
 		resp, err := operator.Identity{}.GetPluginCapabilities(ctx, &identity.GetPluginCapabilitiesRequest{})

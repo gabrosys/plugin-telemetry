@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/gabrosys/plugin-telemetry/compare/v0.3.0...v0.4.0) (2026-11-15)
+
+
+### Features
+
+* run the plugin and sidecar on kubernetes ([#8](https://github.com/gabrosys/plugin-telemetry/issues/8)) ([b265b69](https://github.com/gabrosys/plugin-telemetry/commit/b265b695aea3ea5f64325fb9f9502dcd14a1e280))
+
 ## [0.3.0](https://github.com/gabrosys/plugin-telemetry/compare/v0.2.0...v0.3.0) (2026-11-14)
 
 

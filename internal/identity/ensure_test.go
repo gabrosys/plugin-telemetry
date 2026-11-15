@@ -225,6 +225,7 @@ var _ = Describe("Ensurer", func() {
 
 		_, err := ensurer.Ensure(ctx, newCluster(), refs())
 		Expect(err).To(Satisfy(apierrors.IsConflict))
+		Expect(err).To(MatchError(identity.ErrInTheWay))
 		meta, ok := applies[roleName]["metadata"].(map[string]any)
 		Expect(ok).To(BeTrue())
 		Expect(meta).To(HaveKeyWithValue("resourceVersion", "17"))
@@ -261,6 +262,7 @@ var _ = Describe("Ensurer", func() {
 		wrote, err := ensurer.Ensure(ctx, newCluster(), refs())
 		Expect(err).To(MatchError(identity.ErrInTheWay))
 		Expect(err).To(MatchError(ContainSubstring(secretRef)))
+		Expect(err).To(MatchError(ContainSubstring("Opaque")))
 		Expect(wrote).To(BeEmpty())
 		Expect(calls).To(BeEmpty())
 	})

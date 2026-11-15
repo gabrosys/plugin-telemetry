@@ -68,7 +68,7 @@ func (c *IdentityController) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{RequeueAfter: requeueInTheWay}, nil
 	case err == nil:
 		if _, was := c.blocked.LoadAndDelete(req.NamespacedName); was {
-			logger.Info("identity controller", "outcome", outcomeInTheWay+" cleared", "cluster", req.NamespacedName)
+			logger.Info("identity controller", "outcome", outcomeInTheWay+" cleared")
 		}
 	}
 

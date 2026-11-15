@@ -20,7 +20,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
 )
 
-var errApply = errors.New("apply refused")
+var errGet = errors.New("get refused")
 
 func newClient(objs []client.Object, funcs interceptor.Funcs) client.Client {
 	GinkgoHelper()

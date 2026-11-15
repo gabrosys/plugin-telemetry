@@ -13,7 +13,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	metav1ac "k8s.io/client-go/applyconfigurations/meta/v1"
 	rbacv1ac "k8s.io/client-go/applyconfigurations/rbac/v1"
@@ -30,7 +29,7 @@ type Ensurer struct {
 	Writer client.Client
 }
 
-// ErrInTheWay means an identity object exists that the cache doesn't hold, or the cached token has another type.
+// ErrInTheWay means an identity object exists that the cache doesn't hold, the cached token has another type, or the stored copy changed since the cache read.
 var ErrInTheWay = errors.New("in the way of the identity")
 
 // step is one object: its empty cache copy, the desired object, whether the copy matches it, and its apply
@@ -39,7 +38,7 @@ type step struct {
 	cached client.Object
 	want   client.Object
 	same   func() bool
-	apply  func(uid types.UID, version string) runtime.ApplyConfiguration
+	apply  func() runtime.ApplyConfiguration
 }
 
 // Ensure visits ServiceAccount, Role, RoleBinding and token Secret in order. An object the cache lacks gets a
@@ -67,13 +66,16 @@ func (e *Ensurer) Ensure(ctx context.Context, c *apiv1.Cluster, refs clusterconf
 			if err != nil {
 				return wrote, fmt.Errorf("create %s in %s: %w", name, c.Namespace, err)
 			}
-		case wrongToken(s.cached):
-			return wrote, fmt.Errorf("%w: %s has another type than %s", ErrInTheWay, name, corev1.SecretTypeServiceAccountToken)
+		case wrongType(s.cached) != "":
+			return wrote, fmt.Errorf("%w: %s has type %s, not %s", ErrInTheWay, name, wrongType(s.cached), corev1.SecretTypeServiceAccountToken)
 		case s.same():
 			continue
 		default:
-			err = e.Writer.Apply(ctx, s.apply(s.cached.GetUID(), s.cached.GetResourceVersion()),
+			err = e.Writer.Apply(ctx, s.apply(),
 				client.FieldOwner(FieldOwner), client.ForceOwnership)
+			if apierrors.IsConflict(err) {
+				return wrote, fmt.Errorf("%w: %s: %w", ErrInTheWay, name, err)
+			}
 			if err != nil {
 				return wrote, fmt.Errorf("apply %s in %s: %w", name, c.Namespace, err)
 			}
@@ -110,7 +112,7 @@ func (e *Ensurer) Remove(ctx context.Context, namespace, cluster string) (int, e
 
 			continue
 		}
-		if !found || wrongToken(obj) {
+		if !found || wrongType(obj) != "" {
 			continue
 		}
 		err = e.deleteExact(ctx, obj)
@@ -139,8 +141,8 @@ func (e *Ensurer) Pending(ctx context.Context, namespace, cluster string) ([]str
 		switch {
 		case !found:
 			lines = append(lines, name+" is not in the plugin's cache: not created yet, or not the plugin's")
-		case wrongToken(obj):
-			lines = append(lines, fmt.Sprintf("%s has type %s, not %s: delete it", name, secret.Type, corev1.SecretTypeServiceAccountToken))
+		case wrongType(obj) != "":
+			lines = append(lines, fmt.Sprintf("%s has type %s, not %s: delete it", name, wrongType(obj), corev1.SecretTypeServiceAccountToken))
 		case isSecret && len(secret.Data[corev1.ServiceAccountTokenKey]) == 0:
 			lines = append(lines, name+" has no data.token yet")
 		}
@@ -162,11 +164,13 @@ func (e *Ensurer) cachedGet(ctx context.Context, obj client.Object) (bool, error
 	return true, nil
 }
 
-// wrongToken reports whether obj is a Secret that is not a service-account token.
-func wrongToken(obj client.Object) bool {
-	secret, ok := obj.(*corev1.Secret)
+// wrongType returns the type of obj when it is a Secret that is not a service-account token, else "".
+func wrongType(obj client.Object) corev1.SecretType {
+	if secret, ok := obj.(*corev1.Secret); ok && secret.Type != corev1.SecretTypeServiceAccountToken {
+		return secret.Type
+	}
 
-	return ok && secret.Type != corev1.SecretTypeServiceAccountToken
+	return ""
 }
 
 // deleteExact deletes obj only while it has the UID and resourceVersion it was read with.
@@ -205,8 +209,8 @@ func steps(w Objects) []step {
 			cached: sa,
 			want:   w.ServiceAccount,
 			same:   func() bool { return sameMeta(w.ServiceAccount.ObjectMeta, sa.ObjectMeta) },
-			apply: func(uid types.UID, version string) runtime.ApplyConfiguration {
-				return corev1ac.ServiceAccount(w.ServiceAccount.Name, w.ServiceAccount.Namespace).WithUID(uid).WithResourceVersion(version).
+			apply: func() runtime.ApplyConfiguration {
+				return corev1ac.ServiceAccount(w.ServiceAccount.Name, w.ServiceAccount.Namespace).WithUID(sa.UID).WithResourceVersion(sa.ResourceVersion).
 					WithLabels(w.ServiceAccount.Labels).WithOwnerReferences(ownerRefs(w.ServiceAccount.OwnerReferences)...)
 			},
 		},
@@ -216,8 +220,8 @@ func steps(w Objects) []step {
 			same: func() bool {
 				return sameMeta(w.Role.ObjectMeta, role.ObjectMeta) && equality.Semantic.DeepEqual(w.Role.Rules, role.Rules)
 			},
-			apply: func(uid types.UID, version string) runtime.ApplyConfiguration {
-				return rbacv1ac.Role(w.Role.Name, w.Role.Namespace).WithUID(uid).WithResourceVersion(version).
+			apply: func() runtime.ApplyConfiguration {
+				return rbacv1ac.Role(w.Role.Name, w.Role.Namespace).WithUID(role.UID).WithResourceVersion(role.ResourceVersion).
 					WithLabels(w.Role.Labels).WithOwnerReferences(ownerRefs(w.Role.OwnerReferences)...).
 					WithRules(policyRules(w.Role.Rules)...)
 			},
@@ -229,8 +233,8 @@ func steps(w Objects) []step {
 				return sameMeta(w.RoleBinding.ObjectMeta, binding.ObjectMeta) &&
 					w.RoleBinding.RoleRef == binding.RoleRef && slices.Equal(w.RoleBinding.Subjects, binding.Subjects)
 			},
-			apply: func(uid types.UID, version string) runtime.ApplyConfiguration {
-				return rbacv1ac.RoleBinding(w.RoleBinding.Name, w.RoleBinding.Namespace).WithUID(uid).WithResourceVersion(version).
+			apply: func() runtime.ApplyConfiguration {
+				return rbacv1ac.RoleBinding(w.RoleBinding.Name, w.RoleBinding.Namespace).WithUID(binding.UID).WithResourceVersion(binding.ResourceVersion).
 					WithLabels(w.RoleBinding.Labels).WithOwnerReferences(ownerRefs(w.RoleBinding.OwnerReferences)...).
 					WithRoleRef(rbacv1ac.RoleRef().WithAPIGroup(w.RoleBinding.RoleRef.APIGroup).
 						WithKind(w.RoleBinding.RoleRef.Kind).WithName(w.RoleBinding.RoleRef.Name)).
@@ -244,8 +248,8 @@ func steps(w Objects) []step {
 				return sameMeta(w.Token.ObjectMeta, token.ObjectMeta) &&
 					token.Annotations[corev1.ServiceAccountNameKey] == w.Token.Annotations[corev1.ServiceAccountNameKey]
 			},
-			apply: func(uid types.UID, version string) runtime.ApplyConfiguration {
-				return corev1ac.Secret(w.Token.Name, w.Token.Namespace).WithUID(uid).WithResourceVersion(version).
+			apply: func() runtime.ApplyConfiguration {
+				return corev1ac.Secret(w.Token.Name, w.Token.Namespace).WithUID(token.UID).WithResourceVersion(token.ResourceVersion).
 					WithType(w.Token.Type).WithAnnotations(w.Token.Annotations).
 					WithLabels(w.Token.Labels).WithOwnerReferences(ownerRefs(w.Token.OwnerReferences)...)
 			},

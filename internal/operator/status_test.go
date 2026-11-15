@@ -303,7 +303,7 @@ var _ = Describe("Status.SetStatusInCluster", func() {
 				return c.Get(ctx, key, obj, o...)
 			}
 
-			return errApply
+			return errGet
 		}
 
 		resp, err := status().SetStatusInCluster(ctx, hookStatusRequest(cluster))
@@ -313,7 +313,7 @@ var _ = Describe("Status.SetStatusInCluster", func() {
 
 	It("never returns an error when the cache fails", func() {
 		funcs.Get = func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-			return errApply
+			return errGet
 		}
 
 		resp, err := status().SetStatusInCluster(ctx, hookStatusRequest(cluster))

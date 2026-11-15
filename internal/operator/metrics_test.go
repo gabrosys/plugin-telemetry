@@ -278,7 +278,7 @@ var _ = Describe("hooks recording metrics", func() {
 
 		failing := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{
 			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-				return errApply
+				return errGet
 			},
 		})
 		ctrl = &operator.IdentityController{Client: failing, Identity: &identity.Ensurer{Reader: failing, Writer: failing}, Metrics: m}

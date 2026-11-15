@@ -53,7 +53,7 @@ func (s ClusterStatus) Healthy() bool {
 type Status struct {
 	operator.UnimplementedOperatorServer
 	Reader   client.Reader     // cached Clusters and exporters
-	Identity *identity.Ensurer // Ready gives the identity state
+	Identity *identity.Ensurer // Pending gives the identity state
 	Metrics  *PluginMetrics    // nil records nothing
 }
 
@@ -164,40 +164,19 @@ func (s *Status) compute(ctx context.Context, c *apiv1.Cluster, plugin apiv1.Plu
 		}
 	}
 
-	ready, identityProblems, err := s.identity(ctx, c)
+	pending, err := s.Identity.Pending(ctx, c.Namespace, c.Name)
 	if err != nil {
 		return ClusterStatus{}, fmt.Errorf("check identity of %s/%s: %w", c.Namespace, c.Name, err)
 	}
-	st.Identity = identityPending
-	if ready {
-		st.Identity = identityReady
+	st.Identity = identityReady
+	if len(pending) > 0 {
+		st.Identity = identityPending
 	}
-	problems = append(problems, identityProblems...)
+	problems = append(problems, pending...)
 	slices.Sort(problems)
 	st.Problems = problems
 
 	return st, nil
-}
-
-// identity reports whether the identity is ready and, when it is not, why the plugin applies none.
-func (s *Status) identity(ctx context.Context, c *apiv1.Cluster) (bool, []string, error) {
-	ready, err := s.Identity.Ready(ctx, c.Namespace, c.Name)
-	if err != nil {
-		return false, nil, fmt.Errorf("read identity: %w", err)
-	}
-	if ready {
-		return true, nil, nil
-	}
-	foreign, err := s.Identity.Foreign(ctx, c)
-	if err != nil {
-		return false, nil, fmt.Errorf("look for foreign identity objects: %w", err)
-	}
-	problems := make([]string, 0, len(foreign))
-	for _, obj := range foreign {
-		problems = append(problems, obj+" exists and is not managed by the plugin: no identity is applied")
-	}
-
-	return false, problems, nil
 }
 
 // storedStatus returns the status CloudNativePG holds for this plugin.

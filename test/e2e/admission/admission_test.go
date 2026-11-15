@@ -17,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
@@ -228,6 +229,24 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 			g.Expect(c.Get(ctx, client.ObjectKey{Namespace: ns, Name: telemetryToken}, &secret)).To(Succeed())
 			g.Expect(secret.Data[corev1.ServiceAccountTokenKey]).NotTo(BeEmpty())
 		}).WithContext(ctx).WithTimeout(timeout).WithPolling(time.Second).Should(Succeed())
+	})
+
+	It("refuses an apply pinned to a uid the stored ServiceAccount doesn't have, and one whose object is gone", func(ctx SpecContext) {
+		applyPinned := func(name string) error {
+			_, err := plugin.CoreV1().ServiceAccounts(ns).Apply(ctx,
+				corev1ac.ServiceAccount(name, ns).WithUID("00000000-0000-0000-0000-000000000000"),
+				metav1.ApplyOptions{FieldManager: identity.FieldOwner, Force: true, DryRun: dryRun})
+
+			return err
+		}
+
+		err := applyPinned(telemetryName)
+		Expect(err).To(Satisfy(apierrors.IsInvalid))
+		Expect(err).To(MatchError(ContainSubstring("metadata.uid")))
+
+		err = applyPinned("gone.telemetry")
+		Expect(err).To(Satisfy(apierrors.IsConflict))
+		Expect(err).To(MatchError(ContainSubstring("uid mismatch")))
 	})
 
 	It("denies an update that points adm.telemetry-token at another account", func(ctx SpecContext) {

@@ -2,7 +2,9 @@ package operator
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	"github.com/cloudnative-pg/machinery/pkg/log"
@@ -35,8 +37,12 @@ type IdentityController struct {
 	Metrics  *PluginMetrics // nil records nothing
 }
 
+// requeueInTheWay is the wait before Ensure retries after an object in the way; the cache may catch up
+// or the object's owner may be gone.
+const requeueInTheWay = 5 * time.Second
+
 // Reconcile ensures the identity of a Cluster that enables the plugin and removes it from one that does not.
-// It returns Ensure and Remove errors so the workqueue backs off, and never requeues on its own.
+// An object in the way requeues after 5 s; any other error goes to the workqueue's back-off.
 func (c *IdentityController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	err := c.reconcile(ctx, req)
 	outcome := outcomeOK
@@ -44,6 +50,12 @@ func (c *IdentityController) Reconcile(ctx context.Context, req ctrl.Request) (c
 		outcome = outcomeError
 	}
 	c.Metrics.IdentityReconcile(outcome)
+
+	if errors.Is(err, identity.ErrInTheWay) {
+		log.FromContext(ctx).Info("identity controller", "outcome", outcomeInTheWay, "reason", err.Error())
+
+		return ctrl.Result{RequeueAfter: requeueInTheWay}, nil
+	}
 
 	return ctrl.Result{}, err
 }
@@ -71,34 +83,26 @@ func (c *IdentityController) reconcile(ctx context.Context, req ctrl.Request) er
 		return c.remove(ctx, logger, &cluster)
 	}
 
-	res, err := c.Identity.Ensure(ctx, &cluster, refs)
+	wrote, err := c.Identity.Ensure(ctx, &cluster, refs)
+	if len(wrote) > 0 {
+		logger.Info("identity controller", "outcome", outcomeApplied, "objects", wrote)
+	}
 	if err != nil {
 		return fmt.Errorf("ensure identity of %s: %w", req.NamespacedName, err)
-	}
-	if len(res.Refused) > 0 {
-		logger.Info("identity controller", "outcome", outcomeRefused, "objects", res.Refused)
-	}
-	if len(res.Applied) > 0 {
-		logger.Info("identity controller", "outcome", outcomeApplied, "objects", res.Applied)
 	}
 
 	return nil
 }
 
-// remove deletes the identity when the cache still holds any of its objects.
+// remove deletes the identity objects the cache holds.
 func (c *IdentityController) remove(ctx context.Context, logger log.Logger, cluster *apiv1.Cluster) error {
-	present, err := c.Identity.Present(ctx, cluster.Namespace, cluster.Name)
+	removed, err := c.Identity.Remove(ctx, cluster.Namespace, cluster.Name)
+	if removed > 0 {
+		logger.Info("identity controller", "outcome", "removed")
+	}
 	if err != nil {
-		return fmt.Errorf("check identity of %s/%s: %w", cluster.Namespace, cluster.Name, err)
-	}
-	if !present {
-		return nil
-	}
-
-	if err := c.Identity.Remove(ctx, cluster.Namespace, cluster.Name); err != nil {
 		return fmt.Errorf("remove identity of %s/%s: %w", cluster.Namespace, cluster.Name, err)
 	}
-	logger.Info("identity controller", "outcome", "removed")
 
 	return nil
 }

@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
+	"github.com/gabrosys/plugin-telemetry/api/v1alpha1"
 	"github.com/gabrosys/plugin-telemetry/internal/clusterconfig"
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 )
@@ -26,8 +27,6 @@ const (
 	ClusterLabel = metadata.PluginName + "/cluster"
 	// FieldOwner is the server-side apply field manager.
 	FieldOwner = "plugin-telemetry"
-
-	cnpgGroup = "postgresql.cnpg.io"
 )
 
 // ErrNoUID is returned for a Cluster without a UID, which cannot own anything.
@@ -55,8 +54,8 @@ func Desired(c *apiv1.Cluster, refs clusterconfig.Refs) (Objects, error) {
 			Namespace: c.Namespace,
 			Labels:    map[string]string{ManagedByLabel: ManagedBy, ClusterLabel: c.Name},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion:         cnpgGroup + "/v1",
-				Kind:               "Cluster",
+				APIVersion:         apiv1.SchemeGroupVersion.String(),
+				Kind:               apiv1.ClusterKind,
 				Name:               c.Name,
 				UID:                c.UID,
 				Controller:         ptr.To(true),
@@ -96,9 +95,9 @@ func rules(refs clusterconfig.Refs) []rbacv1.PolicyRule {
 		})
 	}
 
-	add(cnpgGroup, "clusters", refs.Cluster)
-	add(metadata.PluginName, "telemetryexporters", refs.Exporter)
-	add(metadata.PluginName, "metricquerysets", refs.QuerySets...)
+	add(apiv1.SchemeGroupVersion.Group, "clusters", refs.Cluster)
+	add(v1alpha1.GroupVersion.Group, "telemetryexporters", refs.Exporter)
+	add(v1alpha1.GroupVersion.Group, "metricquerysets", refs.QuerySets...)
 	add("", "configmaps", refs.ConfigMaps...)
 	add("", "secrets", refs.Secrets...)
 

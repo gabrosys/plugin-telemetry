@@ -3,6 +3,7 @@ package operator_test
 import (
 	"context"
 	"sync/atomic"
+	"time"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	. "github.com/onsi/ginkgo/v2"
@@ -18,7 +19,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/gabrosys/plugin-telemetry/internal/identity"
-	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
 )
 
@@ -55,7 +55,7 @@ var _ = Describe("IdentityController", func() {
 				return cl.Apply(ctx, obj, opts...)
 			},
 		})
-		ctrl = &operator.IdentityController{Client: c, Identity: &identity.Ensurer{Reader: c, Live: c, Writer: c}}
+		ctrl = &operator.IdentityController{Client: c, Identity: &identity.Ensurer{Reader: c, Writer: c}}
 	}
 
 	reconcileOnce := func(ctx context.Context, namespace, name string) {
@@ -186,16 +186,20 @@ var _ = Describe("IdentityController", func() {
 	})
 
 	It("ensures the identity whatever other Clusters the namespace holds", func(ctx context.Context) {
-		build(newCluster("ns", "pg", ours(nil)), newCluster("ns", metadata.ServiceAccountName("pg")))
+		build(newCluster("ns", "pg", ours(nil)), newCluster("ns", "pg-telemetry"))
 		reconcileOnce(ctx, "ns", "pg")
 
 		Expect(identityExists(ctx, c, "pg")).To(Equal(allFour))
 	})
 
-	It("applies nothing and returns no error when an identity object isn't the plugin's", func(ctx context.Context) {
+	It("requeues after 5 s, with no error, while an object is in the way", func(ctx context.Context) {
 		build(newCluster("ns", "pg", ours(nil)), &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg.telemetry"}})
-		reconcileOnce(ctx, "ns", "pg")
+		ctrl.Identity = &identity.Ensurer{Reader: newClient(nil, interceptor.Funcs{}), Writer: c}
 
+		res, err := ctrl.Reconcile(ctx, requestFor("ns", "pg"))
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res).To(Equal(reconcile.Result{RequeueAfter: 5 * time.Second}))
 		Expect(identityExists(ctx, c, "pg")).To(Equal([4]bool{false, false, false, true}))
 		Expect(writes.Load()).To(BeZero())
 	})
@@ -210,11 +214,11 @@ var _ = Describe("IdentityController", func() {
 
 	It("returns the Ensure error so the workqueue backs off", func(ctx context.Context) {
 		failing := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{
-			Apply: func(context.Context, client.WithWatch, runtime.ApplyConfiguration, ...client.ApplyOption) error {
+			Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
 				return errApply
 			},
 		})
-		ctrl = &operator.IdentityController{Client: failing, Identity: &identity.Ensurer{Reader: failing, Live: failing, Writer: failing}}
+		ctrl = &operator.IdentityController{Client: failing, Identity: &identity.Ensurer{Reader: failing, Writer: failing}}
 
 		res, err := ctrl.Reconcile(ctx, requestFor("ns", "pg"))
 		Expect(err).To(MatchError(ContainSubstring("apply refused")))

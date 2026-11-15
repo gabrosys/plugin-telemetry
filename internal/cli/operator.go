@@ -57,7 +57,7 @@ func newOperatorCommand() *cobra.Command {
 				metrics = operator.NewPluginMetrics()
 			}
 
-			ensurer := &identity.Ensurer{Reader: mgr.GetCache(), Live: mgr.GetAPIReader(), Writer: mgr.GetClient()}
+			ensurer := &identity.Ensurer{Reader: mgr.GetCache(), Writer: mgr.GetClient()}
 			controller := &operator.IdentityController{Client: mgr.GetClient(), Identity: ensurer, Metrics: metrics}
 			if err := controller.SetupWithManager(mgr); err != nil {
 				return fmt.Errorf("register identity controller: %w", err)

@@ -37,12 +37,12 @@ const (
 
 // Outcomes of SetStatusInCluster, as recorded, and of identity reconciles, as recorded or logged.
 const (
-	outcomeNoop    = "noop"
-	outcomeStatus  = "status"
-	outcomeOK      = "ok"
-	outcomeApplied = "applied"
-	outcomeError   = "error"
-	outcomeRefused = "refused"
+	outcomeNoop     = "noop"
+	outcomeStatus   = "status"
+	outcomeOK       = "ok"
+	outcomeApplied  = "applied"
+	outcomeError    = "error"
+	outcomeInTheWay = "in the way"
 )
 
 const (

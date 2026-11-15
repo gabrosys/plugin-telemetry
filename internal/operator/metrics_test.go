@@ -11,6 +11,8 @@ import (
 	. "github.com/onsi/gomega"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
@@ -250,7 +252,7 @@ var _ = Describe("hooks recording metrics", func() {
 
 	It("records SetStatusInCluster as status, noop or error", func(ctx context.Context) {
 		c := newClient(nil, interceptor.Funcs{})
-		s := &operator.Status{Reader: c, Identity: &identity.Ensurer{Reader: c, Live: c, Writer: c}, Metrics: m}
+		s := &operator.Status{Reader: c, Identity: &identity.Ensurer{Reader: c, Writer: c}, Metrics: m}
 
 		_, err := s.SetStatusInCluster(ctx, hookStatusRequest(newCluster("ns", "pg", ours(nil))))
 		Expect(err).NotTo(HaveOccurred())
@@ -266,9 +268,9 @@ var _ = Describe("hooks recording metrics", func() {
 		}))
 	})
 
-	It("records identity reconciles as ok or error", func(ctx context.Context) {
+	It("records identity reconciles as ok or error, an object in the way as error", func(ctx context.Context) {
 		c := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{})
-		ctrl := &operator.IdentityController{Client: c, Identity: &identity.Ensurer{Reader: c, Live: c, Writer: c}, Metrics: m}
+		ctrl := &operator.IdentityController{Client: c, Identity: &identity.Ensurer{Reader: c, Writer: c}, Metrics: m}
 		_, err := ctrl.Reconcile(ctx, requestFor("ns", "pg"))
 		Expect(err).NotTo(HaveOccurred())
 		_, err = ctrl.Reconcile(ctx, requestFor("ns", "gone"))
@@ -279,10 +281,15 @@ var _ = Describe("hooks recording metrics", func() {
 				return errApply
 			},
 		})
-		ctrl = &operator.IdentityController{Client: failing, Identity: &identity.Ensurer{Reader: failing, Live: failing, Writer: failing}, Metrics: m}
+		ctrl = &operator.IdentityController{Client: failing, Identity: &identity.Ensurer{Reader: failing, Writer: failing}, Metrics: m}
 		_, err = ctrl.Reconcile(ctx, requestFor("ns", "pg"))
 		Expect(err).To(HaveOccurred())
 
-		Expect(counts(m, identityCount)).To(Equal(map[string]int64{"outcome=ok": 2, "outcome=error": 1}))
+		blocked := newClient([]client.Object{newCluster("ns", "pg", ours(nil)), &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg.telemetry"}}}, interceptor.Funcs{})
+		ctrl = &operator.IdentityController{Client: blocked, Identity: &identity.Ensurer{Reader: newClient(nil, interceptor.Funcs{}), Writer: blocked}, Metrics: m}
+		_, err = ctrl.Reconcile(ctx, requestFor("ns", "pg"))
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(counts(m, identityCount)).To(Equal(map[string]int64{"outcome=ok": 2, "outcome=error": 2}))
 	})
 })

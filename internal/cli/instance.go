@@ -18,7 +18,6 @@ import (
 
 	"github.com/gabrosys/plugin-telemetry/internal/engine"
 	"github.com/gabrosys/plugin-telemetry/internal/export"
-	"github.com/gabrosys/plugin-telemetry/internal/featuregate"
 	"github.com/gabrosys/plugin-telemetry/internal/kubesource"
 	"github.com/gabrosys/plugin-telemetry/internal/memlimit"
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
@@ -30,22 +29,11 @@ import (
 // instanceFlags are the flags every instance subcommand takes.
 type instanceFlags struct {
 	config string
-	gates  string
 }
 
 func (f *instanceFlags) add(cmd *cobra.Command) {
 	pf := cmd.PersistentFlags()
 	pf.StringVar(&f.config, "config", "", "engine settings file")
-	pf.StringVar(&f.gates, "feature-gates", "", `feature gates to switch, as "+id,-id"`)
-}
-
-// registry returns the feature gates with the --feature-gates overrides applied.
-func (f *instanceFlags) registry() (*featuregate.Registry, error) {
-	r := featuregate.NewRegistry()
-	if err := r.Set(f.gates); err != nil {
-		return nil, fmt.Errorf("--feature-gates: %w", err)
-	}
-	return r, nil
 }
 
 // kubeSource is the Kubernetes-backed engine configuration and the loop that keeps it current.
@@ -120,15 +108,11 @@ func newInstanceCommand() *cobra.Command {
 		Short: "Run the otel-metrics sidecar",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			gates, err := flags.registry()
-			if err != nil {
-				return err
-			}
 			ctx := cmd.Context()
 			logger := log.FromContext(ctx)
 			logger.Info("starting instance", "version", version.Version)
 			if flags.config != "" {
-				if err := runEngine(ctx, engine.FileConfig(flags.config), gates, nil); err != nil {
+				if err := runEngine(ctx, engine.FileConfig(flags.config), nil); err != nil {
 					return fmt.Errorf("run the engine: %w", err)
 				}
 
@@ -145,7 +129,7 @@ func newInstanceCommand() *cobra.Command {
 			}
 			src, err := newKubeSource(o)
 			if err == nil {
-				err = runEngine(ctx, src, gates, src.Start)
+				err = runEngine(ctx, src, src.Start)
 			}
 			if err != nil {
 				logger.Error(err, "the metrics engine stopped")
@@ -163,7 +147,7 @@ func newInstanceCommand() *cobra.Command {
 
 // runEngine clears the environment, sets the memory limit and runs the engine on cfg; background, when
 // set, runs beside it and either ending stops both.
-func runEngine(ctx context.Context, cfg engine.Config, gates *featuregate.Registry, background func(context.Context) error) error {
+func runEngine(ctx context.Context, cfg engine.Config, background func(context.Context) error) error {
 	logger := log.FromContext(ctx)
 	clearEnv(ctx)
 	if limit, err := setMemoryLimit(os.ReadFile, os.Getenv); err != nil {
@@ -175,7 +159,7 @@ func runEngine(ctx context.Context, cfg engine.Config, gates *featuregate.Regist
 	if err != nil {
 		return err
 	}
-	opts := engine.Options{Config: cfg, Gates: gates, Clock: clock.RealClock{}, Rand: rnd, Getenv: os.Getenv}
+	opts := engine.Options{Config: cfg, Clock: clock.RealClock{}, Rand: rnd, Getenv: os.Getenv}
 	if background == nil {
 		return engine.Run(ctx, opts) //nolint:wrapcheck // the caller adds the context
 	}

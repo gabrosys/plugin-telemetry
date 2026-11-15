@@ -26,7 +26,6 @@ import (
 
 	"github.com/gabrosys/plugin-telemetry/internal/executor"
 	"github.com/gabrosys/plugin-telemetry/internal/export"
-	"github.com/gabrosys/plugin-telemetry/internal/featuregate"
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
@@ -65,11 +64,10 @@ var ErrNilConfig = errors.New("no configuration given")
 
 // Options configure Run.
 type Options struct {
-	Config Config                // where the settings and the files they name are read
-	Gates  *featuregate.Registry // nil means no gate is set
-	Clock  clock.Clock           // nil means the real clock
-	Rand   *rand.Rand            // seeds the jitter of the scheduler and the export loop; nil means a random seed
-	Getenv func(string) string   // reads the downward-API variables of the resource; nil means os.Getenv
+	Config Config              // where the settings and the files they name are read
+	Clock  clock.Clock         // nil means the real clock
+	Rand   *rand.Rand          // seeds the jitter of the scheduler and the export loop; nil means a random seed
+	Getenv func(string) string // reads the downward-API variables of the resource; nil means os.Getenv
 }
 
 // Run blocks until ctx ends. An invalid configuration at start or on reload is logged;
@@ -127,7 +125,6 @@ type watchRun struct {
 
 type engine struct {
 	cfg    Config
-	gates  *featuregate.Registry
 	clk    clock.Clock
 	rnd    *rand.Rand // control goroutine only
 	getenv func(string) string
@@ -169,7 +166,6 @@ type engine struct {
 func newEngine(ctx context.Context, o Options) (*engine, error) {
 	e := &engine{
 		cfg:     o.Config,
-		gates:   o.Gates,
 		clk:     o.Clock,
 		rnd:     o.Rand,
 		getenv:  o.Getenv,
@@ -244,11 +240,6 @@ func (e *engine) newRand() *rand.Rand {
 func (e *engine) run(ctx context.Context) {
 	logger := log.FromContext(ctx)
 	logger.Info("starting the metrics engine", "config", e.cfg.Name(), "version", version.Version)
-	if e.gates != nil {
-		for _, g := range e.gates.List() {
-			logger.Info("feature gate", "id", g.ID, "stage", g.Stage, "enabled", g.Enabled)
-		}
-	}
 
 	schedCtx, stopSched := context.WithCancel(ctx)
 	schedDone := make(chan struct{})

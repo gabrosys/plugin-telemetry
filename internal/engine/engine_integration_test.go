@@ -25,7 +25,6 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/engine"
 	"github.com/gabrosys/plugin-telemetry/internal/export"
 	"github.com/gabrosys/plugin-telemetry/internal/export/otlptest"
-	"github.com/gabrosys/plugin-telemetry/internal/featuregate"
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
 	"github.com/gabrosys/plugin-telemetry/test/pgtest"
 )
@@ -134,7 +133,6 @@ func (f *fixture) run() {
 	go func() {
 		f.done <- engine.Run(ctx, engine.Options{
 			Config: engine.FileConfig(f.config),
-			Gates:  featuregate.NewRegistry(),
 			Clock:  clock.RealClock{},
 			Rand:   rand.New(rand.NewPCG(1, 2)), //nolint:gosec // seeded jitter for the test
 			Getenv: func(string) string { return "" },

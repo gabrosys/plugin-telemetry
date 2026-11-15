@@ -37,23 +37,6 @@ func testdata(name string) string {
 	return abs
 }
 
-var _ = Describe("instance --feature-gates", func() {
-	It("fails on an unknown gate before doing anything else", func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_, err := execute(ctx, "instance", "--feature-gates", "+unknown")
-		Expect(err).To(MatchError(ContainSubstring("unknown")))
-		Expect(ctx.Err()).NotTo(HaveOccurred())
-	})
-
-	It("is accepted by every subcommand", func() {
-		for _, sub := range []string{"validate", "test", "print-config"} {
-			_, err := execute(context.Background(), "instance", sub, "--config", testdata("engine-valid.yaml"), "--feature-gates", "+unknown")
-			Expect(err).To(MatchError(ContainSubstring("unknown feature gate")), sub)
-		}
-	})
-})
-
 var _ = Describe("instance --config", func() {
 	It("applies the memory limit and runs the engine until its context ends", func() {
 		calls := 0

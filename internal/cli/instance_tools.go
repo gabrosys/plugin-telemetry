@@ -20,7 +20,6 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/engine"
 	"github.com/gabrosys/plugin-telemetry/internal/executor"
 	"github.com/gabrosys/plugin-telemetry/internal/export"
-	"github.com/gabrosys/plugin-telemetry/internal/featuregate"
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
@@ -74,9 +73,6 @@ func newValidateCommand(flags *instanceFlags) *cobra.Command {
 		Short: "Check the settings and the query sources without connecting",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if _, err := flags.registry(); err != nil {
-				return err
-			}
 			open, err := flags.open()
 			if err != nil {
 				return err
@@ -194,9 +190,6 @@ func newTestCommand(flags *instanceFlags) *cobra.Command {
 		Short: "Run every planned query once and print the series",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if _, err := flags.registry(); err != nil {
-				return err
-			}
 			open, err := flags.open()
 			if err != nil {
 				return err
@@ -336,19 +329,15 @@ func newPrintConfigCommand(flags *instanceFlags) *cobra.Command {
 	var offline bool
 	cmd := &cobra.Command{
 		Use:   "print-config",
-		Short: "Print the effective settings, the sources, the feature gates and the plan",
+		Short: "Print the effective settings, the sources and the plan",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			gates, err := flags.registry()
-			if err != nil {
-				return err
-			}
 			open, err := flags.open()
 			if err != nil {
 				return err
 			}
 
-			return printConfig(cmd.Context(), cmd.OutOrStdout(), open, gates, offline)
+			return printConfig(cmd.Context(), cmd.OutOrStdout(), open, offline)
 		},
 	}
 	cmd.Flags().BoolVar(&offline, "offline", false, "do not connect: print the queries that need no facts to be skipped")
@@ -356,12 +345,12 @@ func newPrintConfigCommand(flags *instanceFlags) *cobra.Command {
 	return cmd
 }
 
-func printConfig(ctx context.Context, w io.Writer, open func(context.Context) (engine.Config, error), gates *featuregate.Registry, offline bool) error {
+func printConfig(ctx context.Context, w io.Writer, open func(context.Context) (engine.Config, error), offline bool) error {
 	c, err := openConfig(ctx, open)
 	if err != nil {
 		return err
 	}
-	out, err := describe(c, gates)
+	out, err := describe(c)
 	if err != nil {
 		return err
 	}
@@ -389,8 +378,8 @@ func printConfig(ctx context.Context, w io.Writer, open func(context.Context) (e
 	return connectErr
 }
 
-// describe renders the settings, the headers, the sources and the feature gates.
-func describe(c *config, gates *featuregate.Registry) (string, error) {
+// describe renders the settings, the headers, the sources.
+func describe(c *config) (string, error) {
 	var b strings.Builder
 	shown := c.settings
 	shown.Exporter.Endpoint = settings.RedactEndpoint(shown.Exporter.Endpoint)
@@ -419,11 +408,6 @@ func describe(c *config, gates *featuregate.Registry) (string, error) {
 			continue
 		}
 		fmt.Fprintf(&b, "%s %s: %v\n", st.Outcome, st.Source, strings.ReplaceAll(fmt.Sprint(st.Err), "\n", " "))
-	}
-
-	b.WriteString("# feature gates\n")
-	for _, g := range gates.List() {
-		fmt.Fprintf(&b, "%s %s enabled=%t\n", g.ID, g.Stage, g.Enabled)
 	}
 
 	return b.String(), nil

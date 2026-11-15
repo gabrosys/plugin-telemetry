@@ -14,10 +14,12 @@ import (
 	"maps"
 	"math/big"
 	mathrand "math/rand/v2"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
@@ -26,6 +28,7 @@ import (
 	. "github.com/onsi/gomega"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
+	"k8s.io/utils/clock"
 	clocktesting "k8s.io/utils/clock/testing"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -170,8 +173,8 @@ exporter:
     keyFile: /mem/tls.key
 `
 
-// httpSettings exports to endpoint every interval, with the headers of /mem/headers.
-func httpSettings(endpoint string, interval time.Duration) string {
+// httpSettings exports to endpoint every second, with the headers of /mem/headers.
+func httpSettings(endpoint string) string {
 	return fmt.Sprintf(`cluster: mem
 postgres:
   host: 127.0.0.1
@@ -182,9 +185,9 @@ sources:
   - /mem/queries.yaml
 exporter:
   endpoint: %s/v1/metrics
-  interval: %s
+  interval: 1s
   headersFile: /mem/headers
-`, endpoint, interval)
+`, endpoint)
 }
 
 // selfSigned returns a certificate and its key, PEM encoded.
@@ -233,15 +236,45 @@ func unreachable(context.Context, int) (planner.Facts, error) {
 	return planner.Facts{}, fmt.Errorf("acquire a connection: %w", fs.ErrNotExist)
 }
 
+// fastSettings is httpSettings with a planning cycle and a query interval of one second.
+func fastSettings(endpoint string) string {
+	return strings.Replace(httpSettings(endpoint), "defaultInterval: 30s\n", "defaultInterval: 1s\nplanInterval: 1s\n", 1)
+}
+
 // harness runs the engine through RunWith on a fake clock, exporting to an OTLP/HTTP receiver.
 type harness struct {
 	cfg *memConfig
 	clk *clocktesting.FakeClock
 	srv *otlptest.Server
 
-	mu     sync.Mutex // guards lines and rounds
-	lines  []string
-	rounds []time.Time // when each facts round started
+	mu          sync.Mutex // guards lines, rounds and factsTimers
+	lines       []string
+	rounds      []time.Time     // when each facts round started
+	factsTimers []time.Duration // what the engine armed its facts timer with, in order
+}
+
+// factsClock is the fake clock; it records each timer the engine's setFactsTimer creates.
+type factsClock struct {
+	*clocktesting.FakeClock
+	h *harness
+}
+
+func (c factsClock) NewTimer(d time.Duration) clock.Timer {
+	pcs := make([]uintptr, 8)
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
+	for {
+		f, more := frames.Next()
+		if strings.HasSuffix(f.Function, "engine.(*engine).setFactsTimer") {
+			c.h.mu.Lock()
+			c.h.factsTimers = append(c.h.factsTimers, d)
+			c.h.mu.Unlock()
+			break
+		}
+		if !more {
+			break
+		}
+	}
+	return c.FakeClock.NewTimer(d)
 }
 
 // run starts the engine on the Config cfg returns for the receiver's URL; facts answers its facts rounds.
@@ -268,7 +301,7 @@ func run(cfg func(url string) *memConfig, facts factsFunc) *harness {
 	go func() {
 		done <- engine.RunWith(ctx, engine.Options{
 			Config: h.cfg,
-			Clock:  h.clk,
+			Clock:  factsClock{FakeClock: h.clk, h: h},
 			Rand:   mathrand.New(mathrand.NewPCG(1, 2)), //nolint:gosec // seeded jitter for the test
 			Getenv: func(string) string { return "" },
 		}, gather)
@@ -321,10 +354,23 @@ func (h *harness) roundTimes() []time.Time {
 // advance moves the fake clock forward in steps of 100 ms until cond holds.
 func (h *harness) advance(cond func() bool) {
 	GinkgoHelper()
+	h.advanceBy(100*time.Millisecond, cond)
+}
+
+// advanceBy moves the fake clock forward in steps of step until cond holds.
+func (h *harness) advanceBy(step time.Duration, cond func() bool) {
+	GinkgoHelper()
 	Eventually(func() bool {
-		h.clk.Step(100 * time.Millisecond)
+		h.clk.Step(step)
 		return cond()
-	}).WithTimeout(20 * time.Second).WithPolling(10 * time.Millisecond).Should(BeTrue())
+	}).WithTimeout(20 * time.Second).WithPolling(2 * time.Millisecond).Should(BeTrue())
+}
+
+// timersArmed returns the durations the engine armed its facts timer with so far.
+func (h *harness) timersArmed() []time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.factsTimers)
 }
 
 // reload notifies the engine and returns once it has handled that notification.
@@ -426,6 +472,22 @@ func last(srv *otlptest.Server, name string, want map[string]string) (float64, b
 	return value, found
 }
 
+// metricMeta returns the unit and the description of the metric called name in the last request that has it.
+func metricMeta(srv *otlptest.Server, name string) (unit, description string, found bool) {
+	for _, req := range srv.Requests() {
+		for _, rm := range req.Metrics.GetResourceMetrics() {
+			for _, sm := range rm.GetScopeMetrics() {
+				for _, m := range sm.GetMetrics() {
+					if m.GetName() == name {
+						unit, description, found = m.GetUnit(), m.GetDescription(), true
+					}
+				}
+			}
+		}
+	}
+	return unit, description, found
+}
+
 // metricNames lists the names of the metrics received, sorted.
 func metricNames(srv *otlptest.Server) []string {
 	seen := map[string]bool{}
@@ -472,7 +534,7 @@ var _ = Describe("An engine on an in-memory Config", func() {
 	generation := func(g string) map[string]string { return map[string]string{"generation": g} }
 
 	It("reloads on a settings or sources change and not on identical bytes", func() {
-		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url, time.Second), httpFiles()) }, unreachable)
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) }, unreachable)
 		loads := map[string]string{"source": "mem", "outcome": "ok"}
 		h.advance(h.has("cnpg_otel_config_loads_total", loads, 1))
 		h.advance(h.has("cnpg_otel_config_info", generation("1"), 1))
@@ -499,7 +561,7 @@ var _ = Describe("An engine on an in-memory Config", func() {
 	})
 
 	It("keeps the last good configuration when the settings become invalid", func() {
-		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url, time.Second), httpFiles()) }, primary)
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) }, primary)
 		alpha := map[string]string{"query": "alpha"}
 		h.advance(h.has("cnpg_otel_query_interval_seconds", alpha, 30))
 
@@ -513,7 +575,19 @@ var _ = Describe("An engine on an in-memory Config", func() {
 	})
 
 	It("idles on ErrNoConfiguration, logs its reason once per change and resumes", func() {
-		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url, time.Second), httpFiles()) }, primary)
+		var hold atomic.Bool // set, a facts round waits for release
+		release := make(chan struct{})
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) },
+			func(ctx context.Context, round int) (planner.Facts, error) {
+				if hold.Load() {
+					select {
+					case <-release:
+					case <-ctx.Done():
+						return planner.Facts{}, ctx.Err()
+					}
+				}
+				return primary(ctx, round)
+			})
 		h.advance(h.has("cnpg_collector_up", map[string]string{"cluster": "mem"}, 1))
 
 		for _, reason := range []string{"reason one", "reason one", "reason two", "reason two", "reason one"} {
@@ -531,12 +605,20 @@ var _ = Describe("An engine on an in-memory Config", func() {
 		Consistently(func() int { return len(h.requests()) }).WithTimeout(300*time.Millisecond).
 			Should(BeNumerically("<=", idle+1), "the export loop stops; one export may have been in flight")
 
+		hold.Store(true)
 		h.cfg.set(func() { h.cfg.noConfig = "" })
 		h.reload()
-		resumed := time.Now()
+		resumed := len(h.requests())
+		h.advance(func() bool { return len(h.requests()) >= resumed+2 })
+		for _, req := range h.requests()[resumed:] {
+			Expect(requestPoints(req, "cnpg_collector_up")).To(BeEmpty(), "the idle forgot cnpg_collector_up")
+		}
+
+		close(release)
 		h.advance(func() bool {
-			up := points(h.srv, "cnpg_collector_up", resumed)
-			return len(up) > 0 && up[len(up)-1].value == 1
+			reqs := h.requests()
+			up := requestPoints(reqs[len(reqs)-1], "cnpg_collector_up")
+			return len(up) > 0 && up[0].value == 1
 		})
 		Expect(h.logged(`"msg"="configuration applied"`)).To(Equal(2))
 
@@ -546,7 +628,7 @@ var _ = Describe("An engine on an in-memory Config", func() {
 	})
 
 	It("marks a denied source denied and keeps its last good version", func() {
-		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url, time.Second), httpFiles()) }, primary)
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) }, primary)
 		alpha := map[string]string{"query": "alpha"}
 		h.advance(h.has("cnpg_otel_query_interval_seconds", alpha, 30))
 
@@ -584,7 +666,7 @@ var _ = Describe("An engine on an in-memory Config", func() {
 
 	It("logs a Watch that returns early and restarts it after 5 s", func() {
 		h := run(func(url string) *memConfig {
-			c := newMemConfig(httpSettings(url, time.Second), httpFiles())
+			c := newMemConfig(httpSettings(url), httpFiles())
 			c.watchErr = []error{errors.New("watch broke")}
 			return c
 		}, unreachable)
@@ -597,6 +679,19 @@ var _ = Describe("An engine on an in-memory Config", func() {
 		Expect(h.cfg.watchCalls()).To(Equal(2))
 	})
 
+	It("logs a Watch that keeps returning early once per error, and its recovery once", func() {
+		h := run(func(url string) *memConfig {
+			c := newMemConfig(httpSettings(url), httpFiles())
+			c.watchErr = []error{errors.New("watch broke"), errors.New("watch broke"), errors.New("watch broke again")}
+			return c
+		}, unreachable)
+		h.advanceBy(time.Second, func() bool { return h.cfg.watchCalls() == 4 })
+		Eventually(h.cfg.watching).Should(BeTrue())
+		Eventually(func() int { return h.logged("watching the configuration again") }).Should(Equal(1))
+		Expect(h.logged(`"error"="watch broke"`)).To(Equal(1))
+		Expect(h.logged(`"error"="watch broke again"`)).To(Equal(1))
+	})
+
 	header := func(h *harness, value string) func() bool {
 		return func() bool {
 			reqs := h.requests()
@@ -605,7 +700,7 @@ var _ = Describe("An engine on an in-memory Config", func() {
 	}
 
 	It("rebuilds the exporter when its header file changes and keeps the generation", func() {
-		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url, time.Second), httpFiles()) }, unreachable)
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) }, unreachable)
 		h.advance(header(h, "1"))
 
 		h.cfg.set(func() { h.cfg.files["/mem/headers"] = "a=2" })
@@ -618,7 +713,7 @@ var _ = Describe("An engine on an in-memory Config", func() {
 	})
 
 	It("keeps the exporter in force when a changed exporter file is invalid", func() {
-		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url, time.Second), httpFiles()) }, unreachable)
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) }, unreachable)
 		h.advance(header(h, "1"))
 
 		h.cfg.set(func() { h.cfg.files["/mem/headers"] = "a" })

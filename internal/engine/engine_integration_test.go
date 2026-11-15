@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -23,6 +24,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/export"
 	"github.com/gabrosys/plugin-telemetry/internal/export/otlptest"
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
+	"github.com/gabrosys/plugin-telemetry/internal/settings"
 	"github.com/gabrosys/plugin-telemetry/test/pgtest"
 )
 
@@ -125,11 +127,17 @@ exporter:
 // run starts the engine and stops it at cleanup.
 func (f *fixture) run() {
 	GinkgoHelper()
+	f.runConfig(engine.FileConfig(f.config))
+}
+
+// runConfig starts the engine on cfg and stops it at cleanup.
+func (f *fixture) runConfig(cfg engine.Config) {
+	GinkgoHelper()
 	ctx, cancel := context.WithCancel(ctrllog.IntoContext(context.Background(), GinkgoLogr))
 	f.done = make(chan error, 1)
 	go func() {
 		f.done <- engine.Run(ctx, engine.Options{
-			Config: engine.FileConfig(f.config),
+			Config: cfg,
 			Clock:  clock.RealClock{},
 			Rand:   rand.New(rand.NewPCG(1, 2)), //nolint:gosec // seeded jitter for the test
 			Getenv: func(string) string { return "" },
@@ -285,6 +293,45 @@ var _ = Describe("Run on a change of the postgres user", func() {
 			WithTimeout(10 * time.Second).WithPolling(50 * time.Millisecond).Should(BeNumerically(">", 0))
 		Eventually(func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "idle") }).
 			WithTimeout(2 * time.Second).WithPolling(50 * time.Millisecond).Should(BeZero())
+		// hold_probe's busy connection closes when its run releases it.
+		Eventually(func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "") }).
+			WithTimeout(8 * time.Second).WithPolling(100 * time.Millisecond).Should(BeZero())
+	}, SpecTimeout(time.Minute))
+})
+
+// switchable is a Config that has nothing to run while off is set.
+type switchable struct {
+	engine.Config
+	off atomic.Bool
+}
+
+func (c *switchable) Settings() (settings.Settings, []byte, error) {
+	if c.off.Load() {
+		return settings.Settings{}, nil, fmt.Errorf("%w: switched off", engine.ErrNoConfiguration)
+	}
+	return c.Config.Settings()
+}
+
+var _ = Describe("Run on ErrNoConfiguration", func() {
+	It("closes the pool's connections and resumes on the next settings", func(ctx SpecContext) {
+		f := newFixture(time.Second)
+		writeFile(f.config, f.valid)
+		cfg := &switchable{Config: engine.FileConfig(f.config)}
+		f.runConfig(cfg)
+		Eventually(expectUp(f.srv, 1)).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+		Eventually(func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "") }).
+			WithTimeout(5 * time.Second).Should(BeNumerically(">", 0))
+
+		cfg.off.Store(true)
+		writeFile(f.config, f.valid+"# touched\n")
+		Eventually(func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "") }).
+			WithTimeout(10 * time.Second).WithPolling(100 * time.Millisecond).Should(BeZero())
+
+		cfg.off.Store(false)
+		since := time.Now()
+		writeFile(f.config, f.valid)
+		Eventually(func() []point { return points(f.srv, "cnpg_backends_total", since) }).
+			WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).ShouldNot(BeEmpty())
 	}, SpecTimeout(time.Minute))
 })
 

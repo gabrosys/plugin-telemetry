@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -41,7 +40,7 @@ var _ = Describe("Planning", func() {
 
 	It("plans nothing before the first facts", func() {
 		release := make(chan struct{})
-		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url, time.Second), httpFiles()) },
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) },
 			func(ctx context.Context, round int) (planner.Facts, error) {
 				if round == 0 {
 					select {
@@ -61,7 +60,7 @@ var _ = Describe("Planning", func() {
 	})
 
 	It("replans when the sources or the settings change, and not when they stay", func() {
-		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url, time.Second), httpFiles()) }, primary)
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) }, primary)
 		h.advance(func() bool { return plans(h)() == 1 })
 
 		h.reload()
@@ -82,7 +81,7 @@ var _ = Describe("Planning", func() {
 
 	It("replans when the facts change and not when they repeat", func() {
 		var standby atomic.Bool
-		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url, time.Second), httpFiles()) },
+		h := run(func(url string) *memConfig { return newMemConfig(fastSettings(url), httpFiles()) },
 			func(context.Context, int) (planner.Facts, error) {
 				f := memPrimary
 				f.InRecovery = standby.Load()

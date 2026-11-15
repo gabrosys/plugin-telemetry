@@ -15,8 +15,10 @@ import (
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/gabrosys/plugin-telemetry/internal/engine"
+	"github.com/gabrosys/plugin-telemetry/internal/executor"
 	"github.com/gabrosys/plugin-telemetry/internal/export"
 	"github.com/gabrosys/plugin-telemetry/internal/export/otlptest"
+	"github.com/gabrosys/plugin-telemetry/internal/pg"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
@@ -60,7 +62,7 @@ var _ = Describe("The meter provider", func() {
 var _ = Describe("cnpg_collector_up", func() {
 	It("is absent before the first facts round, then follows the last one", func() {
 		release := make(chan struct{})
-		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url, time.Second), httpFiles()) },
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) },
 			func(ctx context.Context, round int) (planner.Facts, error) {
 				switch round {
 				case 0:
@@ -82,6 +84,10 @@ var _ = Describe("cnpg_collector_up", func() {
 		h.advance(h.has("cnpg_collector_up", map[string]string{"cluster": "mem"}, 0))
 		up := points(h.srv, "cnpg_collector_up", time.Time{})
 		Expect(up[len(up)-1].attrs).To(Equal(map[string]string{"cluster": "mem"}))
+		unit, description, found := metricMeta(h.srv, "cnpg_collector_up")
+		Expect(found).To(BeTrue())
+		Expect(unit).To(BeEmpty())
+		Expect(description).To(Equal("1 if PostgreSQL is up, 0 otherwise."))
 	})
 })
 
@@ -95,39 +101,33 @@ func gaps(times []time.Time) []time.Duration {
 }
 
 var _ = Describe("Facts rounds", func() {
-	It("back off 1s, 2s, 4s ... capped at the planning cycle, and start over on a new pool", func() {
-		// A day between exports keeps the export loop's timer out of the way; then the engine waits on two
-		// timers, the export loop's and the facts timer, whenever it is idle.
-		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url, 24*time.Hour), httpFiles()) }, unreachable)
-		idle := func() {
-			GinkgoHelper()
-			Eventually(h.clk.Waiters).WithTimeout(5 * time.Second).Should(Equal(2))
-		}
-		// drive moves the clock forward by d in steps of 100 ms, letting the engine settle after each.
-		drive := func(d time.Duration) {
-			GinkgoHelper()
-			for elapsed := time.Duration(0); elapsed <= d; elapsed += 100 * time.Millisecond {
-				idle()
-				h.clk.Step(100 * time.Millisecond)
+	It("back off 1s, 2s, 4s ... capped at the planning cycle whatever the early rounds, and start over on a new pool", func() {
+		// The first round plans the queries; after it PostgreSQL is gone, and every run that fails asks for an
+		// early round. The planning cycle is 30 s, the queries run every second.
+		h := run(func(url string) *memConfig {
+			return newMemConfig(strings.Replace(httpSettings(url), "defaultInterval: 30s\n", "defaultInterval: 1s\n", 1), httpFiles())
+		}, func(ctx context.Context, round int) (planner.Facts, error) {
+			if round == 0 {
+				return memPrimary, nil
 			}
-			idle()
-		}
-
-		drive(40 * time.Second)
-		Expect(gaps(h.roundTimes())).To(Equal([]time.Duration{
-			time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second,
+			return unreachable(ctx, round)
+		})
+		h.advanceBy(time.Second, func() bool { return len(h.timersArmed()) >= 8 })
+		Expect(h.timersArmed()[:8]).To(Equal([]time.Duration{
+			0, 30 * time.Second, time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second,
 		}))
+		Expect(len(h.roundTimes())).To(BeNumerically(">", len(h.timersArmed())), "runs asked for early rounds in between")
 
-		before := len(h.roundTimes())
+		before := len(h.timersArmed())
 		h.cfg.set(func() { h.cfg.doc = strings.Replace(h.cfg.doc, "port: 1\n", "port: 2\n", 1) })
 		h.reload()
 		Expect(h.logged(`"msg"="configuration applied"`)).To(Equal(2))
-		drive(4 * time.Second)
-		Expect(gaps(h.roundTimes()[before:])).To(Equal([]time.Duration{time.Second, 2 * time.Second}))
+		h.advanceBy(time.Second, func() bool { return len(h.timersArmed()) >= before+3 })
+		Expect(h.timersArmed()[before : before+3]).To(Equal([]time.Duration{0, time.Second, 2 * time.Second}))
 	})
 
 	It("keep earlyFactsGap after a round when runs that lose their connection ask for one", func() {
-		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url, time.Second), httpFiles()) }, primary)
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) }, primary)
 		h.advance(func() bool { return len(h.roundTimes()) >= 5 })
 		rounds := h.roundTimes()
 		Expect(rounds[len(rounds)-1].Sub(rounds[0])).To(BeNumerically("<", 30*time.Second), "rounds came early, not on the timer")
@@ -138,7 +138,7 @@ var _ = Describe("Facts rounds", func() {
 
 	It("stop writing a job's self-metrics once it leaves the plan", func() {
 		var dropApp atomic.Bool
-		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url, time.Second), httpFiles()) },
+		h := run(func(url string) *memConfig { return newMemConfig(fastSettings(url), httpFiles()) },
 			func(context.Context, int) (planner.Facts, error) {
 				if dropApp.Load() {
 					return planner.Facts{Version: memPrimary.Version, Databases: []string{"postgres"}}, nil
@@ -163,6 +163,24 @@ var _ = Describe("Facts rounds", func() {
 		for _, req := range h.requests()[since:] {
 			Expect(onApp(req)).To(BeFalse())
 		}
+	})
+})
+
+var _ = Describe("A run caught in a pool swap", func() {
+	It("keeps its job's snapshot entry, counts skipped and logs nothing", func(ctx SpecContext) {
+		var lines []string
+		logger := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{})
+		res := executor.Result{
+			Job:     planner.Job{Query: "backends", Database: "app", Fingerprint: "f"},
+			Outcome: selfmetrics.OutcomeSkipped,
+			Err:     fmt.Errorf("acquire connection to app: %w", pg.ErrPoolClosed),
+		}
+
+		kept, runs, err := engine.RecordResult(ctrllog.IntoContext(ctx, logger), res)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(kept).To(BeTrue())
+		Expect(runs).To(Equal(int64(1)))
+		Expect(lines).To(BeEmpty())
 	})
 })
 

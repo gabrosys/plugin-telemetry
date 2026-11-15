@@ -103,6 +103,7 @@ func (e *engine) reload(ctx context.Context) error {
 	if d == r.digest {
 		return nil
 	}
+	// A failed apply keeps this digest: safe only while every apply failure depends on digested inputs.
 	r.digest = d
 	r.stats.ConfigLoad(r.cfg.Name(), selfmetrics.OutcomeOK, 0)
 

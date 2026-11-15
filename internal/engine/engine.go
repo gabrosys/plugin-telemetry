@@ -266,15 +266,24 @@ func (e *engine) run(ctx context.Context) {
 }
 
 // watch runs the Config's watch until ctx ends, starting it again watchRetry after it returns early.
+// A failing Watch is logged once per error text, and once when a Watch notifies again.
 func (e *engine) watch(ctx context.Context) {
+	logger := log.FromContext(ctx)
 	files := func() []string {
 		if f := e.files.Load(); f != nil {
 			return *f
 		}
 		return nil
 	}
+	var wl watchLog
+	notify := func() {
+		if wl.recovered() {
+			logger.Info("watching the configuration again")
+		}
+		e.notify()
+	}
 	for {
-		err := e.cfg.Watch(ctx, files, e.notify)
+		err := e.cfg.Watch(ctx, files, notify)
 		if ctx.Err() != nil {
 			return
 		}
@@ -282,7 +291,9 @@ func (e *engine) watch(ctx context.Context) {
 			err = errWatchEnded
 		}
 		t := e.clk.NewTimer(watchRetry)
-		log.FromContext(ctx).Error(err, "watch the configuration", "restartIn", watchRetry)
+		if wl.failed(err) {
+			logger.Error(err, "watch the configuration", "restartEvery", watchRetry)
+		}
 		select {
 		case <-ctx.Done():
 			t.Stop()
@@ -290,6 +301,32 @@ func (e *engine) watch(ctx context.Context) {
 		case <-t.C():
 		}
 	}
+}
+
+// watchLog remembers the Watch error last logged.
+type watchLog struct {
+	mu      sync.Mutex // guards failing
+	failing string     // empty while a Watch runs
+}
+
+// failed records err and reports whether it differs from the error last logged.
+func (w *watchLog) failed(err error) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err.Error() == w.failing {
+		return false
+	}
+	w.failing = err.Error()
+	return true
+}
+
+// recovered forgets the error last logged and reports whether there was one.
+func (w *watchLog) recovered() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	was := w.failing != ""
+	w.failing = ""
+	return was
 }
 
 // shutdown stops the export loop, the scheduler, the pool, the watch and the meter provider.

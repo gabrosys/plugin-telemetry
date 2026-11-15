@@ -9,9 +9,12 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
+	"github.com/gabrosys/plugin-telemetry/internal/executor"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
+	"github.com/gabrosys/plugin-telemetry/internal/queries"
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
+	"github.com/gabrosys/plugin-telemetry/internal/snapshot"
 	"github.com/gabrosys/plugin-telemetry/internal/sources"
 )
 
@@ -52,11 +55,45 @@ func RunWithBrokenBookkeeping(ctx context.Context, job planner.Job, n int) (int6
 		e.runJob(ctx, job)
 	}
 
+	runs, err := queryRuns(ctx, e, job, selfmetrics.OutcomeError)
+	if r := e.setRunner(nil); r != nil {
+		r.pool.Close()
+	}
+	return runs, errors.Join(err, e.mp.Shutdown(ctx))
+}
+
+// RecordResult records res for its planned job, whose snapshot entry holds one sample, and reports
+// whether that entry is still there and the runs counted with res's outcome.
+func RecordResult(ctx context.Context, res executor.Result) (kept bool, runs int64, err error) {
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, nil)
+	if err != nil {
+		return false, 0, err
+	}
+	job := res.Job
+	key := snapshot.Key{Query: job.Query, Database: job.Database}
+	e.plan.planned = map[snapshot.Key]string{key: job.Fingerprint}
+	sample := queries.Sample{Metric: "cnpg_" + job.Query + "_value", Kind: queries.KindGauge, Value: 1}
+	if err := e.store.Put(key, job.Fingerprint, []queries.Sample{sample}, time.Now()); err != nil {
+		return false, 0, errors.Join(err, e.mp.Shutdown(ctx))
+	}
+
+	e.record(ctx, res)
+	points, _ := e.store.Points()
+	for _, p := range points {
+		kept = kept || p.Key == key
+	}
+	runs, err = queryRuns(ctx, e, job, res.Outcome)
+	return kept, runs, errors.Join(err, e.mp.Shutdown(ctx))
+}
+
+// queryRuns returns cnpg_otel_query_runs_total for job with outcome, from one collection of e.
+func queryRuns(ctx context.Context, e *engine, job planner.Job, outcome selfmetrics.Outcome) (int64, error) {
 	var rm metricdata.ResourceMetrics
-	err = e.reader.Collect(ctx, &rm)
-	var runs int64
+	if err := e.reader.Collect(ctx, &rm); err != nil {
+		return 0, err
+	}
 	want := attribute.NewSet(attribute.String("query", job.Query), attribute.String("database", job.Database),
-		attribute.String("outcome", string(selfmetrics.OutcomeError)))
+		attribute.String("outcome", string(outcome)))
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
 			sum, ok := m.Data.(metricdata.Sum[int64])
@@ -65,13 +102,10 @@ func RunWithBrokenBookkeeping(ctx context.Context, job planner.Job, n int) (int6
 			}
 			for _, dp := range sum.DataPoints {
 				if dp.Attributes.Equals(&want) {
-					runs = dp.Value
+					return dp.Value, nil
 				}
 			}
 		}
 	}
-	if r := e.setRunner(nil); r != nil {
-		r.pool.Close()
-	}
-	return runs, errors.Join(err, e.mp.Shutdown(ctx))
+	return 0, nil
 }

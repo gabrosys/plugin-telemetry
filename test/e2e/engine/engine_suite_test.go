@@ -72,7 +72,7 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 	otelcol, err = startCollector(ctx, env["COLLECTOR_IMAGE"])
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(func(ctx SpecContext) {
-		Expect(otelcol.container.Terminate(ctx)).To(Succeed())
+		Expect(pgtest.Terminate(ctx, otelcol.container)).To(Succeed())
 	})
 
 	configDir = GinkgoT().TempDir()
@@ -158,24 +158,17 @@ func startCollector(ctx context.Context, image string) (*collector, error) {
 		testcontainers.WithWaitStrategy(wait.ForLog("Everything is ready. Begin running and processing data.")),
 	)
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("start the collector: %w", err), terminate(ctx, c))
+		return nil, errors.Join(fmt.Errorf("start the collector: %w", err), pgtest.Terminate(ctx, c))
 	}
 	host, err := c.Host(ctx)
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("get the collector host: %w", err), terminate(ctx, c))
+		return nil, errors.Join(fmt.Errorf("get the collector host: %w", err), pgtest.Terminate(ctx, c))
 	}
 	port, err := c.MappedPort(ctx, collectorPort)
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("get the collector port: %w", err), terminate(ctx, c))
+		return nil, errors.Join(fmt.Errorf("get the collector port: %w", err), pgtest.Terminate(ctx, c))
 	}
 	return &collector{container: c, endpoint: "http://" + host + ":" + strconv.Itoa(int(port.Num())) + "/v1/metrics"}, nil
-}
-
-func terminate(ctx context.Context, c *testcontainers.DockerContainer) error {
-	if err := c.Terminate(ctx); err != nil {
-		return fmt.Errorf("terminate the container: %w", err)
-	}
-	return nil
 }
 
 // read copies the collector's output file and returns every line decoded so far.

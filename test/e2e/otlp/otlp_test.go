@@ -147,4 +147,13 @@ var _ = Describe("readers", func() {
 			Name: "calls_total", Type: otlp.TypeSum, Monotonic: &monotonic, Attributes: []string{"hook"},
 		}}))
 	})
+
+	It("fails on a metric with no data", func() {
+		var l otlp.Lines
+		Expect(l.Update([]byte(`{"resourceMetrics":[{"resource":{"attributes":[]},"scopeMetrics":[{"scope":{"name":"scope-a"},` +
+			`"metrics":[{"name":"up"}]}]}]}` + "\n"))).To(Succeed())
+
+		_, err := otlp.Shapes(l.All(), "scope-a")
+		Expect(err).To(MatchError(ContainSubstring("metric up")))
+	})
 })

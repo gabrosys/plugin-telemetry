@@ -50,16 +50,16 @@ func Start(ctx context.Context, image string) (*Postgres, error) {
 		testcontainers.WithWaitStrategy(wait.ForLog("database system is ready to accept connections")),
 	)
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("start container: %w", err), terminate(ctx, c))
+		return nil, errors.Join(fmt.Errorf("start container: %w", err), Terminate(ctx, c))
 	}
 
 	host, err := c.Host(ctx)
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("get container host: %w", err), terminate(ctx, c))
+		return nil, errors.Join(fmt.Errorf("get container host: %w", err), Terminate(ctx, c))
 	}
 	port, err := c.MappedPort(ctx, "5432/tcp")
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("get mapped port: %w", err), terminate(ctx, c))
+		return nil, errors.Join(fmt.Errorf("get mapped port: %w", err), Terminate(ctx, c))
 	}
 
 	p := &Postgres{Host: host, Port: port.Num(), container: c}
@@ -71,13 +71,14 @@ func Start(ctx context.Context, image string) (*Postgres, error) {
 		"REVOKE CONNECT ON DATABASE noconnect FROM PUBLIC",
 	} {
 		if err := p.Exec(ctx, stmt); err != nil {
-			return nil, errors.Join(fmt.Errorf("bootstrap: %w", err), terminate(ctx, c))
+			return nil, errors.Join(fmt.Errorf("bootstrap: %w", err), Terminate(ctx, c))
 		}
 	}
 	return p, nil
 }
 
-func terminate(ctx context.Context, c *testcontainers.DockerContainer) error {
+// Terminate removes the container, with its volumes, and wraps the error.
+func Terminate(ctx context.Context, c *testcontainers.DockerContainer) error {
 	if err := c.Terminate(ctx); err != nil {
 		return fmt.Errorf("terminate container: %w", err)
 	}
@@ -140,7 +141,7 @@ func (p *Postgres) StartServer(ctx context.Context) error {
 
 // Terminate removes the container.
 func (p *Postgres) Terminate(ctx context.Context) error {
-	return terminate(ctx, p.container)
+	return Terminate(ctx, p.container)
 }
 
 func (p *Postgres) run(ctx context.Context, cmd ...string) error {

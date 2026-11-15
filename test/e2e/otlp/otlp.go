@@ -281,7 +281,11 @@ func Shapes(lines []Line, scope string) ([]Shape, error) {
 		if s.GetName() != scope {
 			return
 		}
-		shape, keys := shapeOf(m)
+		shape, keys, err := shapeOf(m)
+		if err != nil {
+			errs = append(errs, err)
+			return
+		}
 		a, ok := seen[m.GetName()]
 		if !ok {
 			seen[m.GetName()] = &acc{shape: shape, keys: keys}
@@ -298,13 +302,14 @@ func Shapes(lines []Line, scope string) ([]Shape, error) {
 	out := make([]Shape, 0, len(seen))
 	for _, name := range slices.Sorted(maps.Keys(seen)) {
 		a := seen[name]
+		// empty, not nil, so the golden JSON reads []
 		a.shape.Attributes = append([]string{}, slices.Sorted(maps.Keys(a.keys))...)
 		out = append(out, a.shape)
 	}
 	return out, nil
 }
 
-func shapeOf(m *metricpb.Metric) (Shape, map[string]bool) {
+func shapeOf(m *metricpb.Metric) (Shape, map[string]bool, error) {
 	s := Shape{Name: m.GetName()}
 	var attrs [][]*commonpb.KeyValue
 	switch d := m.GetData().(type) {
@@ -335,6 +340,8 @@ func shapeOf(m *metricpb.Metric) (Shape, map[string]bool) {
 		for _, dp := range d.Summary.GetDataPoints() {
 			attrs = append(attrs, dp.GetAttributes())
 		}
+	default:
+		return Shape{}, nil, fmt.Errorf("metric %s: no data", m.GetName())
 	}
 	keys := map[string]bool{}
 	for _, kvs := range attrs {
@@ -342,7 +349,7 @@ func shapeOf(m *metricpb.Metric) (Shape, map[string]bool) {
 			keys[kv.GetKey()] = true
 		}
 	}
-	return s, keys
+	return s, keys, nil
 }
 
 func describe(s Shape) string {

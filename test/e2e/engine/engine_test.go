@@ -89,11 +89,18 @@ func exportTimes(lines []otlp.Line) []time.Time {
 	return slices.Compact(out)
 }
 
-// exportAt returns the lines of the export collected at t; its points are stamped within a second of t.
+// exportAt returns the lines from t up to the next export time in lines.
 func exportAt(lines []otlp.Line, t time.Time) []otlp.Line {
+	end := time.Time{}
+	for _, next := range exportTimes(lines) {
+		if next.After(t) {
+			end = next
+			break
+		}
+	}
 	var out []otlp.Line
 	for _, l := range otlp.Since(lines, t) {
-		if l.Time.Before(t.Add(time.Second)) {
+		if end.IsZero() || l.Time.Before(end) {
 			out = append(out, l)
 		}
 	}
@@ -129,7 +136,7 @@ func lastValue(g Gomega, lines []otlp.Line, name string, want map[string]string)
 	return p.Value
 }
 
-var _ = Describe("the engine", Ordered, func() {
+var _ = Describe("the engine", Ordered, ContinueOnFailure, func() {
 	It("exports CNPG's default metrics with the golden names, kinds and attribute keys", func(ctx SpecContext) {
 		// Every job of the first plan runs within MaxInitialDelay of the start.
 		settled := proc.started.Add(scheduler.MaxInitialDelay + slack)

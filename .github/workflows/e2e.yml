@@ -6,8 +6,8 @@ on:
       suite:
         description: e2e suite to run
         type: choice
-        options: [smoke, spikes, admission, engine, plugin]
-        default: smoke
+        options: [admission, engine, plugin]
+        default: plugin
 
 permissions: {}
 

@@ -22,6 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/export"
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
+	"github.com/gabrosys/plugin-telemetry/internal/preflight"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/framework"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/otlp"
 )
@@ -57,6 +59,8 @@ const (
 
 	// invalid_authorization_specification, sent for peer and pg_hba rejections.
 	sqlStateAuthClass = "28"
+	// sqlStateInvalidAuthorization is the full state of a refused peer or pg_hba login.
+	sqlStateInvalidAuthorization = "28000"
 )
 
 var cnpgGroup = apiv1.SchemeGroupVersion.Group
@@ -240,6 +244,28 @@ func describeMode(m mode) {
 			}).WithTimeout(30 * time.Second).WithPolling(time.Second).Should(Succeed())
 
 			return rv
+		}
+
+		primary := func(ctx context.Context) types.NamespacedName {
+			GinkgoHelper()
+
+			current := getCluster(Default, ctx).Status.CurrentPrimary
+			Expect(current).NotTo(BeEmpty())
+
+			return key(current)
+		}
+
+		reviewAll := func(ctx context.Context, checks []authorizationv1.ResourceAttributes) []review {
+			GinkgoHelper()
+
+			reviews := make([]review, 0, len(checks))
+			for _, attrs := range checks {
+				ok, err := framework.CanI(ctx, cfg, sidecarUser(), attrs)
+				Expect(err).NotTo(HaveOccurred())
+				reviews = append(reviews, review{attrs: attrs, allowed: ok})
+			}
+
+			return reviews
 		}
 
 		status := func(g Gomega, ctx context.Context) operator.ClusterStatus {
@@ -531,6 +557,153 @@ func describeMode(m mode) {
 					Expect(allowed(Default, ctx, verb, "", "configmaps", "unreferenced")).To(BeFalse(), verb)
 				}
 			}, SpecTimeout(2*time.Minute))
+
+		It("M1 AC1: the sidecar is injected into every instance with the designed container", func(ctx SpecContext) {
+			image, err := framework.SidecarImage(ctx, c)
+			Expect(err).NotTo(HaveOccurred())
+
+			for _, pod := range pods(Default, ctx) {
+				Expect(pod.Status.Phase).To(Equal(corev1.PodRunning), pod.Name)
+
+				i := slices.IndexFunc(pod.Spec.InitContainers, func(ctr corev1.Container) bool {
+					return ctr.Name == metadata.SidecarContainerName
+				})
+				Expect(i).To(BeNumerically(">=", 0), "pod %s has no %s init container", pod.Name, metadata.SidecarContainerName)
+				sidecar := pod.Spec.InitContainers[i]
+
+				j := slices.IndexFunc(pod.Status.InitContainerStatuses, func(s corev1.ContainerStatus) bool {
+					return s.Name == metadata.SidecarContainerName
+				})
+				Expect(j).To(BeNumerically(">=", 0), "pod %s has no %s status", pod.Name, metadata.SidecarContainerName)
+
+				Expect(sidecar.Image).To(Equal(image), pod.Name)
+				Expect(sidecar.RestartPolicy).To(HaveValue(Equal(corev1.ContainerRestartPolicyAlways)), pod.Name)
+				Expect(sidecar.SecurityContext).To(Equal(sidecarSecurityContext(!m.password)), pod.Name)
+				Expect(sidecar.VolumeMounts).To(ConsistOf(sidecarMounts(!m.password)), pod.Name)
+				Expect(sidecar.VolumeMounts).NotTo(ContainElement(HaveField("Name", HavePrefix("kube-api-access"))), pod.Name)
+				Expect(pod.Status.InitContainerStatuses[j].Started).To(HaveValue(BeTrue()), pod.Name)
+			}
+		}, SpecTimeout(2*time.Minute))
+
+		It("M1 AC4: the sidecar identity reads what it needs, nothing else, and has no Pod token", func(ctx SpecContext) {
+			owner := getCluster(Default, ctx)
+			readable := []authorizationv1.ResourceAttributes{
+				{Namespace: ns, Group: cnpgGroup, Resource: "clusters", Name: cname},
+				{Namespace: ns, Group: metadata.PluginName, Resource: "telemetryexporters", Name: exporterName},
+			}
+			for _, name := range monitoredConfigMaps(owner) {
+				readable = append(readable, authorizationv1.ResourceAttributes{Namespace: ns, Resource: "configmaps", Name: name})
+			}
+			if m.password {
+				readable = append(readable, authorizationv1.ResourceAttributes{Namespace: ns, Resource: "secrets", Name: monitorSecret})
+			}
+
+			var checks []authorizationv1.ResourceAttributes
+			for _, attrs := range readable {
+				for _, verb := range []string{"get", "watch"} {
+					attrs.Verb = verb
+					checks = append(checks, attrs)
+				}
+			}
+			reviews := reviewAll(ctx, checks)
+			AddReportEntry("can-i (want true)", table(reviews))
+			Expect(decided(reviews, false)).To(BeEmpty())
+
+			other := cname + "-other"
+			reviews = reviewAll(ctx, forbidden(ns, cname, other))
+			AddReportEntry("can-i (want false)", table(reviews))
+			Expect(decided(reviews, true)).To(BeEmpty())
+
+			rules, nonResource, err := framework.Rules(ctx, cfg, sidecarUser(), ns)
+			Expect(err).NotTo(HaveOccurred())
+			AddReportEntry("rules", formatRules(rules))
+			Expect(framework.UnexpectedRules(rules)).To(BeEmpty(), formatRules(rules))
+			Expect(framework.UnexpectedNonResourceRules(nonResource)).To(BeEmpty(), "%v", nonResource)
+
+			rep, err := framework.Preflight(ctx, cfg, primary(ctx))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rep.PodTokenPresent).To(BeFalse())
+			Expect(rep.Kube).NotTo(BeNil())
+			Expect(rep.Kube.Username).To(Equal(sidecarUser()))
+			Expect(rep.Kube.ClusterReadable).To(BeTrue(), rep.Kube.Error)
+		}, SpecTimeout(3*time.Minute))
+
+		if !m.password {
+			It("M1 AC2: the sidecar connects as cnpg_metrics_exporter through the read-only socket mount", func(ctx SpecContext) {
+				rep, err := framework.Preflight(ctx, cfg, primary(ctx))
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(rep.UID).To(BeEquivalentTo(metadata.PeerUID))
+				Expect(rep.Postgres).NotTo(BeNil())
+				Expect(rep.Postgres.Host).To(Equal(metadata.SocketDir))
+				Expect(rep.Postgres.Connected).To(BeTrue(), rep.Postgres.Error)
+				Expect(rep.Postgres.CurrentUser).To(Equal(metadata.MetricsExporterRole))
+				Expect(rep.Postgres.WALFiles).To(BeNumerically(">=", 1))
+				Expect(rep.Postgres.SQLState).To(BeEmpty())
+				Expect(rep.Postgres.Error).To(BeEmpty())
+			}, SpecTimeout(time.Minute))
+		}
+
+		if m.password {
+			It("M1 AC3: the sidecar connects as the dedicated role over 127.0.0.1", func(ctx SpecContext) {
+				pod := primary(ctx)
+				var rep preflight.Report
+				Eventually(func(g Gomega, ctx context.Context) {
+					var err error
+					rep, err = framework.Preflight(ctx, cfg, pod,
+						"--pg-host", "127.0.0.1", "--pg-user", monitorRole, "--password-secret", monitorSecret)
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(rep.Postgres).NotTo(BeNil())
+					g.Expect(rep.Postgres.Connected).To(BeTrue(), rep.Postgres.Error)
+					g.Expect(rep.Postgres.CurrentUser).To(Equal(monitorRole))
+				}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+				Expect(rep.Postgres.Host).To(Equal("127.0.0.1"))
+			}, SpecTimeout(3*time.Minute))
+
+			It("M1 AC3: refused from another Pod", func(ctx SpecContext) {
+				image, err := framework.SidecarImage(ctx, c)
+				Expect(err).NotTo(HaveOccurred())
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: cname + "-client"},
+					Spec: corev1.PodSpec{
+						RestartPolicy:                corev1.RestartPolicyNever,
+						AutomountServiceAccountToken: ptr.To(false),
+						Containers: []corev1.Container{{
+							Name:            "preflight",
+							Image:           image,
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Args: []string{
+								"instance", "preflight", "--kube=false",
+								"--pg-host", cname + apiv1.ServiceReadWriteSuffix, "--pg-user", monitorRole,
+							},
+							Env: []corev1.EnvVar{{
+								Name: "PGPASSWORD",
+								ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+									LocalObjectReference: corev1.LocalObjectReference{Name: monitorSecret},
+									Key:                  corev1.BasicAuthPasswordKey,
+								}},
+							}},
+							SecurityContext: &corev1.SecurityContext{
+								RunAsNonRoot:             ptr.To(true),
+								AllowPrivilegeEscalation: ptr.To(false),
+								Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+								SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+							},
+						}},
+					},
+				}
+
+				logs, err := framework.RunPod(ctx, c, cfg, pod)
+				Expect(err).NotTo(HaveOccurred(), logs)
+
+				rep, err := framework.DecodeReportFromLogs(logs)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rep.Postgres).NotTo(BeNil())
+				Expect(rep.Postgres.Connected).To(BeFalse())
+				Expect(rep.Postgres.SQLState).To(Equal(sqlStateInvalidAuthorization))
+				Expect(rep.Postgres.Error).To(ContainSubstring("pg_hba.conf rejects connection"))
+			}, SpecTimeout(3*time.Minute))
+		}
 
 		It("AC5: an exporter that is invalid from the start leaves the sidecar idle", func(ctx SpecContext) {
 			// Without metrics.interval the interval is 30 s, so a 20 s timeout fails Build; the CRD only checks both set.
@@ -851,7 +1024,7 @@ func describeMode(m mode) {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(rep.Postgres).NotTo(BeNil())
 				Expect(rep.Postgres.Connected).To(BeFalse(), pod.Name)
-				Expect(rep.Postgres.SQLState).To(Equal("28000"))
+				Expect(rep.Postgres.SQLState).To(Equal(sqlStateInvalidAuthorization))
 				Expect(rep.Postgres.Error).To(ContainSubstring(`Peer authentication failed for user "postgres"`))
 			}
 

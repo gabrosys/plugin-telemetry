@@ -9,21 +9,16 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 )
 
-const (
-	scratchVolume   = "scratch-data"
-	scratchSubPath  = "run"
-	tokenVolume     = "telemetry-token"
-	tokenMaskVolume = "telemetry-sa-mask"
-)
+const scratchSubPath = "run"
 
 // Apply upserts the sidecar and its volumes by name. It reads nothing but its arguments.
 func Apply(pod *corev1.Pod, cluster string, p Params, image string) error {
-	if p.Auth == AuthPeer && !hasVolume(pod.Spec.Volumes, scratchVolume) {
+	if p.Auth == AuthPeer && !hasVolume(pod.Spec.Volumes, metadata.ScratchVolume) {
 		return fmt.Errorf("peer mode: %w", ErrNoScratchVolume)
 	}
 
 	pod.Spec.Volumes = upsert(pod.Spec.Volumes, corev1.Volume{
-		Name: tokenVolume,
+		Name: metadata.TokenVolume,
 		VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 			SecretName: metadata.TokenSecretName(cluster),
 			Optional:   ptr.To(true),
@@ -31,7 +26,7 @@ func Apply(pod *corev1.Pod, cluster string, p Params, image string) error {
 	}, func(v corev1.Volume) string { return v.Name })
 
 	pod.Spec.Volumes = upsert(pod.Spec.Volumes, corev1.Volume{
-		Name:         tokenMaskVolume,
+		Name:         metadata.TokenMaskVolume,
 		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	}, func(v corev1.Volume) string { return v.Name })
 
@@ -45,15 +40,15 @@ func sidecar(cluster string, p Params, image string) corev1.Container {
 	mounts := make([]corev1.VolumeMount, 0, 3)
 	if p.Auth == AuthPeer {
 		mounts = append(mounts, corev1.VolumeMount{
-			Name:      scratchVolume,
+			Name:      metadata.ScratchVolume,
 			MountPath: metadata.SocketDir,
 			SubPath:   scratchSubPath,
 			ReadOnly:  true,
 		})
 	}
 	mounts = append(mounts,
-		corev1.VolumeMount{Name: tokenVolume, MountPath: metadata.SidecarTokenDir, ReadOnly: true},
-		corev1.VolumeMount{Name: tokenMaskVolume, MountPath: metadata.PodTokenDir, ReadOnly: true},
+		corev1.VolumeMount{Name: metadata.TokenVolume, MountPath: metadata.SidecarTokenDir, ReadOnly: true},
+		corev1.VolumeMount{Name: metadata.TokenMaskVolume, MountPath: metadata.PodTokenDir, ReadOnly: true},
 	)
 
 	sc := &corev1.SecurityContext{

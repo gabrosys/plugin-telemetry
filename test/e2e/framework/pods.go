@@ -82,6 +82,28 @@ func DecodeReport(out string) (preflight.Report, error) {
 	return rep, nil
 }
 
+// DecodeReportFromLogs finds the one line of combined stdout and stderr that decodes strictly as a Report.
+func DecodeReportFromLogs(logs string) (preflight.Report, error) {
+	var (
+		found preflight.Report
+		count int
+	)
+	for line := range strings.Lines(logs) {
+		rep, err := DecodeReport(line)
+		if err != nil {
+			continue
+		}
+		found = rep
+		count++
+	}
+
+	if count != 1 {
+		return preflight.Report{}, fmt.Errorf("%w: %d reports in the logs: %q", ErrInvalidReport, count, logs)
+	}
+
+	return found, nil
+}
+
 // RunPod creates pod, waits until it ends, and returns its logs. The Pod must
 // have one container. A Pod that ends in phase Failed returns its logs and ErrPodFailed.
 func RunPod(ctx context.Context, c client.Client, cfg *rest.Config, pod *corev1.Pod) (string, error) {

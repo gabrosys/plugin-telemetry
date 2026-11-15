@@ -22,6 +22,12 @@ const (
 	ManagedByValue = "plugin-telemetry"
 	// PeerUID is the OS user the sidecar runs as in peer mode.
 	PeerUID = int64(65534)
+	// ScratchVolume is the CloudNativePG instance Pod volume that holds the socket directory.
+	ScratchVolume = "scratch-data"
+	// TokenVolume is the sidecar's own ServiceAccount token volume.
+	TokenVolume = "telemetry-token"
+	// TokenMaskVolume is the empty volume that hides the Pod's default token from the sidecar.
+	TokenMaskVolume = "telemetry-sa-mask"
 )
 
 // identitySuffix ends the names of a Cluster's ServiceAccount, Role and RoleBinding.

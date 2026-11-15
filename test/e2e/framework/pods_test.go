@@ -42,3 +42,26 @@ var _ = Describe("DecodeReport", func() {
 		Entry("a second document", "{\"uid\":1}\n{\"uid\":2}\n"),
 	)
 })
+
+var _ = Describe("DecodeReportFromLogs", func() {
+	const (
+		line   = `{"level":"info","msg":"starting preflight"}`
+		report = `{"uid":65534,"podTokenPresent":false}`
+	)
+
+	It("returns the report among log lines", func() {
+		rep, err := framework.DecodeReportFromLogs(line + "\n" + report + "\n")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rep).To(Equal(preflight.Report{UID: 65534}))
+	})
+
+	DescribeTable("rejects",
+		func(logs string) {
+			_, err := framework.DecodeReportFromLogs(logs)
+			Expect(err).To(MatchError(framework.ErrInvalidReport))
+		},
+		Entry("no report", line+"\nError: boom\n"),
+		Entry("empty logs", ""),
+		Entry("two reports", report+"\n"+line+"\n"+report+"\n"),
+	)
+})

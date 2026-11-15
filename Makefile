@@ -132,7 +132,7 @@ E2E_MATRIX_SUITES ?= $(KIND_E2E_SUITES)
 .PHONY: e2e-lane
 e2e-lane: $(addprefix e2e-,$(E2E_MATRIX_SUITES))
 
-# Each lane has its own cluster and BIN, and logs to bin/e2e/<version>.log. Other command-line variables reach the lanes through MAKEFLAGS.
+# One lane per CNPG version, each with its own cluster and BIN; logs in bin/e2e/<v>.log.
 .PHONY: e2e-matrix
 e2e-matrix: image $(KIND) $(KUBECTL) $(CMCTL) ## Run the kind suites on one kind cluster per CNPG version, in parallel
 	mkdir -p $(BIN)/e2e
@@ -141,7 +141,7 @@ e2e-matrix: image $(KIND) $(KUBECTL) $(CMCTL) ## Run the kind suites on one kind
 		( start=$$SECONDS; rc=0; \
 		$(MAKE) --no-print-directory -k -o image e2e-lane CNPG_VERSION=$$v KIND_CLUSTER=plugin-telemetry-$${v//./-} \
 			BIN=$(BIN)/lanes/$$v KIND=$(KIND) KUBECTL=$(KUBECTL) CMCTL=$(CMCTL) >$(BIN)/e2e/$$v.log 2>&1 || rc=$$?; \
-		echo "$$v exit=$$rc $$((SECONDS - start))s $$(date +%T)"; \
+		echo "$$v exit=$$rc $$((SECONDS - start))s"; \
 		exit $$rc ) & \
 		pids+=($$!); \
 	done; \

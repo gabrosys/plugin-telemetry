@@ -11,9 +11,8 @@ var (
 
 // Exposed for controller_test.go.
 var (
-	SpecChanged           = specChanged
-	ExportersToClusters   = exportersToClusters
-	IdentityNameToCluster = identityNameToCluster
+	SpecChanged         = specChanged
+	ExportersToClusters = exportersToClusters
 )
 
 // Exposed for metrics_test.go.

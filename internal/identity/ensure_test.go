@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -14,7 +13,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -91,35 +89,6 @@ var _ = Describe("Ensurer", func() {
 			obj.SetNamespace("ns")
 			Expect(c.Create(ctx, obj)).To(Succeed())
 		}
-	}
-
-	ours := func(obj client.Object) bool {
-		GinkgoHelper()
-		Expect(c.Get(ctx, client.ObjectKeyFromObject(obj), obj)).To(Succeed())
-		_, labelled := obj.GetLabels()[identity.ManagedByLabel]
-
-		return labelled || len(obj.GetOwnerReferences()) > 0
-	}
-
-	cnpgRules := []rbacv1.PolicyRule{{APIGroups: []string{"postgresql.cnpg.io"}, Resources: []string{"clusters/status"}, Verbs: []string{"get", "patch"}}}
-
-	// ensured applies pg's identity, gives the token data, and gives the Role the rules CloudNativePG patches in.
-	ensured := func() types.UID {
-		GinkgoHelper()
-		_, err := ensurer.Ensure(ctx, newCluster(), refs())
-		Expect(err).NotTo(HaveOccurred())
-		setToken("t")
-
-		var role rbacv1.Role
-		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}, &role)).To(Succeed())
-		role.Rules = cnpgRules
-		Expect(c.Update(ctx, &role)).To(Succeed())
-
-		var sa corev1.ServiceAccount
-		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}, &sa)).To(Succeed())
-		writes = nil
-
-		return sa.UID
 	}
 
 	It("applies all four on first Ensure, ServiceAccount before Secret and Role before RoleBinding", func() {
@@ -355,73 +324,6 @@ var _ = Describe("Ensurer", func() {
 		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}, &rbacv1.Role{})).To(Satisfy(apierrors.IsNotFound))
 	})
 
-	Describe("BackOff", func() {
-		It("deletes the token and leaves CloudNativePG the ServiceAccount, Role and RoleBinding without the owner reference", func() {
-			uid := ensured()
-
-			changed, err := ensurer.BackOff(ctx, newCluster(), collidingCluster(""))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(changed).To(ConsistOf("Secret/pg-telemetry-token", "ServiceAccount/pg-telemetry", "Role/pg-telemetry", "RoleBinding/pg-telemetry"))
-
-			key := client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}
-			Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry-token"}, &corev1.Secret{})).To(Satisfy(apierrors.IsNotFound))
-
-			var sa corev1.ServiceAccount
-			Expect(c.Get(ctx, key, &sa)).To(Succeed())
-			Expect(sa.UID).To(Equal(uid))
-			Expect(ours(&sa)).To(BeFalse())
-
-			var role rbacv1.Role
-			Expect(c.Get(ctx, key, &role)).To(Succeed())
-			Expect(role.Rules).To(Equal(cnpgRules))
-			Expect(role.OwnerReferences).To(BeEmpty())
-
-			var binding rbacv1.RoleBinding
-			Expect(c.Get(ctx, key, &binding)).To(Succeed())
-			Expect(binding.OwnerReferences).To(BeEmpty())
-			Expect(binding.Subjects).To(ConsistOf(HaveField("Name", "pg-telemetry")))
-
-			writes = nil
-			changed, err = ensurer.BackOff(ctx, newCluster(), collidingCluster(""))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(changed).To(BeEmpty())
-			Expect(writes).To(BeEmpty())
-		})
-
-		It("deletes the ServiceAccount and RoleBinding a Cluster with another serviceAccountName doesn't use", func() {
-			ensured()
-
-			changed, err := ensurer.BackOff(ctx, newCluster(), collidingCluster("shared"))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(changed).To(ConsistOf("Secret/pg-telemetry-token", "ServiceAccount/pg-telemetry", "Role/pg-telemetry", "RoleBinding/pg-telemetry"))
-
-			key := client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}
-			Expect(c.Get(ctx, key, &corev1.ServiceAccount{})).To(Satisfy(apierrors.IsNotFound))
-			Expect(c.Get(ctx, key, &rbacv1.RoleBinding{})).To(Satisfy(apierrors.IsNotFound))
-			var role rbacv1.Role
-			Expect(c.Get(ctx, key, &role)).To(Succeed())
-			Expect(role.OwnerReferences).To(BeEmpty())
-			Expect(role.Rules).To(Equal(cnpgRules))
-		})
-
-		It("writes nothing to objects the plugin didn't make", func() {
-			cnpg := []metav1.OwnerReference{{
-				APIVersion: "postgresql.cnpg.io/v1", Kind: "Cluster", Name: "pg-telemetry", UID: "other-uid", Controller: ptr.To(true),
-			}}
-			meta := metav1.ObjectMeta{Name: "pg-telemetry", Labels: map[string]string{identity.ManagedByLabel: "cloudnative-pg"}, OwnerReferences: cnpg}
-			token := metav1.ObjectMeta{Name: "pg-telemetry-token"}
-			foreign(&corev1.ServiceAccount{ObjectMeta: meta}, &rbacv1.Role{ObjectMeta: *meta.DeepCopy()},
-				&rbacv1.RoleBinding{ObjectMeta: *meta.DeepCopy(), RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: "pg-telemetry"}},
-				&corev1.Secret{ObjectMeta: token})
-
-			changed, err := ensurer.BackOff(ctx, newCluster(), collidingCluster(""))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(changed).To(BeEmpty())
-			Expect(writes).To(BeEmpty())
-			Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry-token"}, &corev1.Secret{})).To(Succeed())
-		})
-	})
-
 	It("wraps a failed apply with the object", func() {
 		failing := fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).WithInterceptorFuncs(interceptor.Funcs{
 			Apply: func(context.Context, client.WithWatch, runtime.ApplyConfiguration, ...client.ApplyOption) error {
@@ -445,14 +347,6 @@ func runtimeJSON(obj runtime.ApplyConfiguration) (appliedConfig, error) {
 	}
 
 	return out, nil
-}
-
-// collidingCluster is a Cluster named like pg's identity, using serviceAccount when it is not empty.
-func collidingCluster(serviceAccount string) *apiv1.Cluster {
-	c := &apiv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "pg-telemetry", Namespace: "ns", UID: "other-uid"}}
-	c.Spec.ServiceAccountName = serviceAccount
-
-	return c
 }
 
 func payload(obj runtime.ApplyConfiguration) (map[string]any, error) {

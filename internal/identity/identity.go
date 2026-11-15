@@ -30,12 +30,8 @@ const (
 	cnpgGroup = "postgresql.cnpg.io"
 )
 
-var (
-	// ErrNoUID is returned for a Cluster without a UID, which cannot own anything.
-	ErrNoUID = errors.New("cluster has no uid")
-
-	errNotObject = errors.New("not a client.Object")
-)
+// ErrNoUID is returned for a Cluster without a UID, which cannot own anything.
+var ErrNoUID = errors.New("cluster has no uid")
 
 // Objects are one Cluster's desired identity objects.
 type Objects struct {

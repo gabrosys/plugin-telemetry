@@ -181,15 +181,6 @@ func (s *Status) compute(ctx context.Context, c *apiv1.Cluster, plugin apiv1.Plu
 
 // identity reports whether the identity is ready and, when it is not, why the plugin applies none.
 func (s *Status) identity(ctx context.Context, c *apiv1.Cluster) (bool, []string, error) {
-	colliding, found, err := collidingCluster(ctx, s.Reader, c)
-	if err != nil {
-		return false, nil, err
-	}
-	if found {
-		return false, []string{fmt.Sprintf("Cluster %q has the name of this Cluster's identity objects: the plugin manages none",
-			colliding.Name)}, nil
-	}
-
 	ready, err := s.Identity.Ready(ctx, c.Namespace, c.Name)
 	if err != nil {
 		return false, nil, fmt.Errorf("read identity: %w", err)

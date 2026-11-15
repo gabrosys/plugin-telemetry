@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/gabrosys/plugin-telemetry/internal/identity"
+	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
 )
 
@@ -184,42 +185,11 @@ var _ = Describe("IdentityController", func() {
 		Expect(deletes.Load()).To(BeZero())
 	})
 
-	It("backs off from a Cluster that has the identity's name, then writes nothing", func(ctx context.Context) {
-		build(newCluster("ns", "pg", ours(nil)))
+	It("ensures the identity whatever other Clusters the namespace holds", func(ctx context.Context) {
+		build(newCluster("ns", "pg", ours(nil)), newCluster("ns", metadata.ServiceAccountName("pg")))
 		reconcileOnce(ctx, "ns", "pg")
+
 		Expect(identityExists(ctx, c, "pg")).To(Equal(allFour))
-
-		Expect(c.Create(ctx, newCluster("ns", "pg-telemetry"))).To(Succeed())
-		writes.Store(0)
-		reconcileOnce(ctx, "ns", "pg")
-
-		Expect(identityExists(ctx, c, "pg")).To(Equal([4]bool{false, true, true, true}), "only the token Secret is deleted")
-		Expect(writes.Load()).To(BeNumerically(">", 0))
-		for _, obj := range identity.Members("ns", "pg")[1:] {
-			Expect(c.Get(ctx, client.ObjectKeyFromObject(obj), obj)).To(Succeed())
-			Expect(obj.GetOwnerReferences()).To(BeEmpty(), "%T", obj)
-		}
-
-		writes.Store(0)
-		reconcileOnce(ctx, "ns", "pg")
-		Expect(writes.Load()).To(BeZero())
-	})
-
-	It("ensures nothing for a Cluster whose identity name another Cluster has", func(ctx context.Context) {
-		build(newCluster("ns", "pg", ours(nil)), newCluster("ns", "pg-telemetry"))
-		reconcileOnce(ctx, "ns", "pg")
-
-		Expect(identityExists(ctx, c, "pg")).To(Equal([4]bool{}))
-		Expect(writes.Load()).To(BeZero())
-	})
-
-	It("maps a Cluster with an identity's name to the Cluster that identity belongs to", func(ctx context.Context) {
-		mapper := operator.IdentityNameToCluster
-
-		Expect(mapper(ctx, newCluster("ns", "pg-telemetry"))).To(ConsistOf(requestFor("ns", "pg")))
-		Expect(mapper(ctx, newCluster("ns", "pg-telemetry-telemetry"))).To(ConsistOf(requestFor("ns", "pg-telemetry")))
-		Expect(mapper(ctx, newCluster("ns", "pg"))).To(BeEmpty())
-		Expect(mapper(ctx, newCluster("ns", "-telemetry"))).To(BeEmpty())
 	})
 
 	It("applies nothing and returns no error when an identity object isn't the plugin's", func(ctx context.Context) {

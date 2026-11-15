@@ -129,13 +129,13 @@ var _ = Describe("Status.SetStatusInCluster", func() {
 		Expect(decode(call(status(), cluster)).Identity).To(Equal("pending"))
 	})
 
-	It("reports identity pending with the Cluster that has the identity's name", func() {
-		objs = append(objs, newCluster("ns", "pg-telemetry"))
+	It("reports the identity from its four objects whatever other Clusters the namespace holds", func() {
+		objs = append(append([]client.Object{newExporterWithEndpoint()}, identityObjects(true)...), newCluster("ns", metadata.ServiceAccountName("pg")))
 
 		st := decode(call(status(), cluster))
 
-		Expect(st.Identity).To(Equal("pending"))
-		Expect(st.Problems).To(ConsistOf(`Cluster "pg-telemetry" has the name of this Cluster's identity objects: the plugin manages none`))
+		Expect(st.Identity).To(Equal("ready"))
+		Expect(st.Problems).To(BeEmpty())
 	})
 
 	It("reports identity pending with each identity object the plugin doesn't manage", func() {

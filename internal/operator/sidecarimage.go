@@ -111,6 +111,7 @@ func imageEventHandler(logger log.Logger, store *ImageStore) toolscache.Resource
 			logger.Error(errUnexpectedObject, "ignoring event", "type", fmt.Sprintf("%T", obj))
 			return
 		}
+		logger := logger.WithValues("namespace", cm.Namespace, "configmap", cm.Name)
 		if err := store.Set(cm); err != nil {
 			logger.Error(err, "ignoring sidecar image configmap")
 			return
@@ -121,8 +122,30 @@ func imageEventHandler(logger log.Logger, store *ImageStore) toolscache.Resource
 	return toolscache.ResourceEventHandlerFuncs{
 		AddFunc:    set,
 		UpdateFunc: func(_, obj any) { set(obj) },
-		DeleteFunc: func(any) {
-			logger.Error(errConfigMapDeleted, "keeping the last valid sidecar image")
+		DeleteFunc: func(obj any) {
+			namespace, name := deletedConfigMap(obj)
+			logger.WithValues("namespace", namespace, "configmap", name).
+				Error(errConfigMapDeleted, "keeping the last valid sidecar image")
 		},
 	}
+}
+
+// deletedConfigMap names the ConfigMap of a delete event, reading a tombstone's object or key.
+func deletedConfigMap(obj any) (namespace, name string) {
+	if tombstone, ok := obj.(toolscache.DeletedFinalStateUnknown); ok {
+		if cm, ok := tombstone.Obj.(*corev1.ConfigMap); ok {
+			return cm.Namespace, cm.Name
+		}
+		namespace, name, err := toolscache.SplitMetaNamespaceKey(tombstone.Key)
+		if err != nil {
+			return "", tombstone.Key
+		}
+
+		return namespace, name
+	}
+	if cm, ok := obj.(*corev1.ConfigMap); ok {
+		return cm.Namespace, cm.Name
+	}
+
+	return "", ""
 }

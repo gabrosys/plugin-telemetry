@@ -119,6 +119,7 @@ var _ = Describe("image event handler", func() {
 
 		Expect(store.Image()).To(Equal(validImage))
 		Expect(logs()).NotTo(ContainElement(HaveKey("error")))
+		Expect(logs()).To(ContainElement(SatisfyAll(HaveKeyWithValue("msg", "sidecar image updated"), SatisfyAll(HaveKeyWithValue("namespace", "cnpg-system"), HaveKeyWithValue("configmap", "sidecar-image")))))
 	})
 
 	It("replaces the image on a valid update", func() {
@@ -133,7 +134,7 @@ var _ = Describe("image event handler", func() {
 		handler.OnUpdate(nil, configMap(map[string]string{operator.SidecarImageKey: "ghcr.io/x:latest"}))
 
 		Expect(store.Image()).To(Equal(validImage))
-		Expect(logs()).To(ContainElement(HaveKey("error")))
+		Expect(logs()).To(ContainElement(SatisfyAll(HaveKey("error"), SatisfyAll(HaveKeyWithValue("namespace", "cnpg-system"), HaveKeyWithValue("configmap", "sidecar-image")))))
 	})
 
 	It("logs an error on an unexpected object type", func() {
@@ -149,11 +150,14 @@ var _ = Describe("image event handler", func() {
 			handler.OnDelete(deleted(configMap(nil)))
 
 			Expect(store.Image()).To(Equal(validImage))
-			Expect(logs()).To(ContainElement(HaveKey("error")))
+			Expect(logs()).To(ContainElement(SatisfyAll(HaveKey("error"), SatisfyAll(HaveKeyWithValue("namespace", "cnpg-system"), HaveKeyWithValue("configmap", "sidecar-image")))))
 		},
 		Entry("of the object", func(cm *corev1.ConfigMap) any { return cm }),
 		Entry("seen as a tombstone", func(cm *corev1.ConfigMap) any {
 			return toolscache.DeletedFinalStateUnknown{Key: "cnpg-system/sidecar-image", Obj: cm}
+		}),
+		Entry("seen as a tombstone without the object", func(*corev1.ConfigMap) any {
+			return toolscache.DeletedFinalStateUnknown{Key: "cnpg-system/sidecar-image"}
 		}),
 	)
 })

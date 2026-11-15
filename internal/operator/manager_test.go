@@ -128,7 +128,8 @@ var _ = Describe("NewManager", func() {
 		var by *cache.ByObject
 		for obj, b := range opts.Cache.ByObject {
 			if _, ok := obj.(*corev1.ConfigMap); ok {
-				by = &b
+				got := b
+				by = &got
 			}
 		}
 		Expect(by).NotTo(BeNil())

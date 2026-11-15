@@ -2,6 +2,7 @@ package operator_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	toolscache "k8s.io/client-go/tools/cache"
+	"sigs.k8s.io/controller-runtime/pkg/cache/informertest"
 
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
 )
@@ -154,4 +156,26 @@ var _ = Describe("image event handler", func() {
 			return toolscache.DeletedFinalStateUnknown{Key: "cnpg-system/sidecar-image", Obj: cm}
 		}),
 	)
+})
+
+var _ = Describe("WatchSidecarImage", func() {
+	It("stores the image the ConfigMap informer delivers", func(ctx context.Context) {
+		informers := &informertest.FakeInformers{}
+		store := operator.NewImageStore()
+		image := "ghcr.io/x@sha256:" + hex64
+
+		Expect(operator.WatchSidecarImage(ctx, informers, store)).To(Succeed())
+
+		informer, err := informers.FakeInformerFor(ctx, &corev1.ConfigMap{})
+		Expect(err).NotTo(HaveOccurred())
+		informer.Add(configMap(map[string]string{operator.SidecarImageKey: image}))
+		Eventually(store.Image).Should(Equal(image))
+	})
+
+	It("returns the informer error", func(ctx context.Context) {
+		boom := errors.New("boom")
+		informers := &informertest.FakeInformers{Error: boom}
+
+		Expect(operator.WatchSidecarImage(ctx, informers, operator.NewImageStore())).To(MatchError(boom))
+	})
 })

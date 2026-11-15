@@ -47,7 +47,7 @@ func newOperatorCommand() *cobra.Command {
 				return fmt.Errorf("load in-cluster config: %w", err)
 			}
 
-			mgr, err := operator.NewManager(cfg)
+			mgr, err := operator.NewManager(cfg, namespace, configMap)
 			if err != nil {
 				return fmt.Errorf("build manager: %w", err)
 			}
@@ -65,10 +65,11 @@ func newOperatorCommand() *cobra.Command {
 
 			ctx := cmd.Context()
 			store := operator.NewImageStore()
+			if err := operator.WatchSidecarImage(ctx, mgr.GetCache(), store); err != nil {
+				return fmt.Errorf("watch sidecar image: %w", err)
+			}
+
 			g, gctx := errgroup.WithContext(ctx)
-			g.Go(func() error {
-				return operator.WatchSidecarImage(gctx, cfg, namespace, configMap, store)
-			})
 			if exportMetrics {
 				g.Go(func() error {
 					if err := metrics.Run(gctx, metricsExporter); err != nil {

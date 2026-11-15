@@ -10,12 +10,8 @@ import (
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/rest"
 	toolscache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // SidecarImageKey is the ConfigMap data key holding the sidecar image reference.
@@ -90,45 +86,19 @@ func (s *ImageStore) Wait(ctx context.Context) error {
 	}
 }
 
-// WatchSidecarImage runs a cache for one ConfigMap and calls store.Set on add and update.
-// A delete keeps the stored value and logs. It returns when ctx ends.
-func WatchSidecarImage(
-	ctx context.Context,
-	cfg *rest.Config,
-	namespace, name string,
-	store *ImageStore,
-) error {
-	logger := log.FromContext(ctx).WithValues("namespace", namespace, "configmap", name)
-
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		return fmt.Errorf("register core/v1 scheme: %w", err)
-	}
-
-	c, err := cache.New(cfg, cache.Options{
-		Scheme:            scheme,
-		DefaultNamespaces: map[string]cache.Config{namespace: {}},
-		ByObject: map[client.Object]cache.ByObject{
-			&corev1.ConfigMap{}: {Field: fields.OneTermEqualSelector("metadata.name", name)},
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("create configmap cache: %w", err)
-	}
-
-	informer, err := c.GetInformer(ctx, &corev1.ConfigMap{})
+// WatchSidecarImage feeds the sidecar image ConfigMap informer to store: it calls store.Set on add and
+// update, and a delete keeps the stored value and logs. It does not wait for the informer to sync; the
+// cache that owns it must be started by the caller.
+func WatchSidecarImage(ctx context.Context, informers cache.Informers, store *ImageStore) error {
+	informer, err := informers.GetInformer(ctx, &corev1.ConfigMap{}, cache.BlockUntilSynced(false))
 	if err != nil {
 		return fmt.Errorf("get configmap informer: %w", err)
 	}
 
-	_, err = informer.AddEventHandler(imageEventHandler(logger, store))
-	if err != nil {
+	if _, err := informer.AddEventHandler(imageEventHandler(log.FromContext(ctx), store)); err != nil {
 		return fmt.Errorf("add configmap event handler: %w", err)
 	}
 
-	if err := c.Start(ctx); err != nil {
-		return fmt.Errorf("run configmap cache: %w", err)
-	}
 	return nil
 }
 

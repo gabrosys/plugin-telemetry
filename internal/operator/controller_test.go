@@ -231,7 +231,7 @@ var _ = Describe("IdentityController", func() {
 	})
 
 	It("registers with a manager", func() {
-		mgr, err := operator.NewManager(&rest.Config{Host: discoveryServer().URL})
+		mgr, err := operator.NewManager(&rest.Config{Host: discoveryServer().URL}, "cnpg-system", "telemetry-sidecar-image")
 		Expect(err).NotTo(HaveOccurred())
 		build()
 

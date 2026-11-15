@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/gabrosys/plugin-telemetry/api/v1alpha1"
@@ -40,7 +41,7 @@ func discoveryServer() *httptest.Server {
 			Versions:         []metav1.GroupVersionForDiscovery{{GroupVersion: rbacGV, Version: "v1"}},
 			PreferredVersion: metav1.GroupVersionForDiscovery{GroupVersion: rbacGV, Version: "v1"},
 		}}},
-		"/api/v1":         namespaced("v1", map[string]string{"serviceaccounts": "ServiceAccount", "secrets": "Secret"}),
+		"/api/v1":         namespaced("v1", map[string]string{"serviceaccounts": "ServiceAccount", "secrets": "Secret", "configmaps": "ConfigMap"}),
 		"/apis/" + rbacGV: namespaced(rbacGV, map[string]string{"roles": "Role", "rolebindings": "RoleBinding"}),
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,7 +65,7 @@ var _ = Describe("NewManager", func() {
 	It("builds a manager with no listeners and no leader election", func() {
 		scheme, err := operator.NewScheme()
 		Expect(err).NotTo(HaveOccurred())
-		opts := operator.ManagerOptions(scheme)
+		opts := operator.ManagerOptions(scheme, "cnpg-system", "telemetry-sidecar-image")
 
 		Expect(opts.LeaderElection).To(BeFalse())
 		Expect(opts.Metrics.BindAddress).To(Equal("0"))
@@ -73,7 +74,7 @@ var _ = Describe("NewManager", func() {
 		Expect(opts.Scheme).To(BeIdenticalTo(scheme))
 		Expect(opts.Cache.ReaderFailOnMissingInformer).To(BeTrue())
 
-		mgr, err := operator.NewManager(&rest.Config{Host: discoveryServer().URL})
+		mgr, err := operator.NewManager(&rest.Config{Host: discoveryServer().URL}, "cnpg-system", "telemetry-sidecar-image")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(mgr.GetCache()).NotTo(BeNil())
 		Expect(mgr.GetClient()).NotTo(BeNil())
@@ -98,12 +99,15 @@ var _ = Describe("NewManager", func() {
 	It("limits ServiceAccounts, Roles, RoleBindings and Secrets to the managed-by label and caches the rest unrestricted", func() {
 		scheme, err := operator.NewScheme()
 		Expect(err).NotTo(HaveOccurred())
-		opts := operator.ManagerOptions(scheme)
+		opts := operator.ManagerOptions(scheme, "cnpg-system", "telemetry-sidecar-image")
 
 		limited := map[string]bool{}
 		for obj, by := range opts.Cache.ByObject {
 			gvks, _, err := scheme.ObjectKinds(obj)
 			Expect(err).NotTo(HaveOccurred())
+			if gvks[0].Kind == "ConfigMap" {
+				continue
+			}
 			Expect(by.Label).NotTo(BeNil(), gvks[0].Kind)
 			Expect(by.Label.Matches(labels.Set{"app.kubernetes.io/managed-by": "plugin-telemetry"})).To(BeTrue())
 			Expect(by.Label.Matches(labels.Set{"app.kubernetes.io/managed-by": "someone-else"})).To(BeFalse())
@@ -116,10 +120,28 @@ var _ = Describe("NewManager", func() {
 		Expect(opts.Cache.DefaultLabelSelector).To(BeNil())
 	})
 
+	It("caches only the sidecar image ConfigMap, in the plugin's namespace", func() {
+		scheme, err := operator.NewScheme()
+		Expect(err).NotTo(HaveOccurred())
+		opts := operator.ManagerOptions(scheme, "cnpg-system", "telemetry-sidecar-image")
+
+		var by *cache.ByObject
+		for obj, b := range opts.Cache.ByObject {
+			if _, ok := obj.(*corev1.ConfigMap); ok {
+				by = &b
+			}
+		}
+		Expect(by).NotTo(BeNil())
+		Expect(by.Namespaces).To(Equal(map[string]cache.Config{"cnpg-system": {}}))
+		Expect(by.Field).NotTo(BeNil())
+		Expect(by.Field.String()).To(Equal("metadata.name=telemetry-sidecar-image"))
+		Expect(by.Label).To(BeNil())
+	})
+
 	It("strips managedFields from every cached object", func() {
 		scheme, err := operator.NewScheme()
 		Expect(err).NotTo(HaveOccurred())
-		opts := operator.ManagerOptions(scheme)
+		opts := operator.ManagerOptions(scheme, "cnpg-system", "telemetry-sidecar-image")
 		Expect(opts.Cache.DefaultTransform).NotTo(BeNil())
 
 		cluster := &apiv1.Cluster{ObjectMeta: metav1.ObjectMeta{

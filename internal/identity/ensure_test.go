@@ -411,6 +411,16 @@ var _ = Describe("Ensurer", func() {
 			Expect(c.Get(ctx, client.ObjectKey{Namespace: identityNS, Name: tokenKey}, &corev1.Secret{})).To(Succeed())
 		})
 
+		It("skips a token Secret that names another account, which the identities policy would deny deleting", func() {
+			build(cached(func(o *identity.Objects) { o.Token.Annotations[corev1.ServiceAccountNameKey] = "default" })...)
+
+			n, err := ensurer.Remove(ctx, identityNS, "pg")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(3))
+			Expect(calls).NotTo(ContainElement("delete " + secretRef))
+			Expect(c.Get(ctx, client.ObjectKey{Namespace: identityNS, Name: tokenKey}, &corev1.Secret{})).To(Succeed())
+		})
+
 		It("deletes the four with uid and resourceVersion preconditions and counts them", func() {
 			build(cached(nil)...)
 

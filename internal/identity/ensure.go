@@ -107,7 +107,7 @@ func Members(namespace, cluster string) []client.Object {
 	}
 }
 
-// Remove deletes the cached objects but a wrong-typed token, with uid and resourceVersion preconditions,
+// Remove deletes the cached objects but a token Secret that is in the way (wrong type or another account, which the policy denies deleting), with uid and resourceVersion preconditions,
 // NotFound as done; it returns the count and errors.Join of the failures.
 func (e *Ensurer) Remove(ctx context.Context, namespace, cluster string) (int, error) {
 	var errs []error
@@ -119,7 +119,7 @@ func (e *Ensurer) Remove(ctx context.Context, namespace, cluster string) (int, e
 
 			continue
 		}
-		if _, wrong := wrongType(obj); !found || wrong {
+		if _, isSecret := obj.(*corev1.Secret); !found || (isSecret && inTheWay(obj, cluster) != "") {
 			continue
 		}
 		err = e.deleteExact(ctx, obj)

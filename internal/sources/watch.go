@@ -25,8 +25,9 @@ var errEventsClosed = errors.New("the watcher's event channel closed")
 // files by rename or symlink swap. It calls notify once it is watching, then, debounced, after any
 // change in those directories. It re-reads files() after each notify and every 5 s, adds and removes
 // directories itself and notifies once after its set grows. A failure to create the watcher or add a
-// directory, and an fsnotify error, is logged once until it recovers and retried every 5 s; an fsnotify
-// error is followed by a notify. It returns nil when ctx ends.
+// directory, and an fsnotify error, is retried every 5 s; each kind (the watcher, fsnotify errors, each
+// directory) is logged once when it starts and once when it recovers. An fsnotify error is followed by
+// a notify. It returns nil when ctx ends.
 func Watch(ctx context.Context, files func() []string, notify func()) error {
 	return watch(ctx, clock.RealClock{}, fsnotify.NewWatcher, files, notify)
 }
@@ -39,12 +40,18 @@ type dirWatch struct {
 	notify     func()
 
 	w        *fsnotify.Watcher // nil until it is created, and after it is lost
-	failing  string            // the failure last logged; empty while healthy
+	failing  map[string]bool   // the failures logged and not yet recovered, by kind: kindWatcher, kindEvent or a directory
 	eventErr bool              // an fsnotify error arrived since the last retry
 }
 
+// The kinds of failure besides a directory that cannot be watched or unwatched.
+const (
+	kindWatcher = "the watcher"
+	kindEvent   = "fsnotify events"
+)
+
 func watch(ctx context.Context, clk clock.Clock, newWatcher func() (*fsnotify.Watcher, error), files func() []string, notify func()) error {
-	d := &dirWatch{logger: log.FromContext(ctx), newWatcher: newWatcher, files: files, notify: notify}
+	d := &dirWatch{logger: log.FromContext(ctx), newWatcher: newWatcher, files: files, notify: notify, failing: map[string]bool{}}
 	defer d.close()
 
 	debounce := clk.NewTimer(Debounce)
@@ -81,13 +88,16 @@ func watch(ctx context.Context, clk clock.Clock, newWatcher func() (*fsnotify.Wa
 			}
 			// An fsnotify error, such as an overflow, can mean lost events.
 			d.eventErr = true
-			d.fail(fmt.Errorf("watch event: %w", err))
+			d.fail(kindEvent, fmt.Errorf("watch event: %w", err))
 			d.notify()
 		case <-debounce.C():
 			d.notifyAndSync()
 		case <-retry.C():
 			if d.sync() {
 				d.notifyAndSync()
+			}
+			if !d.eventErr {
+				d.recovered(kindEvent)
 			}
 			d.eventErr = false
 			retry.Reset(watchRetry)
@@ -111,11 +121,12 @@ func (d *dirWatch) sync() (grew bool) {
 	if d.w == nil {
 		w, err := d.newWatcher()
 		if err != nil {
-			d.fail(fmt.Errorf("create the watcher: %w", err))
+			d.fail(kindWatcher, fmt.Errorf("create the watcher: %w", err))
 			return false
 		}
 		d.w = w
 	}
+	d.recovered(kindWatcher)
 
 	want := map[string]bool{}
 	var dirs []string
@@ -132,30 +143,31 @@ func (d *dirWatch) sync() (grew bool) {
 		have[dir] = true
 	}
 
-	var errs []error
 	for dir := range have {
 		if want[dir] {
 			continue
 		}
 		if err := d.w.Remove(dir); err != nil && !errors.Is(err, fsnotify.ErrNonExistentWatch) {
-			errs = append(errs, fmt.Errorf("unwatch %s: %w", dir, err))
+			d.fail(dir, fmt.Errorf("unwatch %s: %w", dir, err))
+			continue
 		}
+		d.recovered(dir)
 	}
 	for _, dir := range dirs {
-		if have[dir] {
-			continue
+		if !have[dir] {
+			if err := d.w.Add(dir); err != nil {
+				d.fail(dir, fmt.Errorf("watch %s: %w", dir, err))
+				continue
+			}
+			grew = true
 		}
-		if err := d.w.Add(dir); err != nil {
-			errs = append(errs, fmt.Errorf("watch %s: %w", dir, err))
-			continue
-		}
-		grew = true
+		d.recovered(dir)
 	}
-
-	if err := errors.Join(errs...); err != nil {
-		d.fail(err)
-	} else if !d.eventErr {
-		d.recovered()
+	// A directory that failed and is no longer listed has nothing left to recover.
+	for kind := range d.failing {
+		if kind != kindWatcher && kind != kindEvent && !want[kind] && !have[kind] {
+			delete(d.failing, kind)
+		}
 	}
 	return grew
 }
@@ -163,7 +175,7 @@ func (d *dirWatch) sync() (grew bool) {
 // lost drops a watcher whose channels closed; the next retry creates another.
 func (d *dirWatch) lost() {
 	d.close()
-	d.fail(errEventsClosed)
+	d.fail(kindWatcher, errEventsClosed)
 }
 
 func (d *dirWatch) close() {
@@ -176,20 +188,20 @@ func (d *dirWatch) close() {
 	d.w = nil
 }
 
-// fail logs err unless it is the failure already logged.
-func (d *dirWatch) fail(err error) {
-	if err.Error() == d.failing {
+// fail logs err when a failure of kind starts.
+func (d *dirWatch) fail(kind string, err error) {
+	if d.failing[kind] {
 		return
 	}
-	d.failing = err.Error()
+	d.failing[kind] = true
 	d.logger.Error(err, "watch the configuration files", "retryEvery", watchRetry)
 }
 
-// recovered logs the end of a failure once.
-func (d *dirWatch) recovered() {
-	if d.failing == "" {
+// recovered logs the end of a failure of kind once.
+func (d *dirWatch) recovered(kind string) {
+	if !d.failing[kind] {
 		return
 	}
-	d.failing = ""
-	d.logger.Info("watching the configuration files again")
+	delete(d.failing, kind)
+	d.logger.Info("watching the configuration files again", "failed", kind)
 }

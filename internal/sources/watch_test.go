@@ -155,8 +155,14 @@ var _ = Describe("Watch", func() {
 			write(file, "a:\n  query: SELECT "+string(rune('0'+i))+"\n")
 		}
 		Eventually(armed, 5*time.Second).Should(BeTrue())
-		time.Sleep(100 * time.Millisecond) // lets the watcher read the remaining events
-		clk.Step(sources.Debounce)
+		// Events still in flight re-arm the timer, so step until the notification instead of exactly once.
+		var stepped time.Duration
+		Eventually(func() int32 {
+			clk.Step(100 * time.Millisecond)
+			stepped += 100 * time.Millisecond
+			return count.Load()
+		}, 5*time.Second).Should(Equal(int32(2)))
+		Expect(stepped).To(BeNumerically(">=", sources.Debounce))
 		expect(2)
 	})
 
@@ -219,6 +225,28 @@ var _ = Describe("Watch", func() {
 		expect(2)
 		errs <- fsnotify.ErrEventOverflow
 		expect(3)
+		Expect(logged("overflow")).To(Equal(1))
+	})
+
+	It("logs each kind of failure once while they alternate, and each recovery once", func() {
+		missing := filepath.Join(dir, "later")
+		startWith(func(ctx context.Context, notify func()) error {
+			return sources.WatchWithErrors(ctx, clk, files, notify, errs)
+		}, file, filepath.Join(missing, "q.yaml"))
+		for range 3 {
+			errs <- fsnotify.ErrEventOverflow
+			clk.Step(sources.WatchRetry)
+			Eventually(clk.Waiters, 5*time.Second).Should(Equal(1))
+		}
+		Expect(logged("watch " + missing)).To(Equal(1))
+		Expect(logged("overflow")).To(Equal(1))
+		Expect(logged("watching the configuration files again")).To(BeZero())
+
+		Expect(os.Mkdir(missing, 0o700)).To(Succeed())
+		clk.Step(sources.WatchRetry)
+		Eventually(func() int { return logged("watching the configuration files again") }, 5*time.Second).Should(Equal(2),
+			"the directory and the fsnotify errors recover")
+		Expect(logged("watch " + missing)).To(Equal(1))
 		Expect(logged("overflow")).To(Equal(1))
 	})
 })

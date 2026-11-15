@@ -35,9 +35,12 @@ COLLECTOR_IMAGE ?= otel/opentelemetry-collector:0.165.0@sha256:34b24b740c3c88d34
 E2E_SUITES := smoke spikes admission engine plugin
 KIND_E2E_SUITES := $(filter-out engine,$(E2E_SUITES))
 E2E_TARGETS := $(addprefix e2e-,$(KIND_E2E_SUITES))
-# go test -timeout of a kind e2e suite: E2E_GO_TEST_TIMEOUT_<suite> when set, else E2E_GO_TEST_TIMEOUT.
-E2E_GO_TEST_TIMEOUT := 30m
-E2E_GO_TEST_TIMEOUT_plugin := 50m
+# Ginkgo --timeout of a suite: E2E_TIMEOUT_<suite> when set, else 30m. E2E_PROCS_<suite> sets --procs (default 1).
+E2E_TIMEOUT_plugin := 50m
+E2E_TIMEOUT_engine := 20m
+# Regex for ginkgo --focus; empty runs every spec.
+E2E_FOCUS ?=
+export E2E_FOCUS
 
 DEV_ENV := KIND=$(KIND) KUBECTL=$(KUBECTL) CMCTL=$(CMCTL) KIND_CLUSTER=$(KIND_CLUSTER) KIND_NODE_IMAGE=$(KIND_NODE_IMAGE) \
 	CNPG_VERSION=$(CNPG_VERSION) CERT_MANAGER_VERSION=$(CERT_MANAGER_VERSION)
@@ -50,7 +53,7 @@ BUILDX_BUILDER ?=
 .PHONY: help
 help: ## Show the available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_%-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
-	@printf '  %-16s %s\n' 'e2e-<suite>' 'Run an e2e suite on the kind environment ($(KIND_E2E_SUITES))'
+	@printf '  %-16s %s\n' 'e2e-<suite>' 'Run an e2e suite on the kind environment ($(KIND_E2E_SUITES)); E2E_FOCUS=<regex> runs matching specs only'
 
 .PHONY: build
 build: ## Build bin/plugin-telemetry and compile every package
@@ -101,19 +104,23 @@ deploy: $(KUBECTL) ## Deploy the plugin to the kind environment (after image and
 	KUBECTL=$(KUBECTL) KIND_CLUSTER=$(KIND_CLUSTER) BIN=$(BIN) COLLECTOR_IMAGE=$(COLLECTOR_IMAGE) POSTGRES_IMAGE=$(POSTGRES_IMAGE) \
 		hack/deploy.sh "$$(cat $(BIN)/image-ref)"
 
+# ginkgo-run: $(1) names the suite (timeout and procs), $(2) is the package directory.
+ginkgo-run = $(GO) run github.com/onsi/ginkgo/v2/ginkgo run --tags e2e -v --fail-on-empty \
+	--procs=$(or $(E2E_PROCS_$(1)),1) --timeout=$(or $(E2E_TIMEOUT_$(1)),30m) $(if $(E2E_FOCUS),--focus="$$E2E_FOCUS") ./$(2)/...
+
 .PHONY: $(E2E_TARGETS)
 $(E2E_TARGETS): e2e-%: dev-up
 	E2E_KUBE_CONTEXT=kind-$(KIND_CLUSTER) CNPG_VERSION=$(CNPG_VERSION) POSTGRES_IMAGE=$(POSTGRES_IMAGE) \
-		$(GO) test -tags e2e -count=1 -timeout $(or $(E2E_GO_TEST_TIMEOUT_$*),$(E2E_GO_TEST_TIMEOUT)) -v ./test/e2e/$*/... -ginkgo.v
+		$(call ginkgo-run,$*,test/e2e/$*)
 
 e2e-spikes: image kind-load deploy
 e2e-admission: image kind-load deploy
 e2e-plugin: image kind-load deploy
 
 .PHONY: e2e-engine
-e2e-engine: build ## Run the engine e2e suite with Docker, without kind
+e2e-engine: build ## Run the engine e2e suite with Docker, without kind (E2E_FOCUS=<regex>)
 	ENGINE_BIN=$(BIN)/plugin-telemetry POSTGRES_IMAGE=$(POSTGRES_IMAGE) COLLECTOR_IMAGE=$(COLLECTOR_IMAGE) \
-		$(GO) test -tags e2e -count=1 -timeout 20m -v ./test/e2e/engine/...
+		$(call ginkgo-run,engine,test/e2e/engine)
 
 .PHONY: lint
 lint: $(GOLANGCI_LINT) ## Run linters and the vulnerability scan

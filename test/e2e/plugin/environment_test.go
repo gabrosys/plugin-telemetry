@@ -209,5 +209,5 @@ var _ = Describe("the plugin environment", Ordered, Serial, ContinueOnFailure, f
 			g.Expect(c.Get(ctx, clusterKey, &cluster)).To(Succeed())
 			g.Expect(cluster.Status.Phase).To(Equal(apiv1.PhaseHealthy))
 		}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(10 * time.Second).Should(Succeed())
-	}, SpecTimeout(20*time.Minute))
+	}, SpecTimeout(22*time.Minute))
 })

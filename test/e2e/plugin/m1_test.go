@@ -92,8 +92,7 @@ func sidecarMounts(peer bool) []corev1.VolumeMount {
 	return mounts
 }
 
-// forbidden lists what the sidecar of cluster must not do; other is another Cluster of the namespace and
-// readable what it may read, which it must not write either.
+// forbidden lists what the sidecar of cluster must not do, including writing the readable objects.
 func forbidden(namespace, cluster, other string, readable []authorizationv1.ResourceAttributes) []authorizationv1.ResourceAttributes {
 	attrs := []authorizationv1.ResourceAttributes{
 		{Namespace: namespace, Verb: "get", Resource: "secrets", Name: cluster + apiv1.SuperUserSecretSuffix},

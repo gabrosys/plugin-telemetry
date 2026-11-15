@@ -57,9 +57,14 @@ const (
 	verbsRule    = "only get, list and watch"
 	roleRefRule  = "only to the Role of its own name"
 	subjectsRule = "only the ServiceAccount of its own name"
+
+	// Parts of the identities policy's messages.
+	writeRule   = "only ServiceAccounts named *.telemetry"
+	requestRule = "may not be requested (TokenRequest)"
 )
 
 var (
+	labelPatch    = []byte(`{"metadata":{"labels":{"label-only":"patch"}}}`)
 	dryRun        = []string{metav1.DryRunAll}
 	identities    = []string{"secrets", "serviceaccounts"}
 	writeVerbs    = []string{"create", "update", "patch", "delete", "deletecollection"}
@@ -85,9 +90,10 @@ func serviceAccount(namespace, name string) *corev1.ServiceAccount {
 	return &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}
 }
 
-// denied matches a Forbidden error raised by the policy, which RBAC denials lack.
-func denied() OmegaMatcher {
-	return SatisfyAll(Satisfy(apierrors.IsForbidden), MatchError(ContainSubstring(policyName)))
+// denied matches a Forbidden error raised by the identities policy for the rule named by part of its message.
+func denied(rule string) OmegaMatcher {
+	return SatisfyAll(Satisfy(apierrors.IsForbidden),
+		MatchError(ContainSubstring(policyName)), MatchError(ContainSubstring(rule)))
 }
 
 // deniedBy matches a Forbidden error raised by the roles policy for the rule named by part of its message.
@@ -134,6 +140,9 @@ func roleRef(kind, name string) rbacv1.RoleRef {
 // and waits until the API server authorizes every group, resource, verb and name the rule lists.
 func grant(ctx SpecContext, c client.Client, cfg *rest.Config, namespace, name string, subject rbacv1.Subject, rule rbacv1.PolicyRule) {
 	GinkgoHelper()
+	Expect(subject.Kind).To(Equal(rbacv1.ServiceAccountKind), "grant waits as a ServiceAccount user")
+	checks := ruleAttributes(namespace, rule)
+	Expect(checks).NotTo(BeEmpty(), "the rule lists nothing to wait for")
 	rules := []rbacv1.PolicyRule{*rule.DeepCopy()}
 	var objs []client.Object
 	if namespace == "" {
@@ -160,7 +169,7 @@ func grant(ctx SpecContext, c client.Client, cfg *rest.Config, namespace, name s
 	}
 
 	user := framework.ServiceAccountUser(subject.Namespace, subject.Name)
-	for _, attrs := range ruleAttributes(namespace, rule) {
+	for _, attrs := range checks {
 		Eventually(func(g Gomega, ctx SpecContext) {
 			allowed, err := framework.CanI(ctx, cfg, user, attrs)
 			g.Expect(err).NotTo(HaveOccurred())
@@ -178,11 +187,11 @@ func ruleAttributes(namespace string, rule rbacv1.PolicyRule) []authorizationv1.
 	var checks []authorizationv1.ResourceAttributes
 	for _, group := range rule.APIGroups {
 		for _, resource := range rule.Resources {
-			resource, subresource, _ := strings.Cut(resource, "/")
+			base, subresource, _ := strings.Cut(resource, "/")
 			for _, verb := range rule.Verbs {
 				for _, name := range names {
 					checks = append(checks, authorizationv1.ResourceAttributes{
-						Namespace: namespace, Verb: verb, Group: group, Resource: resource, Subresource: subresource, Name: name,
+						Namespace: namespace, Verb: verb, Group: group, Resource: base, Subresource: subresource, Name: name,
 					})
 				}
 			}
@@ -234,40 +243,40 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 	}
 
 	It("denies a token Secret for the namespace's default account", func(ctx SpecContext) {
-		Expect(dryRunCreateSecret(ctx, ns, tokenSecret(ns, "default-token", "default"))).To(denied())
+		Expect(dryRunCreateSecret(ctx, ns, tokenSecret(ns, "default-token", "default"))).To(denied(writeRule))
 	})
 
 	It("denies a token Secret for CNPG's adm account", func(ctx SpecContext) {
-		Expect(dryRunCreateSecret(ctx, ns, tokenSecret(ns, "adm-token", clusterName))).To(denied())
+		Expect(dryRunCreateSecret(ctx, ns, tokenSecret(ns, "adm-token", clusterName))).To(denied(writeRule))
 	})
 
 	It("denies a token Secret for kube-system/default", func(ctx SpecContext) {
-		Expect(dryRunCreateSecret(ctx, "kube-system", tokenSecret("kube-system", "default-token", "default"))).To(denied())
+		Expect(dryRunCreateSecret(ctx, "kube-system", tokenSecret("kube-system", "default-token", "default"))).To(denied(writeRule))
 	})
 
 	It("denies an Opaque Secret named adm.telemetry-token", func(ctx SpecContext) {
 		secret := tokenSecret(ns, telemetryToken, telemetryName)
 		secret.Type = corev1.SecretTypeOpaque
-		Expect(dryRunCreateSecret(ctx, ns, secret)).To(denied())
+		Expect(dryRunCreateSecret(ctx, ns, secret)).To(denied(writeRule))
 	})
 
 	It("denies a token Secret whose name isn't <account>-token", func(ctx SpecContext) {
-		Expect(dryRunCreateSecret(ctx, ns, tokenSecret(ns, otherToken, telemetryName))).To(denied())
+		Expect(dryRunCreateSecret(ctx, ns, tokenSecret(ns, otherToken, telemetryName))).To(denied(writeRule))
 	})
 
 	It("denies a ServiceAccount not ending in .telemetry", func(ctx SpecContext) {
 		_, err := plugin.CoreV1().ServiceAccounts(ns).Create(ctx, serviceAccount(ns, "other"), metav1.CreateOptions{DryRun: dryRun})
-		Expect(err).To(denied())
+		Expect(err).To(denied(writeRule))
 	})
 
 	It("denies a ServiceAccount named adm-telemetry, the 0.4.0 name", func(ctx SpecContext) {
 		_, err := plugin.CoreV1().ServiceAccounts(ns).Create(ctx, serviceAccount(ns, oldTelemetryName), metav1.CreateOptions{DryRun: dryRun})
-		Expect(err).To(denied())
+		Expect(err).To(denied(writeRule))
 	})
 
 	It("denies deleting the plugin's own ServiceAccount in cnpg-system", func(ctx SpecContext) {
 		err := plugin.CoreV1().ServiceAccounts(pluginNS).Delete(ctx, pluginAccount, metav1.DeleteOptions{DryRun: dryRun})
-		Expect(err).To(denied())
+		Expect(err).To(denied(writeRule))
 	})
 
 	It("allows the ServiceAccount adm.telemetry and the Secret adm.telemetry-token", func(ctx SpecContext) {
@@ -325,7 +334,27 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		secret.Annotations[corev1.ServiceAccountNameKey] = clusterName
 
 		_, err := plugin.CoreV1().Secrets(ns).Update(ctx, &secret, metav1.UpdateOptions{DryRun: dryRun})
-		Expect(err).To(denied())
+		Expect(err).To(denied(writeRule))
+	})
+
+	It("allows a label-only patch of adm.telemetry-token", func(ctx SpecContext) {
+		_, err := plugin.CoreV1().Secrets(ns).Patch(ctx, telemetryToken, types.MergePatchType, labelPatch,
+			metav1.PatchOptions{DryRun: dryRun})
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("denies repointing a token Secret of another account at a .telemetry account", func(ctx SpecContext) {
+		// An admin made it, for an account the plugin may not write, under a name the plugin may.
+		foreign := tokenSecret(ns, "legacy.telemetry-token", "default")
+		Expect(c.Create(ctx, foreign)).To(Succeed())
+		DeferCleanup(func(ctx SpecContext) {
+			Expect(client.IgnoreNotFound(c.Delete(ctx, foreign))).To(Succeed())
+		})
+
+		repoint := []byte(`{"metadata":{"annotations":{"` + corev1.ServiceAccountNameKey + `":"legacy.telemetry"}}}`)
+		_, err := plugin.CoreV1().Secrets(ns).Patch(ctx, foreign.Name, types.MergePatchType, repoint,
+			metav1.PatchOptions{DryRun: dryRun})
+		Expect(err).To(denied(writeRule))
 	})
 
 	It("denies deleting a Secret or ServiceAccount it may not write, one by one and as a collection", func(ctx SpecContext) {
@@ -333,10 +362,10 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		Expect(c.Create(ctx, plain)).To(Succeed())
 
 		deleteOpts := metav1.DeleteOptions{DryRun: dryRun}
-		Expect(plugin.CoreV1().Secrets(ns).Delete(ctx, "plain", deleteOpts)).To(denied())
-		Expect(plugin.CoreV1().ServiceAccounts(ns).Delete(ctx, clusterName, deleteOpts)).To(denied())
-		Expect(plugin.CoreV1().Secrets(ns).DeleteCollection(ctx, deleteOpts, metav1.ListOptions{})).To(denied())
-		Expect(plugin.CoreV1().ServiceAccounts(ns).DeleteCollection(ctx, deleteOpts, metav1.ListOptions{})).To(denied())
+		Expect(plugin.CoreV1().Secrets(ns).Delete(ctx, "plain", deleteOpts)).To(denied(writeRule))
+		Expect(plugin.CoreV1().ServiceAccounts(ns).Delete(ctx, clusterName, deleteOpts)).To(denied(writeRule))
+		Expect(plugin.CoreV1().Secrets(ns).DeleteCollection(ctx, deleteOpts, metav1.ListOptions{})).To(denied(writeRule))
+		Expect(plugin.CoreV1().ServiceAccounts(ns).DeleteCollection(ctx, deleteOpts, metav1.ListOptions{})).To(denied(writeRule))
 	})
 
 	It("allows deleting adm.telemetry-token and adm.telemetry", func(ctx SpecContext) {
@@ -358,7 +387,7 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 
 		request := &authenticationv1.TokenRequest{Spec: authenticationv1.TokenRequestSpec{ExpirationSeconds: ptr.To(int64(600))}}
 		_, err := plugin.CoreV1().ServiceAccounts(ns).CreateToken(ctx, throwawayName, request, metav1.CreateOptions{})
-		Expect(err).To(denied())
+		Expect(err).To(denied(requestRule))
 	})
 
 	key := func(name string) client.ObjectKey { return client.ObjectKey{Namespace: ns, Name: name} }
@@ -540,8 +569,6 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 			Expect(client.IgnoreNotFound(c.Delete(ctx, obj))).To(Succeed())
 		})
 	}
-	labelPatch := []byte(`{"metadata":{"labels":{"label-only":"patch"}}}`)
-
 	It("denies a label-only patch of a Role that holds a write rule", func(ctx SpecContext) {
 		role := &rbacv1.Role{ObjectMeta: meta(legacyName), Rules: []rbacv1.PolicyRule{createSecrets}}
 		createAsAdmin(ctx, role)
@@ -631,7 +658,7 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 
 		It("holds a *.telemetry account to the identities policy", func(ctx SpecContext) {
 			_, err := dotted.CoreV1().ServiceAccounts(ns).Create(ctx, serviceAccount(ns, "other"), metav1.CreateOptions{DryRun: dryRun})
-			Expect(err).To(denied())
+			Expect(err).To(denied(writeRule))
 
 			_, err = dotted.CoreV1().ServiceAccounts(ns).Create(ctx, serviceAccount(ns, "other.telemetry"), metav1.CreateOptions{DryRun: dryRun})
 			Expect(err).NotTo(HaveOccurred())

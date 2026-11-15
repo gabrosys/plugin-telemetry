@@ -33,6 +33,11 @@ type manifest struct {
 		Name      string `yaml:"name"`
 		Namespace string `yaml:"namespace"`
 	} `yaml:"configMapGenerator"`
+	Spec struct {
+		Validations []struct {
+			Message string `yaml:"message"`
+		} `yaml:"validations"`
+	} `yaml:"spec"`
 	Rules   []rule `yaml:"rules"`
 	RoleRef struct {
 		Kind string `yaml:"kind"`

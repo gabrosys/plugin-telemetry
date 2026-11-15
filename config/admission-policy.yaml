@@ -32,7 +32,10 @@ spec:
         variables.secret
           ? variables.target.?type.orValue('') == 'kubernetes.io/service-account-token' &&
             variables.target.?metadata.annotations['kubernetes.io/service-account.name'].orValue('').endsWith('.telemetry') &&
-            variables.target.metadata.name == variables.target.metadata.annotations['kubernetes.io/service-account.name'] + '-token'
+            variables.target.metadata.name == variables.target.metadata.annotations['kubernetes.io/service-account.name'] + '-token' &&
+            (request.operation != 'UPDATE' ||
+              oldObject.?metadata.annotations['kubernetes.io/service-account.name'].orValue('') ==
+                variables.target.metadata.annotations['kubernetes.io/service-account.name'])
           : variables.target.metadata.name.endsWith('.telemetry')
   validations:
     - expression: variables.tokenRequest || variables.allowed

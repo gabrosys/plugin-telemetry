@@ -97,6 +97,37 @@ func Since(lines []Line, t time.Time) []Line {
 	return out
 }
 
+// ConfigInfo is the metric every export carries once, which marks the export's collection time.
+const ConfigInfo = "cnpg_otel_config_info"
+
+// ExportTimes returns the collection times of the exports in lines, sorted, from the one ConfigInfo point each carries.
+func ExportTimes(lines []Line) []time.Time {
+	var out []time.Time
+	for _, p := range Points(lines, ConfigInfo) {
+		out = append(out, p.Time)
+	}
+	slices.SortFunc(out, func(a, b time.Time) int { return a.Compare(b) })
+	return slices.Compact(out)
+}
+
+// ExportAt returns the lines from t up to the next export time in lines; the last export runs to the end.
+func ExportAt(lines []Line, t time.Time) []Line {
+	end := time.Time{}
+	for _, next := range ExportTimes(lines) {
+		if next.After(t) {
+			end = next
+			break
+		}
+	}
+	var out []Line
+	for _, l := range Since(lines, t) {
+		if end.IsZero() || l.Time.Before(end) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
 // Point is one number data point of a gauge or a sum.
 type Point struct {
 	Time  time.Time

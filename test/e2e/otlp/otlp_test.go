@@ -1,6 +1,7 @@
 package otlp_test
 
 import (
+	"strconv"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -155,5 +156,41 @@ var _ = Describe("readers", func() {
 
 		_, err := otlp.Shapes(l.All(), "scope-a")
 		Expect(err).To(MatchError(ContainSubstring("metric up")))
+	})
+})
+
+var _ = Describe("ExportAt", func() {
+	// exportLines returns, for each time in seconds, a line with the config info point and a line with an up point.
+	exportLines := func(seconds ...int) []otlp.Line {
+		var raw string
+		for _, s := range seconds {
+			ns := strconv.Itoa(s) + "000000000"
+			raw += `{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"` + otlp.ConfigInfo + `","gauge":{"dataPoints":[{"timeUnixNano":"` + ns + `","asInt":"1"}]}}]}]}]}` + "\n"
+			raw += `{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"up","gauge":{"dataPoints":[{"timeUnixNano":"` + ns + `","asInt":"1"}]}}]}]}]}` + "\n"
+		}
+		lines, _, err := otlp.Decode([]byte(raw))
+		Expect(err).NotTo(HaveOccurred())
+		return lines
+	}
+	at := func(s int) time.Time { return time.Unix(int64(s), 0) }
+
+	It("lists the export times sorted and without duplicates", func() {
+		lines := exportLines(20, 10, 30)
+		Expect(otlp.ExportTimes(append(lines, lines...))).To(Equal([]time.Time{at(10), at(20), at(30)}))
+	})
+
+	It("returns exactly the lines of one export", func() {
+		lines := exportLines(10, 20, 30)
+		Expect(otlp.ExportAt(lines, at(10))).To(Equal(lines[0:2]))
+		Expect(otlp.ExportAt(lines, at(20))).To(Equal(lines[2:4]))
+	})
+
+	It("runs the last export to the end of the slice", func() {
+		lines := exportLines(10, 20, 30)
+		Expect(otlp.ExportAt(lines, at(30))).To(Equal(lines[4:]))
+	})
+
+	It("returns no lines for a time past every export", func() {
+		Expect(otlp.ExportAt(exportLines(10, 20), at(21))).To(BeEmpty())
 	})
 })

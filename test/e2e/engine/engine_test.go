@@ -48,7 +48,7 @@ const (
 `
 
 	runsTotal   = "cnpg_otel_query_runs_total"
-	configInfo  = "cnpg_otel_config_info"
+	configInfo  = otlp.ConfigInfo
 	configLoads = "cnpg_otel_config_loads_total"
 	up          = "cnpg_collector_up"
 )
@@ -79,41 +79,13 @@ func marshalShapes(shapes []otlp.Shape) []byte {
 	return []byte("[\n" + strings.Join(rows, ",\n") + "\n]\n")
 }
 
-// exportTimes returns the collection times of the exports in lines, from the one config info point each carries.
-func exportTimes(lines []otlp.Line) []time.Time {
-	var out []time.Time
-	for _, p := range otlp.Points(lines, configInfo) {
-		out = append(out, p.Time)
-	}
-	slices.SortFunc(out, func(a, b time.Time) int { return a.Compare(b) })
-	return slices.Compact(out)
-}
-
-// exportAt returns the lines from t up to the next export time in lines.
-func exportAt(lines []otlp.Line, t time.Time) []otlp.Line {
-	end := time.Time{}
-	for _, next := range exportTimes(lines) {
-		if next.After(t) {
-			end = next
-			break
-		}
-	}
-	var out []otlp.Line
-	for _, l := range otlp.Since(lines, t) {
-		if end.IsZero() || l.Time.Before(end) {
-			out = append(out, l)
-		}
-	}
-	return out
-}
-
 // latestExport returns the lines of the last export.
 func latestExport(lines []otlp.Line) []otlp.Line {
-	times := exportTimes(lines)
+	times := otlp.ExportTimes(lines)
 	if len(times) == 0 {
 		return nil
 	}
-	return exportAt(lines, times[len(times)-1])
+	return otlp.ExportAt(lines, times[len(times)-1])
 }
 
 // increase returns how much the counter series matching want grew over the window that ends at its last point.
@@ -208,7 +180,7 @@ var _ = Describe("the engine", Ordered, ContinueOnFailure, func() {
 			g.Expect(points[len(points)-1].Time.Sub(points[0].Time)).To(BeNumerically(">=", slowWindow))
 		}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(time.Second).Should(Succeed())
 
-		times := exportTimes(lines)
+		times := otlp.ExportTimes(lines)
 		Expect(len(times)).To(BeNumerically(">=", 7), "fewer than 6 export gaps")
 		gaps := make([]time.Duration, 0, len(times)-1)
 		for i := 1; i < len(times); i++ {
@@ -280,10 +252,10 @@ var _ = Describe("the engine", Ordered, ContinueOnFailure, func() {
 		var after []otlp.Line
 		Eventually(func(g Gomega) {
 			after = otlp.Since(exported(ctx, g), broken)
-			g.Expect(len(exportTimes(after))).To(BeNumerically(">=", 3))
+			g.Expect(len(otlp.ExportTimes(after))).To(BeNumerically(">=", 3))
 		}).WithContext(ctx).WithTimeout(3*exportInterval + slack).WithPolling(time.Second).Should(Succeed())
-		for _, at := range exportTimes(after) {
-			export := exportAt(after, at)
+		for _, at := range otlp.ExportTimes(after) {
+			export := otlp.ExportAt(after, at)
 			Expect(otlp.Points(export, probeMetric)).To(ContainElement(HaveField("Value", 42.0)), "export at %s", at)
 			Expect(mustLast(export, configInfo, nil).Attrs).To(HaveKeyWithValue("generation", generation), "export at %s", at)
 		}

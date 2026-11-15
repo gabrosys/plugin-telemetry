@@ -125,6 +125,29 @@ e2e-engine: build ## Run the engine e2e suite with Docker, without kind (E2E_FOC
 	ENGINE_BIN=$(BIN)/plugin-telemetry POSTGRES_IMAGE=$(POSTGRES_IMAGE) COLLECTOR_IMAGE=$(COLLECTOR_IMAGE) \
 		$(call ginkgo-run,engine,test/e2e/engine)
 
+E2E_MATRIX_CNPG ?= v1.30.1 main
+E2E_MATRIX_SUITES ?= $(KIND_E2E_SUITES)
+
+# One lane: the suites in order on one kind cluster.
+.PHONY: e2e-lane
+e2e-lane: $(addprefix e2e-,$(E2E_MATRIX_SUITES))
+
+# Each lane has its own cluster and BIN, and logs to bin/e2e/<version>.log. Other command-line variables reach the lanes through MAKEFLAGS.
+.PHONY: e2e-matrix
+e2e-matrix: image $(KIND) $(KUBECTL) $(CMCTL) ## Run the kind suites on one kind cluster per CNPG version, in parallel
+	mkdir -p $(BIN)/e2e
+	pids=(); failed=0; \
+	for v in $(E2E_MATRIX_CNPG); do \
+		( start=$$SECONDS; rc=0; \
+		$(MAKE) --no-print-directory -k -o image e2e-lane CNPG_VERSION=$$v KIND_CLUSTER=plugin-telemetry-$${v//./-} \
+			BIN=$(BIN)/lanes/$$v KIND=$(KIND) KUBECTL=$(KUBECTL) CMCTL=$(CMCTL) >$(BIN)/e2e/$$v.log 2>&1 || rc=$$?; \
+		echo "$$v exit=$$rc $$((SECONDS - start))s $$(date +%T)"; \
+		exit $$rc ) & \
+		pids+=($$!); \
+	done; \
+	for pid in "$${pids[@]}"; do wait "$$pid" || failed=1; done; \
+	exit $$failed
+
 .PHONY: lint
 lint: $(GOLANGCI_LINT) ## Run linters and the vulnerability scan
 	$(GOLANGCI_LINT) config verify

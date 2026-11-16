@@ -415,18 +415,14 @@ var _ = Describe("Run", func() {
 
 		It("lets a call in flight finish after its context ends", func() {
 			cancel()
+			By("accepts no new connection once its context ends")
 			Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeFalse())
+			By("finishing the call in flight after the dial is refused")
 			release()
 			Eventually(result, 5*time.Second).Should(Receive(BeNil()))
 			Expect(<-patch).NotTo(BeEmpty())
 			Eventually(done, 5*time.Second).Should(Receive(BeNil()))
 			done <- nil
-		})
-
-		It("accepts no new connection once its context ends", func() {
-			cancel()
-			Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeFalse())
-			release()
 		})
 
 		It("ends a call still running when the drain timeout has passed", func() {

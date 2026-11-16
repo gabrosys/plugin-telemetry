@@ -2,12 +2,9 @@ package cli
 
 import (
 	"context"
-	cryptorand "crypto/rand"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"net"
 	"os"
 	"strings"
@@ -17,7 +14,6 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
-	"k8s.io/utils/clock"
 
 	"github.com/gabrosys/plugin-telemetry/internal/engine"
 	"github.com/gabrosys/plugin-telemetry/internal/export"
@@ -29,16 +25,6 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/safe"
 	"github.com/gabrosys/plugin-telemetry/internal/version"
 )
-
-// instanceFlags are the flags every instance subcommand takes.
-type instanceFlags struct {
-	config string
-}
-
-func (f *instanceFlags) add(cmd *cobra.Command) {
-	pf := cmd.PersistentFlags()
-	pf.StringVar(&f.config, "config", "", "engine settings file")
-}
 
 // kubeSource is the Kubernetes-backed engine configuration and the loop that keeps it current.
 type kubeSource interface {
@@ -87,11 +73,11 @@ func kubeOptions(getenv func(string) string) (kubesource.Options, error) {
 	return o, nil
 }
 
-// open returns the configuration the tools read: the --config file, or a snapshot of the Kubernetes objects.
+// openFunc returns the configuration the tools read: the config file, or a snapshot of the Kubernetes objects.
 // The environment is checked here, before anything is read.
-func (f *instanceFlags) open() (func(context.Context) (engine.Config, error), error) {
-	if f.config != "" {
-		return func(context.Context) (engine.Config, error) { return engine.FileConfig(f.config), nil }, nil
+func openFunc(config string) (func(context.Context) (engine.Config, error), error) {
+	if config != "" {
+		return func(context.Context) (engine.Config, error) { return engine.FileConfig(config), nil }, nil
 	}
 	o, err := kubeOptions(os.Getenv)
 	if err != nil {
@@ -114,7 +100,7 @@ func (f *instanceFlags) open() (func(context.Context) (engine.Config, error), er
 var setMemoryLimit = memlimit.Set
 
 func newInstanceCommand() *cobra.Command {
-	var flags instanceFlags
+	var config string
 	cmd := &cobra.Command{
 		Use:   "instance",
 		Short: "Run the otel-metrics sidecar",
@@ -123,8 +109,8 @@ func newInstanceCommand() *cobra.Command {
 			ctx := cmd.Context()
 			logger := log.FromContext(ctx)
 			logger.Info("starting instance", "version", version.Version)
-			if flags.config != "" {
-				if err := runEngine(ctx, engine.FileConfig(flags.config), nil); err != nil {
+			if config != "" {
+				if err := runEngine(ctx, engine.FileConfig(config), nil); err != nil {
 					return fmt.Errorf("run the engine: %w", err)
 				}
 
@@ -148,8 +134,13 @@ func newInstanceCommand() *cobra.Command {
 			return nil
 		},
 	}
-	flags.add(cmd)
-	cmd.AddCommand(newPreflightCommand(), newValidateCommand(&flags), newTestCommand(&flags), newPrintConfigCommand(&flags))
+	cmd.PersistentFlags().StringVar(&config, "config", "", "engine settings file")
+	cmd.AddCommand(
+		newPreflightCommand(),
+		toolCommand("validate", "Check the settings and the query sources without connecting", &config, validate),
+		toolCommand("test", "Run every planned query once and print the series", &config, runTest),
+		toolCommand("print-config", "Print the effective settings, the sources and the plan", &config, printConfig),
+	)
 
 	return cmd
 }
@@ -164,11 +155,7 @@ func runEngine(ctx context.Context, cfg engine.Config, background func(context.C
 	} else {
 		logger.Info("memory limit", "bytes", limit)
 	}
-	rnd, err := newRand()
-	if err != nil {
-		return err
-	}
-	opts := engine.Options{Config: cfg, Clock: clock.RealClock{}, Rand: rnd, Getenv: os.Getenv}
+	opts := engine.Options{Config: cfg}
 	if background == nil {
 		return engine.Run(ctx, opts) //nolint:wrapcheck // the caller adds the context
 	}
@@ -196,16 +183,6 @@ func guard(logger logr.Logger, what string, fn func() error) func() error {
 	}
 }
 
-// newRand returns a generator seeded from crypto/rand.
-func newRand() (*rand.Rand, error) {
-	var seed [16]byte
-	if _, err := cryptorand.Read(seed[:]); err != nil {
-		return nil, fmt.Errorf("seed the random generator: %w", err)
-	}
-
-	return rand.New(rand.NewPCG(binary.LittleEndian.Uint64(seed[:8]), binary.LittleEndian.Uint64(seed[8:]))), nil //nolint:gosec // jitter, not security
-}
-
 // clearEnv unsets the PG* and OTEL_* variables and logs their names.
 func clearEnv(ctx context.Context) {
 	removed := append(pg.ClearEnv(), export.ClearEnv()...)
@@ -217,8 +194,13 @@ func clearEnv(ctx context.Context) {
 func newPreflightCommand() *cobra.Command {
 	var (
 		pgCfg preflight.PostgresConfig
-		cfg   = preflight.Config{PodTokenDir: metadata.PodTokenDir}
-		port  uint16
+		cfg   = preflight.Config{
+			PodTokenDir: metadata.PodTokenDir,
+			TokenDir:    metadata.SidecarTokenDir,
+			Namespace:   os.Getenv("NAMESPACE"),
+			Cluster:     os.Getenv("CLUSTER_NAME"),
+		}
+		port uint16
 	)
 
 	cmd := &cobra.Command{
@@ -253,9 +235,6 @@ func newPreflightCommand() *cobra.Command {
 	f.StringVar(&pgCfg.Database, "pg-database", "postgres", "PostgreSQL database")
 	f.StringVar(&pgCfg.PasswordSecret, "password-secret", "", "Secret holding the password, read with the sidecar token (default $PGPASSWORD)")
 	f.BoolVar(&cfg.Kube, "kube", true, "run the Kubernetes checks")
-	f.StringVar(&cfg.TokenDir, "token-dir", metadata.SidecarTokenDir, "directory holding the sidecar token and ca.crt")
-	f.StringVar(&cfg.Namespace, "namespace", os.Getenv("NAMESPACE"), "namespace of the Cluster (default $NAMESPACE)")
-	f.StringVar(&cfg.Cluster, "cluster", os.Getenv("CLUSTER_NAME"), "name of the Cluster (default $CLUSTER_NAME)")
 
 	return cmd
 }

@@ -58,18 +58,19 @@ func (c *config) keys() []string {
 	return keys
 }
 
-func newValidateCommand(flags *instanceFlags) *cobra.Command {
+// toolCommand is a subcommand that opens the configuration named by *config and runs run on it.
+func toolCommand(use, short string, config *string, run func(context.Context, io.Writer, func(context.Context) (engine.Config, error)) error) *cobra.Command {
 	return &cobra.Command{
-		Use:   "validate",
-		Short: "Check the settings and the query sources without connecting",
+		Use:   use,
+		Short: short,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			open, err := flags.open()
+			open, err := openFunc(*config)
 			if err != nil {
 				return err
 			}
 
-			return validate(cmd.Context(), cmd.OutOrStdout(), open)
+			return run(cmd.Context(), cmd.OutOrStdout(), open)
 		},
 	}
 }
@@ -173,22 +174,6 @@ func connect(ctx context.Context, c *config) (*pg.Pool, planner.Facts, error) {
 	}
 
 	return pool, facts, nil
-}
-
-func newTestCommand(flags *instanceFlags) *cobra.Command {
-	return &cobra.Command{
-		Use:   "test",
-		Short: "Run every planned query once and print the series",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			open, err := flags.open()
-			if err != nil {
-				return err
-			}
-
-			return runTest(cmd.Context(), cmd.OutOrStdout(), open)
-		},
-	}
 }
 
 func runTest(ctx context.Context, w io.Writer, open func(context.Context) (engine.Config, error)) error {
@@ -314,24 +299,6 @@ func series(name string, labels []string, value float64) string {
 	}
 
 	return name + "{" + strings.Join(labels, ",") + "} " + v
-}
-
-func newPrintConfigCommand(flags *instanceFlags) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "print-config",
-		Short: "Print the effective settings, the sources and the plan",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			open, err := flags.open()
-			if err != nil {
-				return err
-			}
-
-			return printConfig(cmd.Context(), cmd.OutOrStdout(), open)
-		},
-	}
-
-	return cmd
 }
 
 func printConfig(ctx context.Context, w io.Writer, open func(context.Context) (engine.Config, error)) error {

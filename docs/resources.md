@@ -88,3 +88,33 @@ Replacement replica: one replica deleted with the 1000 Clusters cached. The new 
 | `rssBytes` | 43020288 B | 46202880 B | 57683968 B | | |
 
 Both targets are met with the change in place. The headroom to 64 MiB is 3.8 MiB on the highest idle reading.
+
+## API load of the sidecars' watches
+
+`make measure CNPG_VERSION=v1.30.1 E2E_FOCUS=watches` writes `bin/measure/watches-v1.30.1.json`. One CNPG version: the sidecar's watches don't depend on it.
+
+Method: a Secret `measure-queries` (one `SELECT 1` query), a `MetricQuerySet` `measure-set` and a `TelemetryExporter` with `querySets: [measure-set]`; 10 Clusters `w-00` to `w-09` with one instance and `customQueriesSecret` `measure-queries`, first without the plugin. The spec reads the API server's `/metrics` at the start and the end of a 30 minute window (baseline), adds the plugin to every Cluster, waits until each sidecar exports, and reads a second 30 minute window. Per window it sums `apiserver_longrunning_requests{verb="WATCH"}` and takes the growth of `apiserver_request_total` for `verb="LIST"` and `verb="WATCH"`. The sidecar load is the plugin window minus the baseline window.
+
+Each sidecar runs five informers, each a watch on one object by name: the Cluster, the exporter, `cnpg-default-monitoring`, the Secret and the set. A client-go reflector's watch timeout is random between 5 and 10 minutes, so 50 watches renew about 50 x 30 / 7.5 = 200 times in 30 minutes. An initial sync may be a WATCH instead of a LIST (`WatchListClient`).
+
+Result: **target missed.** The open-watch increase was 60, not 50 +/- 5.
+
+| Quantity | Baseline window | Plugin window | Sidecar load |
+|---|---|---|---|
+| Open WATCH (start of window) | 287 | 347 | +60 (expected 50 +/- 5) |
+| LIST requests | 11 | 10 | -1 (noise) |
+| WATCH requests | 1075 | 1264 | +189 (expected renewals about 200) |
+
+Per sidecar per hour: about 38 WATCH requests (189 x 2 / 10) and no measurable LIST requests; the initial syncs are WATCH requests. The measured renewals (189) match the 200 expected.
+
+Linear extrapolation (every watch is its own informer):
+
+| Instances | WATCH per hour | LIST per hour |
+|---|---|---|
+| 10 | 378 | none measurable |
+| 100 | 3780 | none measurable |
+| 1000 | 37800 | none measurable |
+
+That is about 10.5 WATCH requests per second at 1000 instances.
+
+The six open watches per sidecar, one more than the five informers, are not identified by this run. One candidate is the kubelet's watch on the new token Secret volume of each Pod; it was not checked.

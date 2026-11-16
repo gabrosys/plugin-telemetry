@@ -4,7 +4,6 @@ package measure_test
 
 import (
 	"fmt"
-	"os"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -81,16 +80,7 @@ func sidecarTermination(pod *corev1.Pod) string {
 var _ = Describe("the telemetry container at maxSeriesTotal 50000", Ordered, func() {
 	It("holds 48000 to 50000 series within the default 64Mi limit", func(ctx SpecContext) {
 		Expect(settings.Defaults().Limits.MaxSeriesTotal).To(Equal(50000))
-		env, err := framework.LoadEnv(os.Getenv)
-		Expect(err).NotTo(HaveOccurred())
-		out := os.Getenv("MEASURE_OUT")
-		Expect(out).NotTo(BeEmpty(), "MEASURE_OUT")
-		c, cfg, err := framework.NewClients(env.KubeContext)
-		Expect(err).NotTo(HaveOccurred())
-
-		Eventually(framework.PluginAvailable).WithContext(ctx).WithArguments(c).
-			WithTimeout(3 * time.Minute).WithPolling(statePoll).Should(BeTrue())
-		Expect(framework.CollectorReady(ctx, c)).To(Succeed())
+		env, out, c, cfg := measureEnv(ctx)
 
 		ns, err := framework.CreateNamespace(ctx, c, "measure-series")
 		Expect(err).NotTo(HaveOccurred())

@@ -3,7 +3,6 @@
 package measure_test
 
 import (
-	"os"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -44,16 +43,7 @@ type sidecarMeasurement struct {
 
 var _ = Describe("the sidecar with CNPG's default queries", Ordered, func() {
 	It("keeps the sidecar's working set at most 40 MiB and its CPU at most 10m with CNPG's default queries", func(ctx SpecContext) {
-		env, err := framework.LoadEnv(os.Getenv)
-		Expect(err).NotTo(HaveOccurred())
-		out := os.Getenv("MEASURE_OUT")
-		Expect(out).NotTo(BeEmpty(), "MEASURE_OUT")
-		c, cfg, err := framework.NewClients(env.KubeContext)
-		Expect(err).NotTo(HaveOccurred())
-
-		Eventually(framework.PluginAvailable).WithContext(ctx).WithArguments(c).
-			WithTimeout(3 * time.Minute).WithPolling(statePoll).Should(BeTrue())
-		Expect(framework.CollectorReady(ctx, c)).To(Succeed())
+		env, out, c, cfg := measureEnv(ctx)
 
 		ns, err := framework.CreateNamespace(ctx, c, "measure-sidecar")
 		Expect(err).NotTo(HaveOccurred())

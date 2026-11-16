@@ -56,6 +56,7 @@ const (
 	exportInterval = 10 * time.Second
 
 	clusterTimeout = 10 * time.Minute
+	badGlob        = "pg_stat_["
 	specPoll       = 3 * time.Second
 
 	// invalid_authorization_specification, sent for peer and pg_hba rejections.
@@ -740,10 +741,9 @@ func describeMode(m mode) {
 		}
 
 		It("AC5: an exporter that is invalid from the start leaves the sidecar idle", func(ctx SpecContext) {
-			// Without metrics.interval the interval is 30 s, so a 20 s timeout fails Build; the CRD only checks both set.
+			// The CRD doesn't check glob syntax, so a bad exclude pattern fails Build.
 			exporter := desiredExporter(ns)
-			exporter.Spec.Metrics.Interval = nil
-			exporter.Spec.Exporter.Timeout = &metav1.Duration{Duration: 20 * time.Second}
+			exporter.Spec.Metrics.Exclude.Queries = []string{badGlob}
 
 			created := time.Now()
 			Expect(c.Create(ctx, exporter)).To(Succeed())
@@ -755,7 +755,7 @@ func describeMode(m mode) {
 				g.Expect(err).NotTo(HaveOccurred())
 				st := status(g, ctx)
 				g.Expect(st.ExporterState).To(Equal("invalid"))
-				g.Expect(st.Message).To(ContainSubstring("exporter.timeout"))
+				g.Expect(st.Message).To(ContainSubstring("exclude.queries[0]"))
 			}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(specPoll).Should(Succeed())
 
 			for _, pod := range pods(Default, ctx) {
@@ -1121,13 +1121,12 @@ func describeMode(m mode) {
 		}, SpecTimeout(3*time.Minute))
 
 		It("AC5: an invalid TelemetryExporter is reported, and the sidecars keep the configuration in force", func(ctx SpecContext) {
-			// Without metrics.interval the interval is 30 s, so a 20 s timeout fails Build; the CRD only checks both set.
+			// The CRD doesn't check glob syntax, so a bad exclude pattern fails Build.
 			var exporter v1alpha1.TelemetryExporter
 			Expect(c.Get(ctx, key(exporterName), &exporter)).To(Succeed())
 			valid := exporter.DeepCopy()
 			patch := client.MergeFrom(exporter.DeepCopy())
-			exporter.Spec.Metrics.Interval = nil
-			exporter.Spec.Exporter.Timeout = &metav1.Duration{Duration: 20 * time.Second}
+			exporter.Spec.Metrics.Exclude.Queries = []string{badGlob}
 			invalidAt := time.Now()
 			Expect(c.Patch(ctx, &exporter, patch)).To(Succeed())
 
@@ -1135,7 +1134,7 @@ func describeMode(m mode) {
 			Eventually(func(g Gomega, ctx SpecContext) {
 				st := status(g, ctx)
 				g.Expect(st.ExporterState).To(Equal("invalid"))
-				g.Expect(st.Message).To(ContainSubstring("exporter.timeout"))
+				g.Expect(st.Message).To(ContainSubstring("exclude.queries[0]"))
 			}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(specPoll).Should(Succeed())
 
 			for _, pod := range pods(Default, ctx) {

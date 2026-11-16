@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -24,6 +25,19 @@ func keys(r sources.Result) []string {
 	}
 
 	return out
+}
+
+var builtinKeys = []string{
+	"collector", "collector_pg_stat_wal", "collector_pg_stat_wal_17",
+	"collector_pg_wal", "collector_pg_wal_archive_status", "collector_sync_replicas",
+}
+
+// withBuiltin returns the keys of the entries plus the built-in keys, sorted.
+func withBuiltin(extra ...string) []string {
+	all := append(append([]string(nil), extra...), builtinKeys...)
+	sort.Strings(all)
+
+	return all
 }
 
 func entry(r sources.Result, key string) sources.Entry {
@@ -50,7 +64,7 @@ var _ = Describe("Loader", func() {
 	It("loads the builtin query first and always ok", func() {
 		r := sources.NewLoader(os.ReadFile, nil).Load()
 
-		Expect(keys(r)).To(Equal([]string{"collector"}))
+		Expect(keys(r)).To(Equal(builtinKeys))
 		Expect(r.Status).To(HaveLen(1))
 		Expect(r.Status[0].Source).To(Equal("builtin"))
 		Expect(r.Status[0].Outcome).To(Equal("ok"))
@@ -63,7 +77,7 @@ var _ = Describe("Loader", func() {
 
 		r := sources.NewLoader(os.ReadFile, []string{f1, f2}).Load()
 
-		Expect(keys(r)).To(Equal([]string{"a", "b", "c", "collector"}))
+		Expect(keys(r)).To(Equal(withBuiltin("a", "b", "c")))
 		Expect(entry(r, "a").Query.Query).To(Equal("SELECT 2"))
 		Expect(entry(r, "a").Source).To(Equal(f2))
 		Expect(entry(r, "collector").Source).To(Equal(f1))
@@ -82,7 +96,7 @@ var _ = Describe("Loader", func() {
 		Expect(r.Status[1].Outcome).To(Equal("missing"))
 		Expect(r.Status[1].Err).To(HaveOccurred())
 		Expect(r.Status[2].Outcome).To(Equal("ok"))
-		Expect(keys(r)).To(Equal([]string{"b", "collector"}))
+		Expect(keys(r)).To(Equal(withBuiltin("b")))
 	})
 
 	It("skips a file that is invalid from the start", func() {
@@ -93,7 +107,7 @@ var _ = Describe("Loader", func() {
 		Expect(r.Status[1].Outcome).To(Equal("invalid"))
 		Expect(r.Status[1].Err).To(HaveOccurred())
 		Expect(r.Status[1].UsingPrevious).To(BeFalse())
-		Expect(keys(r)).To(Equal([]string{"collector"}))
+		Expect(keys(r)).To(Equal(builtinKeys))
 	})
 
 	It("keeps the last good version of a file that stops parsing", func() {
@@ -106,7 +120,7 @@ var _ = Describe("Loader", func() {
 
 		Expect(r.Status[1].Outcome).To(Equal("invalid"))
 		Expect(r.Status[1].UsingPrevious).To(BeTrue())
-		Expect(keys(r)).To(Equal([]string{"a", "collector"}))
+		Expect(keys(r)).To(Equal(withBuiltin("a")))
 		Expect(r.Hash).To(Equal(good.Hash))
 
 		write(f1, "a:\n  query: SELECT 5\n")
@@ -147,7 +161,7 @@ var _ = Describe("Loader", func() {
 		Expect(r.Status[1].Outcome).To(Equal("denied"))
 		Expect(r.Status[1].Err).To(MatchError(sources.ErrDenied))
 		Expect(r.Status[1].UsingPrevious).To(BeTrue())
-		Expect(keys(r)).To(Equal([]string{"a", "collector"}))
+		Expect(keys(r)).To(Equal(withBuiltin("a")))
 		Expect(r.Hash).To(Equal(good.Hash))
 	})
 
@@ -156,7 +170,7 @@ var _ = Describe("Loader", func() {
 		r := sources.NewLoader(read, []string{"mem/one.yaml"}).Load()
 		Expect(r.Status[1].Outcome).To(Equal(sources.OutcomeDenied))
 		Expect(r.Status[1].UsingPrevious).To(BeFalse())
-		Expect(keys(r)).To(Equal([]string{"collector"}))
+		Expect(keys(r)).To(Equal(builtinKeys))
 	})
 
 	It("keeps a source's last good version when another source is added", func() {
@@ -171,7 +185,7 @@ var _ = Describe("Loader", func() {
 
 		Expect(r.Status[1].Outcome).To(Equal(sources.OutcomeInvalid))
 		Expect(r.Status[1].UsingPrevious).To(BeTrue())
-		Expect(keys(r)).To(Equal([]string{"a", "b", "collector"}))
+		Expect(keys(r)).To(Equal(withBuiltin("a", "b")))
 		Expect(entry(r, "a").Query).To(Equal(entry(good, "a").Query))
 	})
 
@@ -187,7 +201,7 @@ var _ = Describe("Loader", func() {
 
 		Expect(r.Status[1].Outcome).To(Equal(sources.OutcomeInvalid))
 		Expect(r.Status[1].UsingPrevious).To(BeFalse())
-		Expect(keys(r)).To(Equal([]string{"collector"}))
+		Expect(keys(r)).To(Equal(builtinKeys))
 	})
 
 	It("loads the files in the order SetFiles gives", func() {
@@ -238,7 +252,7 @@ var _ = Describe("Loader", func() {
 		Expect(os.Remove(f1)).To(Succeed())
 		gone := l.Load()
 		Expect(gone.Status[1].Outcome).To(Equal(sources.OutcomeMissing))
-		Expect(keys(gone)).To(Equal([]string{"collector"}))
+		Expect(keys(gone)).To(Equal(builtinKeys))
 
 		write(f1, "a: [not, a, map")
 		r := l.Load()
@@ -263,7 +277,7 @@ var _ = Describe("Loader", func() {
 		r := l.Load()
 		Expect(read).To(Equal([]string{"mem/one.yaml", "mem/two.yaml"}))
 		Expect(r.Status[2].Outcome).To(Equal(sources.OutcomeMissing))
-		Expect(keys(r)).To(Equal([]string{"a", "collector"}))
+		Expect(keys(r)).To(Equal(withBuiltin("a")))
 	})
 })
 

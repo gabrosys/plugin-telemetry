@@ -16,7 +16,7 @@ var _ = Describe("Define", func() {
 	DescribeTable("loads CNPG's default queries as the golden file says",
 		func(ref string) {
 			defs := defineAll(configMapQueries(readTestdata("default-monitoring-" + ref + ".yaml")))
-			Expect(defs).To(HaveLen(15))
+			Expect(defs).To(HaveLen(20))
 			Expect(defs).To(HaveKey("collector"))
 
 			Expect(defs["pg_stat_bgwriter_17"].Namespace).To(Equal("cnpg_pg_stat_bgwriter"))
@@ -290,7 +290,7 @@ q:
 
 	It("defines the built-in collector query", func() {
 		builtin := queries.Builtin()
-		Expect(builtin).To(HaveLen(1))
+		Expect(builtin).To(HaveLen(6))
 		Expect(builtin).To(HaveKey("collector"))
 
 		def := queries.Define("collector", builtin["collector"], opts)

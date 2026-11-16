@@ -1,0 +1,154 @@
+[
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "collector",
+    "labels": [
+      "datname"
+    ],
+    "metrics": [
+      {
+        "kind": "gauge",
+        "name": "cnpg_collector_lo_pages",
+        "usage": "GAUGE"
+      }
+    ],
+    "namespace": "cnpg_collector",
+    "primaryOnly": false,
+    "runOnServer": "",
+    "targetDatabases": [
+      "*"
+    ],
+    "warnings": null
+  },
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "collector_pg_stat_wal",
+    "labels": [
+      "stats_reset"
+    ],
+    "metrics": [
+      {
+        "kind": "gauge",
+        "name": "cnpg_collector_wal_buffers_full",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_collector_wal_bytes",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_collector_wal_fpi",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_collector_wal_records",
+        "usage": "GAUGE"
+      }
+    ],
+    "namespace": "cnpg_collector",
+    "primaryOnly": false,
+    "runOnServer": ">=14.0.0",
+    "targetDatabases": null,
+    "warnings": null
+  },
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "collector_pg_stat_wal_17",
+    "labels": [
+      "stats_reset"
+    ],
+    "metrics": [
+      {
+        "kind": "gauge",
+        "name": "cnpg_collector_wal_sync",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_collector_wal_sync_time",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_collector_wal_write",
+        "usage": "GAUGE"
+      },
+      {
+        "kind": "gauge",
+        "name": "cnpg_collector_wal_write_time",
+        "usage": "GAUGE"
+      }
+    ],
+    "namespace": "cnpg_collector",
+    "primaryOnly": false,
+    "runOnServer": ">=14.0.0 <18.0.0",
+    "targetDatabases": null,
+    "warnings": null
+  },
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "collector_pg_wal",
+    "labels": [
+      "value"
+    ],
+    "metrics": [
+      {
+        "kind": "gauge",
+        "name": "cnpg_collector_pg_wal",
+        "usage": "GAUGE"
+      }
+    ],
+    "namespace": "cnpg_collector",
+    "primaryOnly": false,
+    "runOnServer": "",
+    "targetDatabases": null,
+    "warnings": null
+  },
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "collector_pg_wal_archive_status",
+    "labels": [
+      "value"
+    ],
+    "metrics": [
+      {
+        "kind": "gauge",
+        "name": "cnpg_collector_pg_wal_archive_status",
+        "usage": "GAUGE"
+      }
+    ],
+    "namespace": "cnpg_collector",
+    "primaryOnly": false,
+    "runOnServer": "",
+    "targetDatabases": null,
+    "warnings": null
+  },
+  {
+    "cacheSeconds": 0,
+    "disabled": "",
+    "key": "collector_sync_replicas",
+    "labels": [
+      "value"
+    ],
+    "metrics": [
+      {
+        "kind": "gauge",
+        "name": "cnpg_collector_sync_replicas",
+        "usage": "GAUGE"
+      }
+    ],
+    "namespace": "cnpg_collector",
+    "primaryOnly": true,
+    "runOnServer": "",
+    "targetDatabases": null,
+    "warnings": null
+  }
+]

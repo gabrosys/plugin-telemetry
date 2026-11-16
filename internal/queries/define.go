@@ -104,22 +104,6 @@ type Options struct {
 	Sensitive bool
 }
 
-// Builtin is CNPG's hard-coded "collector" query (pg_collector.go:639-665 at v1.30.1).
-func Builtin() UserQueries {
-	return UserQueries{
-		"collector": UserQuery{
-			Query: "SELECT pg_catalog.current_database() as datname, relpages as lo_pages " +
-				"FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON (n.oid = c.relnamespace) " +
-				"WHERE n.nspname = 'pg_catalog' AND c.relname = 'pg_largeobject';",
-			TargetDatabases: []string{"*"},
-			Metrics: []Mapping{
-				{"datname": ColumnMapping{Usage: UsageLabel, Description: "Name of the database"}},
-				{"lo_pages": ColumnMapping{Usage: UsageGauge, Description: "Estimated number of pages in the pg_largeobject table"}},
-			},
-		},
-	}
-}
-
 // message returns quiet for a sensitive source and verbose otherwise.
 func message(sensitive bool, quiet, verbose string) string {
 	if sensitive {

@@ -56,7 +56,7 @@ var _ = Describe("Planning", func() {
 
 		close(release)
 		h.advance(func() bool { return plans(h)() == 1 })
-		Expect(h.logged(`"msg"="plan updated" "jobs"=4`)).To(Equal(1))
+		Expect(h.logged(`"msg"="plan updated" "jobs"=8`)).To(Equal(1))
 	})
 
 	It("replans when the sources or the settings change, and not when they stay", func() {

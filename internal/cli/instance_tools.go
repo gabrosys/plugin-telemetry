@@ -158,10 +158,10 @@ func connect(ctx context.Context, c *config) (*pg.Pool, planner.Facts, error) {
 	pc := engine.PostgresConfig(s)
 	pc.ReadFile = c.read
 	pool := pg.NewPool(pc, s.Postgres.MaxConnections, poolIdle, clock.RealClock{},
-		pg.WithLogger(log.FromContext(ctx).GetLogger()))
+		log.FromContext(ctx).GetLogger(), 0)
 	ctx, cancel := context.WithTimeout(ctx, engine.FactsTimeout(s.Limits))
 	defer cancel()
-	conn, release, err := pool.Acquire(ctx, s.Postgres.Database)
+	conn, release, err := pool.AcquireNow(ctx, s.Postgres.Database)
 	if err != nil {
 		pool.Close()
 		return nil, planner.Facts{}, fmt.Errorf("connect to PostgreSQL: %w", err)

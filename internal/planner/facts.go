@@ -8,7 +8,6 @@ import (
 	"math"
 	"sort"
 	"strconv"
-	"time"
 	"unicode/utf8"
 
 	"github.com/Masterminds/semver/v3"
@@ -61,9 +60,6 @@ func parseWALSegmentSize(setting string) (float64, error) {
 
 // ErrSuperuser comes with Facts{Checks: {"superuser": true}} when the session role is a superuser.
 var ErrSuperuser = errors.New("the session role is a superuser")
-
-// rollbackTimeout bounds the rollback of an unfinished facts transaction.
-const rollbackTimeout = 2 * time.Second
 
 // databasesQuery is CloudNativePG's (pkg/management/postgres/metrics/collector.go:286 at v1.30.1).
 const databasesQuery = `SELECT datname, pg_catalog.has_database_privilege(datname, 'CONNECT')
@@ -137,26 +133,22 @@ func GatherFacts(ctx context.Context, conn *pgx.Conn, guard string) (Facts, erro
 	return gatherFacts(ctx, conn, guard, checkSettings)
 }
 
-func gatherFacts(ctx context.Context, conn *pgx.Conn, guard string, settings map[string]string) (facts Facts, err error) {
-	tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return Facts{}, fmt.Errorf("begin facts transaction: %w", err)
-	}
-	defer func() {
-		rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
-		defer cancel()
-		if rbErr := tx.Rollback(rbCtx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
-			err = errors.Join(err, fmt.Errorf("roll back facts transaction: %w", rbErr))
-		}
-	}()
-	superuser, err := pg.ApplyGuard(ctx, tx, guard)
-	if err != nil {
-		return Facts{}, fmt.Errorf("facts transaction: %w", err)
-	}
+func gatherFacts(ctx context.Context, conn *pgx.Conn, guard string, settings map[string]string) (Facts, error) {
+	var facts Facts
+	superuser, err := pg.ReadOnly(ctx, conn, guard, func(tx pgx.Tx) (err error) {
+		facts, err = readFacts(ctx, tx, settings)
+		return err
+	})
 	if superuser {
 		return Facts{Checks: map[string]bool{"superuser": true}}, ErrSuperuser
 	}
+	if err != nil {
+		return Facts{}, fmt.Errorf("facts transaction: %w", err)
+	}
+	return facts, nil
+}
 
+func readFacts(ctx context.Context, tx pgx.Tx, settings map[string]string) (Facts, error) {
 	var versionNum string
 	if err := tx.QueryRow(ctx, "SHOW server_version_num").Scan(&versionNum); err != nil {
 		return Facts{}, fmt.Errorf("show server_version_num: %w", err)

@@ -132,6 +132,29 @@ func GuardSQL(c Config) string {
 	}, ", ")
 }
 
+// rollbackTimeout bounds the rollback of a transaction ReadOnly's fn left open.
+const rollbackTimeout = 2 * time.Second
+
+// ReadOnly runs fn in a read-only transaction on conn under guard (Pool.Guard), and rolls the transaction
+// back if fn leaves it open. A session role that is a superuser gives superuser true and fn does not run.
+func ReadOnly(ctx context.Context, conn *pgx.Conn, guard string, fn func(pgx.Tx) error) (superuser bool, err error) {
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return false, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+		defer cancel()
+		if rbErr := tx.Rollback(rbCtx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
+			err = errors.Join(err, fmt.Errorf("roll back transaction: %w", rbErr))
+		}
+	}()
+	if superuser, err = ApplyGuard(ctx, tx, guard); err != nil || superuser {
+		return superuser, err
+	}
+	return false, fn(tx)
+}
+
 // ApplyGuard runs guard (GuardSQL, Pool.Guard) in tx and reports whether the session role is a superuser.
 func ApplyGuard(ctx context.Context, tx pgx.Tx, guard string) (superuser bool, err error) {
 	rows, err := tx.Query(ctx, guard)

@@ -62,25 +62,10 @@ type backoff struct {
 	last     error // the connect error that started the wait, without the connection string
 }
 
-// PoolOption configures a Pool.
-type PoolOption func(*Pool)
-
-// WithLogger sets the logger for errors that have no caller to return to; the default discards them.
-func WithLogger(l logr.Logger) PoolOption {
-	return func(p *Pool) { p.log = l }
-}
-
-// WithMaxBackoff caps the wait before reconnecting to a failing database; d <= 0 keeps the default 30s.
-func WithMaxBackoff(d time.Duration) PoolOption {
-	return func(p *Pool) {
-		if d > 0 {
-			p.maxBackoff = d
-		}
-	}
-}
-
-// NewPool returns a pool that opens no connection until Acquire.
-func NewPool(c Config, maxConns int, idleTimeout time.Duration, clk clock.PassiveClock, opts ...PoolOption) *Pool {
+// NewPool returns a pool that opens no connection until AcquireWithin or AcquireNow. log receives the
+// errors that have no caller to return to; the zero Logger discards them. maxBackoff caps the wait before
+// reconnecting to a failing database; maxBackoff <= 0 keeps the default 30s.
+func NewPool(c Config, maxConns int, idleTimeout time.Duration, clk clock.PassiveClock, log logr.Logger, maxBackoff time.Duration) *Pool {
 	p := &Pool{
 		cfg:         c,
 		guard:       GuardSQL(c),
@@ -91,10 +76,10 @@ func NewPool(c Config, maxConns int, idleTimeout time.Duration, clk clock.Passiv
 		base:        context.Background(),
 		failed:      make(map[string]*backoff),
 		changed:     make(chan struct{}),
-		log:         logr.Discard(),
+		log:         log,
 	}
-	for _, opt := range opts {
-		opt(p)
+	if maxBackoff > 0 {
+		p.maxBackoff = maxBackoff
 	}
 	return p
 }
@@ -102,20 +87,15 @@ func NewPool(c Config, maxConns int, idleTimeout time.Duration, clk clock.Passiv
 // Guard returns GuardSQL of the pool's Config, to run after each BEGIN.
 func (p *Pool) Guard() string { return p.guard }
 
-// Acquire returns a connection to database. At the cap it closes the least recently used idle
-// connection of another database, or waits. After a failed connect it returns ErrBackoff until
-// 1s, 2s, 4s ... up to the maximum backoff have passed for that database.
-func (p *Pool) Acquire(ctx context.Context, database string) (*pgx.Conn, func(broken bool), error) {
-	return p.acquire(ctx, database, true, 0)
-}
-
-// AcquireWithin is Acquire that waits at most maxWait for a slot (0 or less: no limit) and then returns
-// ErrNoSlot. maxWait does not bound the connect, which keeps ctx and the connect timeout.
+// AcquireWithin returns a connection to database. At the cap it closes the least recently used idle
+// connection of another database, or waits at most maxWait for a slot (0 or less: no limit) and then returns
+// ErrNoSlot. After a failed connect it returns ErrBackoff until 1s, 2s, 4s ... up to the maximum backoff
+// have passed for that database. maxWait does not bound the connect, which keeps ctx and the connect timeout.
 func (p *Pool) AcquireWithin(ctx context.Context, database string, maxWait time.Duration) (*pgx.Conn, func(broken bool), error) {
 	return p.acquire(ctx, database, true, maxWait)
 }
 
-// AcquireNow is Acquire without the backoff: it connects even while database waits before
+// AcquireNow is AcquireWithin without the backoff or the wait limit: it connects even while database waits before
 // reconnecting, and a successful connect ends that wait.
 func (p *Pool) AcquireNow(ctx context.Context, database string) (*pgx.Conn, func(broken bool), error) {
 	return p.acquire(ctx, database, false, 0)

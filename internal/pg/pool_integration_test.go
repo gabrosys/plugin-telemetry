@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
+
 	"github.com/go-logr/logr/funcr"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -74,7 +76,7 @@ var _ = Describe("Pool", func() {
 	)
 
 	newPool := func(maxConns int, idle time.Duration) {
-		pool = pg.NewPool(cfg, maxConns, idle, clk)
+		pool = pg.NewPool(cfg, maxConns, idle, clk, logr.Logger{}, 0)
 		DeferCleanup(pool.Close)
 	}
 
@@ -87,7 +89,7 @@ var _ = Describe("Pool", func() {
 
 	It("leaves the server's values in the session", func(ctx SpecContext) {
 		newPool(2, time.Minute)
-		conn, release, err := pool.Acquire(ctx, "app")
+		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 		plain := plainConn(ctx)
@@ -106,7 +108,7 @@ var _ = Describe("Pool", func() {
 
 	It("Guard sets the limits for one transaction", func(ctx SpecContext) {
 		newPool(2, time.Minute)
-		conn, release, err := pool.Acquire(ctx, "app")
+		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 		plain := plainConn(ctx)
@@ -129,7 +131,7 @@ var _ = Describe("Pool", func() {
 
 	It("ApplyGuard sets the limits and reports a role that is not a superuser", func(ctx SpecContext) {
 		newPool(2, time.Minute)
-		conn, release, err := pool.Acquire(ctx, "app")
+		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 
@@ -149,7 +151,7 @@ var _ = Describe("Pool", func() {
 		Expect(server.Exec(ctx, "CREATE ROLE "+role+" LOGIN SUPERUSER PASSWORD '"+pgtest.MonitorPassword+"'")).To(Succeed())
 		cfg.User = role
 		newPool(2, time.Minute)
-		conn, release, err := pool.Acquire(ctx, "app")
+		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 
@@ -164,7 +166,7 @@ var _ = Describe("Pool", func() {
 	It("ends a guarded statement past QueryTimeout with SQLSTATE 57014 and keeps the connection", func(ctx SpecContext) {
 		cfg.QueryTimeout = time.Second
 		newPool(2, time.Minute)
-		conn, release, err := pool.Acquire(ctx, "app")
+		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 
@@ -185,12 +187,12 @@ var _ = Describe("Pool", func() {
 
 	It("reuses an idle connection of the same database", func(ctx SpecContext) {
 		newPool(2, time.Minute)
-		first, release, err := pool.Acquire(ctx, "app")
+		first, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		pid := backendPID(ctx, first)
 		release(false)
 
-		second, release, err := pool.Acquire(ctx, "app")
+		second, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 		Expect(backendPID(ctx, second)).To(Equal(pid))
@@ -198,14 +200,14 @@ var _ = Describe("Pool", func() {
 
 	It("closes the least recently used idle connection of another database at the cap", func(ctx SpecContext) {
 		newPool(2, time.Minute)
-		appConn, release, err := pool.Acquire(ctx, "app")
+		appConn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		release(false)
-		postgresConn, release, err := pool.Acquire(ctx, "postgres")
+		postgresConn, release, err := pool.AcquireWithin(ctx, "postgres", 0)
 		Expect(err).NotTo(HaveOccurred())
 		release(false)
 
-		third, release, err := pool.Acquire(ctx, "template1")
+		third, release, err := pool.AcquireWithin(ctx, "template1", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 
@@ -216,9 +218,9 @@ var _ = Describe("Pool", func() {
 
 	It("waits at the cap while every connection is busy", func(ctx SpecContext) {
 		newPool(2, time.Minute)
-		_, releaseApp, err := pool.Acquire(ctx, "app")
+		_, releaseApp, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
-		_, releasePostgres, err := pool.Acquire(ctx, "postgres")
+		_, releasePostgres, err := pool.AcquireWithin(ctx, "postgres", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer releasePostgres(false)
 
@@ -230,7 +232,7 @@ var _ = Describe("Pool", func() {
 		done := make(chan result, 1)
 		go func() {
 			defer GinkgoRecover()
-			conn, release, acquireErr := pool.Acquire(ctx, "template1")
+			conn, release, acquireErr := pool.AcquireWithin(ctx, "template1", 0)
 			done <- result{conn, release, acquireErr}
 		}()
 
@@ -246,19 +248,19 @@ var _ = Describe("Pool", func() {
 
 	It("stops waiting when the context ends", func(ctx SpecContext) {
 		newPool(1, time.Minute)
-		_, release, err := pool.Acquire(ctx, "app")
+		_, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 
 		waitCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
 		defer cancel()
-		_, _, err = pool.Acquire(waitCtx, "postgres")
+		_, _, err = pool.AcquireWithin(waitCtx, "postgres", 0)
 		Expect(err).To(MatchError(context.DeadlineExceeded))
 	})
 
 	It("gives up after maxWait with ErrNoSlot while every slot is taken, and not when it has a slot", func(ctx SpecContext) {
 		newPool(1, time.Minute)
-		_, release, err := pool.Acquire(ctx, "app")
+		_, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 
 		start := time.Now()
@@ -275,7 +277,7 @@ var _ = Describe("Pool", func() {
 
 	It("reports the context's end, not ErrNoSlot, when the context ended as well", func(ctx SpecContext) {
 		newPool(1, time.Minute)
-		_, release, err := pool.Acquire(ctx, "app")
+		_, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 
@@ -291,12 +293,12 @@ var _ = Describe("Pool", func() {
 
 	It("CloseIdle closes connections idle past idleTimeout", func(ctx SpecContext) {
 		newPool(3, time.Minute)
-		old, release, err := pool.Acquire(ctx, "app")
+		old, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		release(false)
 
 		clk.SetTime(start.Add(40 * time.Second))
-		recent, release, err := pool.Acquire(ctx, "postgres")
+		recent, release, err := pool.AcquireWithin(ctx, "postgres", 0)
 		Expect(err).NotTo(HaveOccurred())
 		release(false)
 
@@ -309,7 +311,7 @@ var _ = Describe("Pool", func() {
 
 	It("CloseIdle uses the timeout SetIdleTimeout set last", func(ctx SpecContext) {
 		newPool(3, time.Hour)
-		first, release, err := pool.Acquire(ctx, "app")
+		first, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		pid := backendPID(ctx, first)
 		release(false)
@@ -319,7 +321,7 @@ var _ = Describe("Pool", func() {
 		pool.CloseIdle()
 
 		Expect(first.IsClosed()).To(BeTrue())
-		second, release, err := pool.Acquire(ctx, "app")
+		second, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 		Expect(backendPID(ctx, second)).NotTo(Equal(pid))
@@ -327,7 +329,7 @@ var _ = Describe("Pool", func() {
 
 	It("replaces a connection whose backend was terminated and handed back broken", func(ctx SpecContext) {
 		newPool(2, time.Minute)
-		conn, release, err := pool.Acquire(ctx, "app")
+		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		pid := backendPID(ctx, conn)
 
@@ -336,7 +338,7 @@ var _ = Describe("Pool", func() {
 		Expect(conn.QueryRow(ctx, "SELECT 1").Scan(&one)).NotTo(Succeed())
 		release(true)
 
-		replacement, release, err := pool.Acquire(ctx, "app")
+		replacement, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 		Expect(replacement.IsClosed()).To(BeFalse())
@@ -345,7 +347,7 @@ var _ = Describe("Pool", func() {
 
 	It("closes a live connection handed back broken", func(ctx SpecContext) {
 		newPool(2, time.Minute)
-		conn, release, err := pool.Acquire(ctx, "app")
+		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		pid := backendPID(ctx, conn)
 		Expect(conn.IsClosed()).To(BeFalse())
@@ -353,7 +355,7 @@ var _ = Describe("Pool", func() {
 		release(true)
 		Expect(conn.IsClosed()).To(BeTrue())
 
-		replacement, release, err := pool.Acquire(ctx, "app")
+		replacement, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 		Expect(replacement).NotTo(BeIdenticalTo(conn))
@@ -363,7 +365,7 @@ var _ = Describe("Pool", func() {
 	DescribeTable("closes a connection handed back inside a transaction instead of reusing it",
 		func(ctx SpecContext, sql string, fails bool) {
 			newPool(2, time.Minute)
-			conn, release, err := pool.Acquire(ctx, "app")
+			conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 			Expect(err).NotTo(HaveOccurred())
 			pid := backendPID(ctx, conn)
 			_, err = conn.Exec(ctx, sql)
@@ -372,7 +374,7 @@ var _ = Describe("Pool", func() {
 			release(false)
 			Expect(conn.IsClosed()).To(BeTrue())
 
-			next, release, err := pool.Acquire(ctx, "app")
+			next, release, err := pool.AcquireWithin(ctx, "app", 0)
 			Expect(err).NotTo(HaveOccurred())
 			defer release(false)
 			Expect(backendPID(ctx, next)).NotTo(Equal(pid))
@@ -389,10 +391,10 @@ var _ = Describe("Pool", func() {
 			defer mu.Unlock()
 			lines = append(lines, prefix+args)
 		}, funcr.Options{Verbosity: verbosity})
-		pool = pg.NewPool(cfg, 2, 0, clk, pg.WithLogger(logger))
+		pool = pg.NewPool(cfg, 2, 0, clk, logger, 0)
 		DeferCleanup(pool.Close)
 
-		conn, release, err := pool.Acquire(ctx, "app")
+		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		release(false)
 		Expect(conn.PgConn().Conn().Close()).To(Succeed())
@@ -421,7 +423,7 @@ var _ = Describe("Pool", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(os.WriteFile(cfg.PasswordFile, []byte("wrong\n"), 0o600)).To(Succeed())
 
-		_, _, err = pool.Acquire(ctx, "app")
+		_, _, err = pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).To(HaveOccurred())
 		Expect(err).NotTo(MatchError(pg.ErrBackoff))
 		Expect(errors.As(err, new(*pgconn.ConnectError))).To(BeFalse(), "pgx's ConnectError holds the password")
@@ -431,20 +433,20 @@ var _ = Describe("Pool", func() {
 		Expect(authErr.Code).To(Equal("28P01"))
 
 		Expect(os.WriteFile(cfg.PasswordFile, good, 0o600)).To(Succeed())
-		_, _, err = pool.Acquire(ctx, "app")
+		_, _, err = pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).To(MatchError(pg.ErrBackoff))
 
 		clk.SetTime(start.Add(999 * time.Millisecond))
-		_, _, err = pool.Acquire(ctx, "app")
+		_, _, err = pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).To(MatchError(pg.ErrBackoff))
 
-		other, releaseOther, err := pool.Acquire(ctx, "postgres")
+		other, releaseOther, err := pool.AcquireWithin(ctx, "postgres", 0)
 		Expect(err).NotTo(HaveOccurred(), "backoff is per database")
 		releaseOther(false)
 		Expect(other.IsClosed()).To(BeFalse())
 
 		clk.SetTime(start.Add(time.Second))
-		conn, release, err := pool.Acquire(ctx, "app")
+		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		release(false)
 		Expect(conn.IsClosed()).To(BeFalse())
@@ -460,12 +462,12 @@ var _ = Describe("Pool", func() {
 			16 * time.Second, 30 * time.Second, 30 * time.Second,
 		} {
 			clk.SetTime(now)
-			_, _, err := pool.Acquire(ctx, "app")
+			_, _, err := pool.AcquireWithin(ctx, "app", 0)
 			Expect(err).To(HaveOccurred())
 			Expect(err).NotTo(MatchError(pg.ErrBackoff))
 
 			clk.SetTime(now.Add(delay - time.Millisecond))
-			_, _, err = pool.Acquire(ctx, "app")
+			_, _, err = pool.AcquireWithin(ctx, "app", 0)
 			Expect(err).To(MatchError(pg.ErrBackoff), "delay %s", delay)
 
 			now = now.Add(delay)
@@ -474,7 +476,7 @@ var _ = Describe("Pool", func() {
 
 	It("caps the delay at WithMaxBackoff", func(ctx SpecContext) {
 		cfg.Port = 1
-		pool = pg.NewPool(cfg, 2, time.Minute, clk, pg.WithMaxBackoff(5*time.Second))
+		pool = pg.NewPool(cfg, 2, time.Minute, clk, logr.Logger{}, 5*time.Second)
 		DeferCleanup(pool.Close)
 
 		now := start
@@ -482,12 +484,12 @@ var _ = Describe("Pool", func() {
 			time.Second, 2 * time.Second, 4 * time.Second, 5 * time.Second, 5 * time.Second,
 		} {
 			clk.SetTime(now)
-			_, _, err := pool.Acquire(ctx, "app")
+			_, _, err := pool.AcquireWithin(ctx, "app", 0)
 			Expect(err).To(HaveOccurred())
 			Expect(err).NotTo(MatchError(pg.ErrBackoff))
 
 			clk.SetTime(now.Add(delay - time.Millisecond))
-			_, _, err = pool.Acquire(ctx, "app")
+			_, _, err = pool.AcquireWithin(ctx, "app", 0)
 			Expect(err).To(MatchError(pg.ErrBackoff), "delay %s", delay)
 
 			now = now.Add(delay)
@@ -500,10 +502,10 @@ var _ = Describe("Pool", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(os.WriteFile(cfg.PasswordFile, []byte("wrong\n"), 0o600)).To(Succeed())
 
-		_, _, err = pool.Acquire(ctx, "app")
+		_, _, err = pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).To(HaveOccurred())
 		Expect(err).NotTo(MatchError(pg.ErrBackoff))
-		_, _, err = pool.Acquire(ctx, "app")
+		_, _, err = pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).To(MatchError(pg.ErrBackoff))
 
 		_, _, err = pool.AcquireNow(ctx, "app")
@@ -512,14 +514,14 @@ var _ = Describe("Pool", func() {
 		Expect(authErr.Code).To(Equal("28P01"))
 
 		Expect(os.WriteFile(cfg.PasswordFile, good, 0o600)).To(Succeed())
-		_, _, err = pool.Acquire(ctx, "app")
+		_, _, err = pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).To(MatchError(pg.ErrBackoff))
 		conn, release, err := pool.AcquireNow(ctx, "app")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(conn.IsClosed()).To(BeFalse())
 		release(true)
 
-		conn, release, err = pool.Acquire(ctx, "app")
+		conn, release, err = pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred(), "a successful AcquireNow ends the backoff")
 		defer release(false)
 		Expect(conn.IsClosed()).To(BeFalse())
@@ -527,7 +529,7 @@ var _ = Describe("Pool", func() {
 
 	It("uses a rotated password file for the next connection", func(ctx SpecContext) {
 		newPool(2, time.Minute)
-		_, release, err := pool.Acquire(ctx, "app")
+		_, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		release(true)
 
@@ -537,7 +539,7 @@ var _ = Describe("Pool", func() {
 		Expect(server.Exec(ctx, "ALTER ROLE cnpg_metrics_exporter PASSWORD 'rotated'")).To(Succeed())
 		Expect(os.WriteFile(cfg.PasswordFile, []byte("rotated\n"), 0o600)).To(Succeed())
 
-		conn, release, err := pool.Acquire(ctx, "app")
+		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 		Expect(conn.IsClosed()).To(BeFalse())
@@ -546,18 +548,18 @@ var _ = Describe("Pool", func() {
 	It("reconnects after the server stops and starts again on the same port", func(ctx SpecContext) {
 		newPool(2, time.Minute)
 		port := server.Port
-		_, release, err := pool.Acquire(ctx, "app")
+		_, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		release(true)
 
 		Expect(server.StopServer(ctx)).To(Succeed())
-		_, _, err = pool.Acquire(ctx, "app")
+		_, _, err = pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).To(HaveOccurred())
 
 		Expect(server.StartServer(ctx)).To(Succeed())
 		Expect(server.Port).To(Equal(port))
 		clk.SetTime(start.Add(time.Second))
-		conn, release, err := pool.Acquire(ctx, "app")
+		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 		Expect(conn.IsClosed()).To(BeFalse())
@@ -565,7 +567,7 @@ var _ = Describe("Pool", func() {
 
 	It("refuses connections to a database the role cannot connect to", func(ctx SpecContext) {
 		newPool(2, time.Minute)
-		_, _, err := pool.Acquire(ctx, "noconnect")
+		_, _, err := pool.AcquireWithin(ctx, "noconnect", 0)
 		Expect(err).To(HaveOccurred())
 		var pgErr *pgconn.PgError
 		Expect(errors.As(err, &pgErr)).To(BeTrue())
@@ -575,7 +577,7 @@ var _ = Describe("Pool", func() {
 	It("fails Acquire after Close", func(ctx SpecContext) {
 		newPool(2, time.Minute)
 		pool.Close()
-		_, _, err := pool.Acquire(ctx, "app")
+		_, _, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).To(MatchError(pg.ErrPoolClosed))
 	})
 })

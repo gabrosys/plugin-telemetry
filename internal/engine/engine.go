@@ -421,7 +421,7 @@ func (e *engine) swapPool(ctx context.Context, s settings.Settings, idle time.Du
 	pc := PostgresConfig(s)
 	pc.ReadFile = e.cfg.ReadFile
 	pool := pg.NewPool(pc, s.Postgres.MaxConnections, idle, e.clk,
-		pg.WithLogger(log.FromContext(ctx).GetLogger()), pg.WithMaxBackoff(s.PlanInterval))
+		log.FromContext(ctx).GetLogger(), s.PlanInterval)
 	next := &runner{
 		spec:   newPoolSpec(s),
 		limits: s.Limits,

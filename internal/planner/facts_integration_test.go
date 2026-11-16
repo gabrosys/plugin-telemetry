@@ -8,6 +8,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/go-logr/logr"
+
 	"github.com/jackc/pgx/v5/pgconn"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -36,9 +38,9 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 var _ = Describe("GatherFacts", func() {
 	It("reads the version, the recovery state and the connectable databases", func(ctx SpecContext) {
 		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1, time.Minute,
-			clocktesting.NewFakePassiveClock(time.Now()))
+			clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(pool.Close)
-		conn, release, err := pool.Acquire(ctx, "postgres")
+		conn, release, err := pool.AcquireWithin(ctx, "postgres", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 
@@ -53,9 +55,9 @@ var _ = Describe("GatherFacts", func() {
 	gather := func(ctx SpecContext) planner.Facts {
 		GinkgoHelper()
 		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1, time.Minute,
-			clocktesting.NewFakePassiveClock(time.Now()))
+			clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(pool.Close)
-		conn, release, err := pool.Acquire(ctx, "postgres")
+		conn, release, err := pool.AcquireWithin(ctx, "postgres", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 		f, err := planner.GatherFacts(ctx, conn, pool.Guard())
@@ -106,9 +108,9 @@ var _ = Describe("GatherFacts", func() {
 
 	It("omits only the check whose setting does not exist and still gathers the facts", func(ctx SpecContext) {
 		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1, time.Minute,
-			clocktesting.NewFakePassiveClock(time.Now()))
+			clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(pool.Close)
-		conn, release, err := pool.Acquire(ctx, "postgres")
+		conn, release, err := pool.AcquireWithin(ctx, "postgres", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 
@@ -130,9 +132,9 @@ var _ = Describe("GatherFacts", func() {
 
 		cfg := server.MonitorConfig(GinkgoT().TempDir())
 		cfg.User = role
-		pool := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()))
+		pool := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(pool.Close)
-		conn, release, err := pool.Acquire(ctx, "postgres")
+		conn, release, err := pool.AcquireWithin(ctx, "postgres", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(true)
 
@@ -144,9 +146,9 @@ var _ = Describe("GatherFacts", func() {
 
 	It("returns a wrapped error when the context is cancelled", func(ctx SpecContext) {
 		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1, time.Minute,
-			clocktesting.NewFakePassiveClock(time.Now()))
+			clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(pool.Close)
-		conn, release, err := pool.Acquire(ctx, "postgres")
+		conn, release, err := pool.AcquireWithin(ctx, "postgres", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(true)
 
@@ -158,9 +160,9 @@ var _ = Describe("GatherFacts", func() {
 
 	It("fails the round with the guard's error when the guard fails", func(ctx SpecContext) {
 		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1, time.Minute,
-			clocktesting.NewFakePassiveClock(time.Now()))
+			clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(pool.Close)
-		conn, release, err := pool.Acquire(ctx, "postgres")
+		conn, release, err := pool.AcquireWithin(ctx, "postgres", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(true)
 
@@ -177,9 +179,9 @@ var _ = Describe("GatherFacts", func() {
 		DeferCleanup(proxy.Close)
 		cfg := server.MonitorConfig(GinkgoT().TempDir())
 		cfg.Host, cfg.Port = proxy.Host, proxy.Port
-		pool := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()))
+		pool := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(pool.Close)
-		conn, release, err := pool.Acquire(ctx, "postgres")
+		conn, release, err := pool.AcquireWithin(ctx, "postgres", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(true)
 
@@ -190,7 +192,7 @@ var _ = Describe("GatherFacts", func() {
 		// The 2s rollback bound, then pgx's 2s socket deadline after its cancel request, plus a margin.
 		Expect(time.Since(start)).To(BeNumerically("<", 6*time.Second))
 		Expect(err).To(MatchError(ContainSubstring("set the transaction limits")))
-		Expect(err).To(MatchError(ContainSubstring("roll back facts transaction")))
+		Expect(err).To(MatchError(ContainSubstring("roll back transaction")))
 	}, SpecTimeout(20*time.Second))
 
 	// renameBad renames a database from a SQL_ASCII database, whose sessions pass bytes above 127 unchecked

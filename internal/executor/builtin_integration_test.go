@@ -260,7 +260,7 @@ var _ = Describe("SQL built-ins", func() {
 
 			l := limits()
 			pool := newPool(l)
-			conn, release, err := pool.Acquire(ctx, "postgres")
+			conn, release, err := pool.AcquireWithin(ctx, "postgres", 0)
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(func() { release(false) })
 

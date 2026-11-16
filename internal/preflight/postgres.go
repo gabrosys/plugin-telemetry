@@ -91,30 +91,21 @@ func checkPostgres(ctx context.Context, cfg PostgresConfig, precondition error) 
 }
 
 // readOnly runs query in a read-only transaction under guard, the limits of the engine's transactions.
-func readOnly(ctx context.Context, conn *pgx.Conn, guard string, rep *PostgresReport) (err error) {
-	tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
-	}
-	defer func() {
-		rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
-		defer cancel()
-		if rbErr := tx.Rollback(rbCtx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
-			err = errors.Join(err, fmt.Errorf("roll back: %w", rbErr))
+func readOnly(ctx context.Context, conn *pgx.Conn, guard string, rep *PostgresReport) error {
+	superuser, err := pg.ReadOnly(ctx, conn, guard, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, query).Scan(&rep.CurrentUser, &rep.WALFiles, &rep.ArchiveStatusFiles); err != nil {
+			return fmt.Errorf("query: %w", err)
 		}
-	}()
-	superuser, err := pg.ApplyGuard(ctx, tx, guard)
-	if err != nil {
-		return fmt.Errorf("check transaction: %w", err)
-	}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit: %w", err)
+		}
+		return nil
+	})
 	if superuser {
 		return fmt.Errorf("%w: %s", planner.ErrSuperuser, rep.User)
 	}
-	if err := tx.QueryRow(ctx, query).Scan(&rep.CurrentUser, &rep.WALFiles, &rep.ArchiveStatusFiles); err != nil {
-		return fmt.Errorf("query: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit: %w", err)
+	if err != nil {
+		return fmt.Errorf("transaction: %w", err)
 	}
 	return nil
 }

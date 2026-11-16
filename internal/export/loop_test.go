@@ -99,6 +99,10 @@ type loopHarness struct {
 	probe *sdkmetric.ManualReader
 	loop  *export.Loop
 
+	reader *sdkmetric.ManualReader
+	rnd    *rand.Rand
+	stats  *selfmetrics.Stats
+
 	cancel context.CancelFunc
 	done   chan error
 
@@ -131,8 +135,13 @@ func newLoopHarness(seed uint64) *loopHarness {
 	DeferCleanup(mp.Shutdown)
 	Expect(selfmetrics.Register(mp.Meter("self"), stats)).To(Succeed())
 	rnd := rand.New(rand.NewPCG(seed, seed)) //nolint:gosec // seeded for reproducible timing
-	h.loop = export.NewLoop(reader, loopResource, h.clk, rnd, stats)
+	h.reader, h.rnd, h.stats = reader, rnd, stats
 	return h
+}
+
+// use makes the harness's loop export through e, as the engine builds a new Loop for each exporter.
+func (h *loopHarness) use(e *export.Exporter, interval time.Duration, maxPoints int) {
+	h.loop = export.NewLoop(h.reader, loopResource, h.clk, h.rnd, h.stats, e, interval, maxPoints)
 }
 
 func (h *loopHarness) start() {
@@ -312,7 +321,7 @@ var _ = Describe("Loop", func() {
 		first := func(seed uint64) int {
 			srv := newHTTPServer(nil)
 			h := newLoopHarness(seed)
-			h.loop.SetExporter(context.Background(), httpExporter(srv), 100*time.Second, 1000)
+			h.use(httpExporter(srv), 100*time.Second, 1000)
 			h.start()
 			return h.stepUntilRequest(srv, 100)
 		}
@@ -327,7 +336,7 @@ var _ = Describe("Loop", func() {
 	It("exports once per interval, independent of query intervals", func() {
 		srv := newHTTPServer(nil)
 		h := newLoopHarness(1)
-		h.loop.SetExporter(context.Background(), httpExporter(srv), 10*time.Second, 1000)
+		h.use(httpExporter(srv), 10*time.Second, 1000)
 		h.start()
 		h.stepUntilRequest(srv, 10)
 
@@ -347,7 +356,7 @@ var _ = Describe("Loop", func() {
 		release := make(chan struct{})
 		srv.Respond(otlptest.Response{Block: release}, otlptest.Response{})
 		h := newLoopHarness(1)
-		h.loop.SetExporter(context.Background(), httpExporter(srv), 10*time.Second, 1000)
+		h.use(httpExporter(srv), 10*time.Second, 1000)
 		h.start()
 
 		for i := 0; len(srv.Requests()) == 0; i++ {
@@ -379,7 +388,7 @@ var _ = Describe("Loop", func() {
 		_, found := sdk.Resource.Set().Value("evil")
 		Expect(found).To(BeTrue())
 
-		h.loop.SetExporter(context.Background(), httpExporter(srv), 10*time.Second, 1000)
+		h.use(httpExporter(srv), 10*time.Second, 1000)
 		h.start()
 		h.stepUntilRequest(srv, 10)
 
@@ -393,7 +402,7 @@ var _ = Describe("Loop", func() {
 	It("records exports_total, the last success time and otel.sdk.exporter.* per request", func() {
 		srv := newHTTPServer(nil)
 		h := newLoopHarness(1)
-		h.loop.SetExporter(context.Background(), httpExporter(srv), 10*time.Second, 2)
+		h.use(httpExporter(srv), 10*time.Second, 2)
 		h.start()
 		exported := "otel.sdk.exporter.metric_data_point.exported"
 		duration := "otel.sdk.exporter.operation.duration"
@@ -432,7 +441,7 @@ var _ = Describe("Loop", func() {
 		srv := newHTTPServer(nil)
 		h := newLoopHarness(1)
 		h.prod.set(3, errors.New("producer failed"))
-		h.loop.SetExporter(context.Background(), httpExporter(srv), 10*time.Second, 1000)
+		h.use(httpExporter(srv), 10*time.Second, 1000)
 		h.start()
 
 		for i := 0; i < 10 && h.exports("error") == 0; i++ {
@@ -451,7 +460,7 @@ var _ = Describe("Loop", func() {
 		h := newLoopHarness(1)
 		s := exporterSettings(settings.ProtocolHTTP, srv.URL+"/v1/metrics")
 		s.Timeout = 9*time.Second - time.Nanosecond // the retry budget is spent after the first attempt
-		h.loop.SetExporter(context.Background(), newExporter(s), 10*time.Second, 1000)
+		h.use(newExporter(s), 10*time.Second, 1000)
 		h.start()
 
 		h.stepUntil(func() bool { return h.exports("error") >= 100 })
@@ -473,7 +482,7 @@ var _ = Describe("Loop", func() {
 		srv := newHTTPServer(nil)
 		srv.Respond(otlptest.Response{HTTPStatus: 400})
 		h := newLoopHarness(1)
-		h.loop.SetExporter(context.Background(), httpExporter(srv), 10*time.Second, 1000)
+		h.use(httpExporter(srv), 10*time.Second, 1000)
 		h.start()
 		recoveries := func() int {
 			n := 0
@@ -501,7 +510,7 @@ var _ = Describe("Loop", func() {
 	It("logs a new line when the error type changes", func() {
 		srv := newHTTPServer(nil)
 		h := newLoopHarness(1)
-		h.loop.SetExporter(context.Background(), httpExporter(srv), 10*time.Second, 1000)
+		h.use(httpExporter(srv), 10*time.Second, 1000)
 		h.start()
 
 		for _, status := range []int{400, 400, 413, 400} {
@@ -520,7 +529,7 @@ var _ = Describe("Loop", func() {
 		srv := newHTTPServer(nil)
 		h := newLoopHarness(1)
 		h.prod.set(3, errors.New("producer failed"))
-		h.loop.SetExporter(context.Background(), httpExporter(srv), 10*time.Second, 1000)
+		h.use(httpExporter(srv), 10*time.Second, 1000)
 		h.start()
 
 		h.stepUntil(func() bool { return h.exports("error") >= 3 })
@@ -544,7 +553,7 @@ var _ = Describe("Loop", func() {
 		h.prod.mu.Lock()
 		h.prod.panics = 1
 		h.prod.mu.Unlock()
-		h.loop.SetExporter(context.Background(), httpExporter(srv), 10*time.Second, 1000)
+		h.use(httpExporter(srv), 10*time.Second, 1000)
 		h.start()
 
 		for i := 0; i < 10 && h.exports("error") == 0; i++ {
@@ -559,76 +568,18 @@ var _ = Describe("Loop", func() {
 		Expect(h.exports("ok")).To(Equal(1.0))
 	})
 
-	It("switches to a new exporter at the next tick and shuts the old one down", func(ctx SpecContext) {
-		srvA, srvB := newHTTPServer(nil), newHTTPServer(nil)
-		a, b := httpExporter(srvA), httpExporter(srvB)
-		h := newLoopHarness(1)
-		h.loop.SetExporter(ctx, a, 10*time.Second, 1000)
-		h.start()
-		h.stepUntilRequest(srvA, 10)
-
-		h.loop.SetExporter(ctx, b, 20*time.Second, 1000)
-		Expect(a.Export(ctx, batch(1, 1))).To(Succeed())
-		for range 9 {
-			h.step(time.Second)
-		}
-		Expect(srvB.Requests()).To(BeEmpty())
-		h.step(time.Second)
-
-		Expect(srvA.Requests()).To(HaveLen(2))
-		Expect(srvB.Requests()).To(HaveLen(1))
-		Expect(a.Export(ctx, batch(1, 1))).To(MatchError(export.ErrExporterShutdown))
-		for range 19 {
-			h.step(time.Second)
-		}
-		Expect(srvB.Requests()).To(HaveLen(1))
-		h.step(time.Second)
-		Expect(srvB.Requests()).To(HaveLen(2))
-	})
-
-	It("shuts down an exporter replaced before its first tick", func(ctx SpecContext) {
-		srvA, srvB := newHTTPServer(nil), newHTTPServer(nil)
-		a, b := httpExporter(srvA), httpExporter(srvB)
-		h := newLoopHarness(1)
-		h.loop.SetExporter(ctx, a, 10*time.Second, 1000)
-		h.loop.SetExporter(ctx, b, 10*time.Second, 1000)
-
-		Expect(a.Export(ctx, batch(1, 1))).To(MatchError(export.ErrExporterShutdown))
-		h.start()
-		h.stepUntilRequest(srvB, 10)
-
-		Expect(srvA.Requests()).To(BeEmpty())
-	})
-
-	It("keeps the exporter it is using when that one is set again and then replaced", func(ctx SpecContext) {
-		srvA, srvB := newHTTPServer(nil), newHTTPServer(nil)
-		a, b := httpExporter(srvA), httpExporter(srvB)
-		h := newLoopHarness(1)
-		h.loop.SetExporter(ctx, a, 10*time.Second, 1000)
-		h.start()
-		h.stepUntilRequest(srvA, 10)
-
-		h.loop.SetExporter(ctx, a, 20*time.Second, 1000)
-		h.loop.SetExporter(ctx, b, 10*time.Second, 1000)
-		Expect(a.Export(ctx, batch(1, 1))).To(Succeed(), "the exporter in use stays up until the next tick")
-
-		for i := 0; len(srvB.Requests()) == 0; i++ {
-			Expect(i).To(BeNumerically("<", 10), "no export to the new exporter within one interval")
-			h.step(time.Second)
-		}
-		Expect(a.Export(ctx, batch(1, 1))).To(MatchError(export.ErrExporterShutdown))
-	})
-
-	It("shuts down the last exporter when Run returns", func(ctx SpecContext) {
+	It("shuts down its exporter when Run returns", func(ctx SpecContext) {
 		srv := newHTTPServer(nil)
 		e := httpExporter(srv)
 		h := newLoopHarness(1)
-		h.loop.SetExporter(ctx, e, 10*time.Second, 1000)
+		h.use(e, 10*time.Second, 1000)
 		h.start()
 		h.stepUntilRequest(srv, 10)
 
 		h.stop()
-		Expect(e.Export(ctx, batch(1, 1))).To(MatchError(export.ErrExporterShutdown))
+		sent := len(srv.Requests())
+		Expect(e.Export(ctx, batch(1, 1))).NotTo(Succeed())
+		Expect(srv.Requests()).To(HaveLen(sent))
 	})
 
 	It("sends only the latest collection after an outage, holding nothing back", func() {
@@ -638,7 +589,7 @@ var _ = Describe("Loop", func() {
 		s.Interval, s.Timeout = time.Second, 400*time.Millisecond
 		h := newLoopHarness(1)
 		h.prod.numbered = true
-		h.loop.SetExporter(context.Background(), newExporter(s), time.Second, 1000)
+		h.use(newExporter(s), time.Second, 1000)
 		h.start()
 
 		for i := 0; i < 100 && h.exports("error") < 20; i++ {
@@ -685,7 +636,7 @@ var _ = Describe("Loop", func() {
 				h := newLoopHarness(1)
 				h.prod.set(points, nil)
 				h.prod.size = 300
-				h.loop.SetExporter(context.Background(), newExporter(s), interval, 5000)
+				h.use(newExporter(s), interval, 5000)
 				h.start()
 				return srv, h
 			}

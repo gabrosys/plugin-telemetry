@@ -233,8 +233,7 @@ func (m *PluginMetrics) Run(ctx context.Context, s settings.Exporter) error {
 	}
 
 	rnd := rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())) //nolint:gosec // jitter, not security
-	loop := export.NewLoop(m.reader, pluginResource(os.Getenv), clock.RealClock{}, rnd, selfmetrics.NewStats())
-	loop.SetExporter(ctx, exp, s.Interval, s.MaxPointsPerRequest)
+	loop := export.NewLoop(m.reader, pluginResource(os.Getenv), clock.RealClock{}, rnd, selfmetrics.NewStats(), exp, s.Interval, s.MaxPointsPerRequest)
 
 	runErr := loop.Run(ctx)
 	if err := m.mp.Shutdown(context.WithoutCancel(ctx)); err != nil {

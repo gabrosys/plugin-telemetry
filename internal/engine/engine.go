@@ -120,7 +120,6 @@ func newPoolSpec(s settings.Settings) poolSpec {
 
 // loopRun is a running export loop.
 type loopRun struct {
-	l      *export.Loop
 	cancel context.CancelFunc
 	done   chan struct{}
 }
@@ -411,7 +410,7 @@ func (e *engine) onChange(ctx context.Context) {
 // apply sets up next in place of prev, which is nil the first time: it builds the exporter when its
 // settings, its files or the resource changed, swaps the pool when the connection settings, the limits
 // or the planning cycle changed (a new idle timeout alone goes to the pool in place), and hands the
-// exporter to the export loop. On error nothing has changed.
+// exporter to a new export loop. On error nothing has changed.
 func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 	s := next.settings
 	resourceChanged := prev == nil || prev.settings.Cluster != s.Cluster || prev.settings.Namespace != s.Namespace ||
@@ -435,11 +434,7 @@ func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 		e.runner.pool.SetIdleTimeout(next.idleTimeout)
 	}
 	if exp != nil {
-		if resourceChanged {
-			// The loop takes the resource at creation; the old loop shuts its exporters down.
-			e.startLoop(ctx, export.Resource(s, e.getenv))
-		}
-		e.loop.l.SetExporter(ctx, exp, s.Exporter.Interval, s.Exporter.MaxPointsPerRequest)
+		e.startLoop(ctx, export.Resource(s, e.getenv), exp, s.Exporter)
 	}
 	if newPool {
 		e.factsFailures = 0
@@ -526,10 +521,10 @@ func PostgresConfig(s settings.Settings) pg.Config {
 
 func (e *engine) serverVersion() *semver.Version { return e.server.Load() }
 
-// startLoop replaces the export loop with one that exports with res, once it has an exporter.
-func (e *engine) startLoop(ctx context.Context, res *resource.Resource) {
+// startLoop replaces the export loop with one that exports through exp; the old loop shuts its exporter down.
+func (e *engine) startLoop(ctx context.Context, res *resource.Resource, exp *export.Exporter, s settings.Exporter) {
 	e.stopLoop()
-	l := export.NewLoop(e.reader, res, e.clk, e.newRand(), e.stats)
+	l := export.NewLoop(e.reader, res, e.clk, e.newRand(), e.stats, exp, s.Interval, s.MaxPointsPerRequest)
 	lctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
@@ -538,7 +533,7 @@ func (e *engine) startLoop(ctx context.Context, res *resource.Resource) {
 			log.FromContext(ctx).Error(err, "run the export loop")
 		}
 	}()
-	e.loop = &loopRun{l: l, cancel: cancel, done: done}
+	e.loop = &loopRun{cancel: cancel, done: done}
 }
 
 // stopLoop stops the export loop and waits until it has shut its exporters down.

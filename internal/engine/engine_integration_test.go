@@ -759,6 +759,30 @@ var _ = Describe("Run on a superuser session role", func() {
 		}).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 	}, SpecTimeout(2*time.Minute))
 
+	// The timed facts round is a minute away, so only a run's own role check can reach the refusal in time.
+	It("refuses at the next run, not at the next planInterval, when the role becomes a superuser", func(ctx SpecContext) {
+		role := pgtest.MonitorUser
+		planInterval := time.Minute
+		DeferCleanup(func(ctx SpecContext) { Expect(server.Exec(ctx, "ALTER ROLE "+role+" NOSUPERUSER")).To(Succeed()) })
+
+		f := newFixture(planInterval)
+		writeFile(f.config, f.valid)
+		f.run()
+		Eventually(expectUp(f.srv, 1)).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+
+		Expect(server.Exec(ctx, "ALTER ROLE "+role+" SUPERUSER")).To(Succeed())
+		since := time.Now()
+		check := map[string]string{"check": "superuser"}
+		Eventually(func(g Gomega) {
+			got, ok := last(f.srv, "cnpg_otel_check", check)
+			g.Expect(ok).To(BeTrue())
+			g.Expect(got).To(Equal(1.0))
+		}).WithTimeout(planInterval / 3).WithPolling(100 * time.Millisecond).Should(Succeed())
+		Expect(time.Since(since)).To(BeNumerically("<", planInterval/3))
+		Eventually(func() (int, error) { return backends(ctx, "application_name = 'cnpg_otel_engine'") }).
+			WithTimeout(5 * time.Second).WithPolling(250 * time.Millisecond).Should(BeZero())
+	}, SpecTimeout(2*time.Minute))
+
 	It("closes its connections and runs no query once the role becomes a superuser, and resumes after NOSUPERUSER", func(ctx SpecContext) {
 		role := pgtest.MonitorUser
 		planInterval := 5 * time.Second

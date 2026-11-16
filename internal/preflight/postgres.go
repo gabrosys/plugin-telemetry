@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
+	"github.com/gabrosys/plugin-telemetry/internal/planner"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
 )
 
@@ -102,8 +103,12 @@ func readOnly(ctx context.Context, conn *pgx.Conn, guard string, rep *PostgresRe
 			err = errors.Join(err, fmt.Errorf("roll back: %w", rbErr))
 		}
 	}()
-	if _, err := tx.Exec(ctx, guard); err != nil {
+	superuser, err := pg.ApplyGuard(ctx, tx, guard)
+	if err != nil {
 		return fmt.Errorf("set the transaction limits: %w", err)
+	}
+	if superuser {
+		return fmt.Errorf("%w: %s", planner.ErrSuperuser, rep.User)
 	}
 	if err := tx.QueryRow(ctx, query).Scan(&rep.CurrentUser, &rep.WALFiles, &rep.ArchiveStatusFiles); err != nil {
 		return fmt.Errorf("query: %w", err)

@@ -30,6 +30,14 @@ var _ = Describe("GuardSQL", func() {
 		}
 		Expect(strings.Count(sql, "set_config(")).To(Equal(5))
 	})
+
+	It("also reads rolsuper of the session role in the same SELECT", func() {
+		sql := pg.GuardSQL(pg.Config{QueryTimeout: 3 * time.Second, LockTimeout: time.Second})
+
+		Expect(strings.Count(sql, "SELECT ")).To(Equal(2))
+		Expect(sql).To(HaveSuffix("(" + pg.SuperuserSQL + ")"))
+		Expect(pg.SuperuserSQL).To(Equal("SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = session_user"))
+	})
 })
 
 var _ = Describe("ConnConfig", func() {

@@ -2,6 +2,7 @@
 package pg
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -111,8 +112,12 @@ func ConnConfig(c Config, database string) (*pgx.ConnConfig, error) {
 	return cc, nil
 }
 
+// SuperuserSQL reads rolsuper of the session role (PostgreSQL 18, pg_roles and session_user).
+const SuperuserSQL = "SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = session_user"
+
 // GuardSQL sets the limits of c for the current transaction only: statement_timeout, lock_timeout,
 // idle_in_transaction_session_timeout (twice the query timeout), jit and max_parallel_workers_per_gather.
+// Its last column is rolsuper of the session role (SuperuserSQL).
 func GuardSQL(c Config) string {
 	set := func(name, value string) string {
 		return "pg_catalog.set_config('" + name + "', '" + value + "', true)"
@@ -123,7 +128,17 @@ func GuardSQL(c Config) string {
 		set("idle_in_transaction_session_timeout", milliseconds(2*c.QueryTimeout)),
 		set("jit", "off"),
 		set("max_parallel_workers_per_gather", "0"),
+		"(" + SuperuserSQL + ")",
 	}, ", ")
+}
+
+// ApplyGuard runs guard (GuardSQL, Pool.Guard) in tx and reports whether the session role is a superuser.
+func ApplyGuard(ctx context.Context, tx pgx.Tx, guard string) (superuser bool, err error) {
+	var limits [5]string
+	if err := tx.QueryRow(ctx, guard).Scan(&limits[0], &limits[1], &limits[2], &limits[3], &limits[4], &superuser); err != nil {
+		return false, fmt.Errorf("run the guard: %w", err)
+	}
+	return superuser, nil
 }
 
 // dsn builds a keyword/value connection string. Empty values are written as a quoted empty string so that

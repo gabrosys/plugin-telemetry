@@ -13,6 +13,8 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/gabrosys/plugin-telemetry/internal/pg"
 )
 
 // Facts are what the planner needs to know about the server.
@@ -59,9 +61,6 @@ func parseWALSegmentSize(setting string) (float64, error) {
 
 // ErrSuperuser comes with Facts{Checks: {"superuser": true}} when the session role is a superuser.
 var ErrSuperuser = errors.New("the session role is a superuser")
-
-// superuserSQL reads rolsuper of the session role (PostgreSQL 18, pg_roles and session_user).
-const superuserSQL = "SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = session_user"
 
 // rollbackTimeout bounds the rollback of an unfinished facts transaction.
 const rollbackTimeout = 2 * time.Second
@@ -150,13 +149,9 @@ func gatherFacts(ctx context.Context, conn *pgx.Conn, guard string, settings map
 			err = errors.Join(err, fmt.Errorf("roll back facts transaction: %w", rbErr))
 		}
 	}()
-	if _, err := tx.Exec(ctx, guard); err != nil {
+	superuser, err := pg.ApplyGuard(ctx, tx, guard)
+	if err != nil {
 		return Facts{}, fmt.Errorf("set the facts transaction limits: %w", err)
-	}
-
-	var superuser bool
-	if err := tx.QueryRow(ctx, superuserSQL).Scan(&superuser); err != nil {
-		return Facts{}, fmt.Errorf("read rolsuper of the session role: %w", err)
 	}
 	if superuser {
 		return Facts{Checks: map[string]bool{"superuser": true}}, ErrSuperuser

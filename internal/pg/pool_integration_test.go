@@ -127,6 +127,40 @@ var _ = Describe("Pool", func() {
 		}
 	})
 
+	It("ApplyGuard sets the limits and reports a role that is not a superuser", func(ctx SpecContext) {
+		newPool(2, time.Minute)
+		conn, release, err := pool.Acquire(ctx, "app")
+		Expect(err).NotTo(HaveOccurred())
+		defer release(false)
+
+		tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+		Expect(err).NotTo(HaveOccurred())
+		superuser, err := pg.ApplyGuard(ctx, tx, pool.Guard())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(superuser).To(BeFalse())
+		Expect(showSetting(ctx, conn, "statement_timeout")).To(Equal("3s"))
+		Expect(showSetting(ctx, conn, "max_parallel_workers_per_gather")).To(Equal("0"))
+		Expect(tx.Rollback(ctx)).To(Succeed())
+	})
+
+	It("ApplyGuard reports a superuser session role", func(ctx SpecContext) {
+		const role = "cnpg_guard_super"
+		DeferCleanup(func(ctx SpecContext) { Expect(server.Exec(ctx, "DROP ROLE IF EXISTS "+role)).To(Succeed()) })
+		Expect(server.Exec(ctx, "CREATE ROLE "+role+" LOGIN SUPERUSER PASSWORD '"+pgtest.MonitorPassword+"'")).To(Succeed())
+		cfg.User = role
+		newPool(2, time.Minute)
+		conn, release, err := pool.Acquire(ctx, "app")
+		Expect(err).NotTo(HaveOccurred())
+		defer release(false)
+
+		tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+		Expect(err).NotTo(HaveOccurred())
+		superuser, err := pg.ApplyGuard(ctx, tx, pool.Guard())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(superuser).To(BeTrue())
+		Expect(tx.Rollback(ctx)).To(Succeed())
+	})
+
 	It("ends a guarded statement past QueryTimeout with SQLSTATE 57014 and keeps the connection", func(ctx SpecContext) {
 		cfg.QueryTimeout = time.Second
 		newPool(2, time.Minute)

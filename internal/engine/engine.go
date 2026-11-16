@@ -596,8 +596,13 @@ func (e *engine) record(ctx context.Context, res executor.Result) {
 			e.stats.QueryCapped(job.Query, job.Database, res.WouldBe)
 		case selfmetrics.OutcomeSkipped:
 			// A run caught in a pool swap keeps the entry of the run before it; one without a slot in time
-			// stops the export like a timeout and is logged.
-			if errors.Is(res.Err, pg.ErrNoSlot) {
+			// stops the export like a timeout and is logged; one that found a superuser role stops it too.
+			switch {
+			case errors.Is(res.Err, planner.ErrSuperuser):
+				// The facts round it asks for does the refusal and its log line.
+				e.store.Fail(key)
+				e.requestFacts()
+			case errors.Is(res.Err, pg.ErrNoSlot):
 				e.store.Fail(key)
 				e.errs.Failed(logger, job.Query, job.Database, outcome, res.Err)
 			}

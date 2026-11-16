@@ -66,10 +66,10 @@ func New(pool *pg.Pool, limits settings.Limits, server func() *semver.Version, c
 }
 
 // Classify maps an error to an outcome: SQLSTATE 57014 or 55P03, or a context deadline, is timeout;
-// SQLSTATE 42501 is denied; a closed pool, which a pool swap leaves behind, and a wait that got no slot
-// within the interval are skipped.
+// SQLSTATE 42501 is denied; a closed pool, which a pool swap leaves behind, a wait that got no slot in time
+// and a superuser session role are skipped.
 func Classify(err error) selfmetrics.Outcome {
-	if errors.Is(err, pg.ErrPoolClosed) || errors.Is(err, pg.ErrNoSlot) {
+	if errors.Is(err, pg.ErrPoolClosed) || errors.Is(err, pg.ErrNoSlot) || errors.Is(err, planner.ErrSuperuser) {
 		return selfmetrics.OutcomeSkipped
 	}
 	var pgErr *pgconn.PgError
@@ -161,10 +161,17 @@ func (e *Executor) inTransaction(ctx context.Context, conn *pgx.Conn, job planne
 		}
 	}()
 
-	if !job.Def.ReadsSettings {
-		if _, err := tx.Exec(ctx, e.pool.Guard()); err != nil {
-			return false, fmt.Errorf("set the transaction limits: %w", err)
+	var superuser bool
+	if job.Def.ReadsSettings {
+		err = tx.QueryRow(ctx, pg.SuperuserSQL).Scan(&superuser)
+		if err != nil {
+			return false, fmt.Errorf("read rolsuper of the session role: %w", err)
 		}
+	} else if superuser, err = pg.ApplyGuard(ctx, tx, e.pool.Guard()); err != nil {
+		return false, fmt.Errorf("set the transaction limits: %w", err)
+	}
+	if superuser {
+		return false, planner.ErrSuperuser
 	}
 
 	if job.Def.Predicate != "" {

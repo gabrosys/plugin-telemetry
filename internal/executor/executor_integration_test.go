@@ -564,6 +564,43 @@ var _ = Describe("Executor", func() {
 		Expect(again.Outcome).To(Equal(selfmetrics.OutcomeOK), "error: %v", again.Err)
 	})
 
+	Describe("with a session role that is a superuser", func() {
+		const role = "cnpg_exec_super"
+		var superPool *pg.Pool
+
+		BeforeEach(func(ctx SpecContext) {
+			DeferCleanup(func(ctx SpecContext) { Expect(server.Exec(ctx, "DROP ROLE IF EXISTS "+role)).To(Succeed()) })
+			Expect(server.Exec(ctx, "CREATE ROLE "+role+" LOGIN SUPERUSER PASSWORD '"+pgtest.MonitorPassword+"'")).To(Succeed())
+			cfg := server.MonitorConfig(GinkgoT().TempDir())
+			cfg.User = role
+			cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout
+			superPool = pg.NewPool(cfg, 2, time.Minute, clocktesting.NewFakePassiveClock(time.Now()))
+			DeferCleanup(superPool.Close)
+		})
+
+		// A query that ran would give samples or its own division error; ErrSuperuser proves it never left the sidecar.
+		DescribeTable("runs neither the predicate nor the query and asks for a facts round",
+			func(ctx SpecContext, mutate func(*queries.Definition)) {
+				job := jobFor("SELECT 'a' AS datname, 1/0 AS value", mutate)
+				res := newExecutor(superPool, l).Run(ctx, job)
+
+				Expect(res.Err).To(MatchError(planner.ErrSuperuser))
+				Expect(res.Outcome).To(Equal(selfmetrics.OutcomeSkipped))
+				Expect(res.Samples).To(BeNil())
+				Expect(res.ConnectionLost).To(BeFalse())
+			},
+			Entry("guarded", func(*queries.Definition) {}),
+			Entry("guarded with a predicate", withPredicate("SELECT 1/0")),
+			Entry("reading the settings", func(d *queries.Definition) { d.ReadsSettings = true }),
+		)
+
+		It("runs the job once the role is not a superuser", func(ctx SpecContext) {
+			Expect(server.Exec(ctx, "ALTER ROLE "+role+" NOSUPERUSER")).To(Succeed())
+			res := newExecutor(superPool, l).Run(ctx, jobFor("SELECT 'a' AS datname, 1 AS value"))
+			Expect(res.Outcome).To(Equal(selfmetrics.OutcomeOK), "error: %v", res.Err)
+		})
+	})
+
 	It("hands a broken connection back so the pool replaces it", func(ctx SpecContext) {
 		pid := jobFor("SELECT 'a' AS datname, pg_backend_pid() AS value")
 		first := exec.Run(ctx, pid)

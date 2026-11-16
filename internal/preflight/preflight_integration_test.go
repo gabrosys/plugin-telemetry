@@ -60,4 +60,22 @@ var _ = Describe("Run against PostgreSQL", func() {
 		Expect(rep.CurrentUser).To(Equal("on"))
 		Expect(rep.WALFiles).To(Equal(int(settings.Defaults().Limits.QueryTimeout.Milliseconds())))
 	})
+
+	It("fails for a session role that is a superuser", func(ctx SpecContext) {
+		const role = "cnpg_pre_super"
+		DeferCleanup(func(ctx SpecContext) { Expect(server.Exec(ctx, "DROP ROLE IF EXISTS "+role)).To(Succeed()) })
+		Expect(server.Exec(ctx, "CREATE ROLE "+role+" LOGIN SUPERUSER PASSWORD '"+pgtest.MonitorPassword+"'")).To(Succeed())
+
+		rep := preflight.Run(ctx, preflight.Config{
+			PodTokenDir: GinkgoT().TempDir(),
+			Postgres: preflight.PostgresConfig{
+				Host: server.Host, Port: server.Port, User: role,
+				Database: "postgres", Password: pgtest.MonitorPassword,
+			},
+		})
+		Expect(rep.Postgres).NotTo(BeNil())
+		Expect(rep.Postgres.Connected).To(BeTrue())
+		Expect(rep.Postgres.Error).To(ContainSubstring("the session role is a superuser"))
+		Expect(rep.Postgres.CurrentUser).To(BeEmpty())
+	})
 })

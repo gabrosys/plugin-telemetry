@@ -29,28 +29,28 @@ const (
 
 var errNoPEM = errors.New("tls.crt has no PEM block")
 
-// leaf is the identity of a certificate Secret's tls.crt.
-type leaf struct {
+// certID is the identity of a certificate Secret's tls.crt.
+type certID struct {
 	Serial string
 	PubKey []byte
 }
 
-// readLeaf parses the tls.crt of the Secret that cert-manager keeps for the Certificate named name.
-func readLeaf(ctx context.Context, c client.Client, name string) (leaf, error) {
+// readCert parses the tls.crt of the Secret that cert-manager keeps for the Certificate named name.
+func readCert(ctx context.Context, c client.Client, name string) (certID, error) {
 	var secret corev1.Secret
 	if err := c.Get(ctx, client.ObjectKey{Namespace: pluginNamespace, Name: name + "-tls"}, &secret); err != nil {
-		return leaf{}, fmt.Errorf("get secret %s-tls: %w", name, err)
+		return certID{}, fmt.Errorf("get secret %s-tls: %w", name, err)
 	}
 	block, _ := pem.Decode(secret.Data[corev1.TLSCertKey])
 	if block == nil {
-		return leaf{}, fmt.Errorf("secret %s-tls: %w", name, errNoPEM)
+		return certID{}, fmt.Errorf("secret %s-tls: %w", name, errNoPEM)
 	}
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return leaf{}, fmt.Errorf("parse tls.crt of %s-tls: %w", name, err)
+		return certID{}, fmt.Errorf("parse tls.crt of %s-tls: %w", name, err)
 	}
 
-	return leaf{Serial: cert.SerialNumber.String(), PubKey: cert.RawSubjectPublicKeyInfo}, nil
+	return certID{Serial: cert.SerialNumber.String(), PubKey: cert.RawSubjectPublicKeyInfo}, nil
 }
 
 // renewalSpecs adds PLG-02: the renewal of the plugin's CA and leaf certificates under traffic.
@@ -59,9 +59,9 @@ func renewalSpecs(s *suite) {
 		s.healthy(ctx)
 
 		names := []string{caCert, serverCert, clientCert}
-		before := map[string]leaf{}
+		before := map[string]certID{}
 		for _, name := range names {
-			l, err := readLeaf(ctx, s.c, name)
+			l, err := readCert(ctx, s.c, name)
 			Expect(err).NotTo(HaveOccurred())
 			before[name] = l
 		}
@@ -72,7 +72,7 @@ func renewalSpecs(s *suite) {
 
 		Expect(framework.RenewCertificates(ctx, s.env.CMCTL, s.env.KubeContext, pluginNamespace, names...)).To(Succeed())
 		for _, name := range names {
-			Eventually(readLeaf).WithContext(ctx).WithArguments(s.c, name).
+			Eventually(readCert).WithContext(ctx).WithArguments(s.c, name).
 				WithTimeout(renewTimeout).WithPolling(statePoll).
 				Should(HaveField("Serial", Not(Equal(before[name].Serial))), "%s was not renewed", name)
 		}
@@ -83,7 +83,7 @@ func renewalSpecs(s *suite) {
 
 		s.expectNoFailedHookCall(ctx, "PLG-02", start)
 		for _, name := range names {
-			after, err := readLeaf(ctx, s.c, name)
+			after, err := readCert(ctx, s.c, name)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(after.PubKey).To(Equal(before[name].PubKey), "%s changed its public key", name)
 		}

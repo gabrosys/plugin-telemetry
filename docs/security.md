@@ -93,7 +93,9 @@ A Cluster name is a DNS-1035 label (CloudNativePG v1.30.1 `internal/webhook/v1/c
 
 ## The plugin's certificates
 
-A self-signed CA Certificate (`plugin-telemetry-ca`, ten years) issues the server and client leaves; CloudNativePG trusts the CA Secret (`cnpg.io/pluginServerSecret`) and the plugin trusts the `ca.crt` of the client leaf Secret, so a renewed leaf verifies on both sides while kubelet updates the mounts. The CA and both leaves keep their keys at renewal (`privateKey.rotationPolicy: Never`); rotate a leaf key by deleting its Secret, and the CA key by deleting `plugin-telemetry-ca-tls` and then both leaf Secrets, which cert-manager reissues. Any certificate that the CA signs is accepted as a client certificate, so keep `plugin-telemetry-ca-tls` unreadable to anyone who may not call the plugin.
+A self-signed CA Certificate (`plugin-telemetry-ca`, ten years) issues the server and client leaves; CloudNativePG trusts the CA Secret (`cnpg.io/pluginServerSecret`) and the plugin trusts the `ca.crt` of the client leaf Secret, so a renewed leaf verifies on both sides while kubelet updates the mounts. The CA and both leaves keep their keys at renewal (`privateKey.rotationPolicy: Never`); rotate a leaf key by deleting its Secret. To rotate the CA key, delete `plugin-telemetry-ca-tls` and then both leaf Secrets; hook calls fail until cert-manager reissues the leaves and kubelet updates the mounts.
+
+The plugin accepts any certificate that `plugin-telemetry-ca` signs as a client certificate. Anyone who can create CertificateRequests or Certificates in `cnpg-system` can get one, because cert-manager approves requests to its built-in issuers automatically unless `disableAutoApproval` is set (https://cert-manager.io/docs/usage/certificaterequest/), so that right is equivalent to calling the plugin. Such a caller gets read-only answers about the objects it sends: the plugin makes no API writes and its answers hold no secret values. Keep `plugin-telemetry-ca-tls` unreadable to anyone who may not call the plugin.
 
 ## Who chooses the Secrets the sidecar reads
 

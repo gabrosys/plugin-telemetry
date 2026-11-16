@@ -77,8 +77,10 @@ type certDoc struct {
 		Annotations map[string]string `json:"annotations"`
 	} `json:"metadata"`
 	Spec struct {
-		SecretName string `json:"secretName"`
-		IsCA       bool   `json:"isCA"`
+		SecretName string   `json:"secretName"`
+		IsCA       bool     `json:"isCA"`
+		Usages     []string `json:"usages"`
+		DNSNames   []string `json:"dnsNames"`
 		IssuerRef  struct {
 			Name string `json:"name"`
 			Kind string `json:"kind"`
@@ -138,6 +140,18 @@ var _ = Describe("the plugin certificates", func() {
 			Expect(leaf.Spec.IssuerRef.Kind).To(Equal("Issuer"), name)
 			Expect(leaf.Spec.PrivateKey.RotationPolicy).To(Equal("Never"), name)
 		}
+	})
+
+	It("limits the server leaf to server auth and the client leaf to client auth without a DNS name", func() {
+		docs := readDocs("config/certificates.yaml")
+
+		server := docs["Certificate/plugin-telemetry-server"]
+		Expect(server.Spec.Usages).To(ConsistOf("server auth"))
+		Expect(server.Spec.DNSNames).To(ConsistOf("plugin-telemetry", "plugin-telemetry.cnpg-system.svc"))
+
+		client := docs["Certificate/plugin-telemetry-client"]
+		Expect(client.Spec.Usages).To(ConsistOf("client auth"))
+		Expect(client.Spec.DNSNames).To(BeEmpty())
 	})
 
 	It("names the CA Secret as the server Secret and the client leaf Secret as the client Secret", func() {

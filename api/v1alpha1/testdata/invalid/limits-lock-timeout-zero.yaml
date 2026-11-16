@@ -1,0 +1,12 @@
+# want: lockTimeout must be more than 0s
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: TelemetryExporter
+metadata:
+  name: default
+  namespace: app
+spec:
+  exporter:
+    endpoint: https://collector:4318
+  metrics:
+    limits:
+      lockTimeout: 0s

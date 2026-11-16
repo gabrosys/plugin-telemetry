@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -132,6 +133,7 @@ func crdFor(kind string) string {
 	if kind == "MetricQuerySet" {
 		return querySetCRD
 	}
+	Expect(kind).To(Equal("TelemetryExporter"), "no CRD for kind %s", kind)
 
 	return exporterCRD
 }
@@ -139,7 +141,7 @@ func crdFor(kind string) string {
 func fixtures(dir string) []string {
 	GinkgoHelper()
 
-	files, err := fs.Glob(os.DirFS("testdata"), filepath.Join(dir, "*.yaml"))
+	files, err := fs.Glob(os.DirFS("testdata"), path.Join(dir, "*.yaml"))
 	Expect(err).NotTo(HaveOccurred())
 	Expect(files).NotTo(BeEmpty())
 
@@ -193,8 +195,7 @@ var _ = Describe("the generated CRDs", func() {
 			object := readFile("testdata", file)
 
 			problems := loadCRD(crdFor(kindOf(object))).create(object)
-			Expect(problems).NotTo(BeEmpty())
-			Expect(strings.Join(problems, "\n")).To(ContainSubstring(wantOf(object)))
+			Expect(problems).To(HaveExactElements(ContainSubstring(wantOf(object))))
 		},
 		func() []TableEntry {
 			var entries []TableEntry
@@ -205,6 +206,10 @@ var _ = Describe("the generated CRDs", func() {
 			return entries
 		}(),
 	)
+
+	It("fails on a kind it has no CRD for", func() {
+		Expect(InterceptGomegaFailure(func() { crdFor("Pooler") })).NotTo(Succeed())
+	})
 
 	It("reports a rejected endpoint at spec.exporter.endpoint without its value", func() {
 		problems := loadCRD(exporterCRD).create(readFile("testdata/invalid", "exporter-endpoint-user-info.yaml"))

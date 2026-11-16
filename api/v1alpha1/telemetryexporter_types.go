@@ -31,7 +31,7 @@ type TelemetryExporterList struct {
 // TelemetryExporterSpec holds what every signal shares, then one section per signal.
 //
 // +kubebuilder:validation:XValidation:rule="(has(self.envFrom) && (has(self.envFrom.configMap) || has(self.envFrom.secret))) || (has(self.exporter) && has(self.exporter.endpoint))",message="set exporter.endpoint or envFrom"
-// +kubebuilder:validation:XValidation:rule="!has(self.exporter) || !has(self.exporter.timeout) || !has(self.metrics) || !has(self.metrics.interval) || duration(self.exporter.timeout).getMilliseconds() * 2 <= duration(self.metrics.interval).getMilliseconds()",message="exporter.timeout times 2 must not exceed metrics.interval"
+// +kubebuilder:validation:XValidation:rule="!has(self.exporter) || !has(self.exporter.timeout) || duration(self.exporter.timeout).getMilliseconds() * 2 <= (has(self.metrics) && has(self.metrics.interval) ? duration(self.metrics.interval).getMilliseconds() : 30000)",message="exporter.timeout times 2 must not exceed metrics.interval, which is 30s when not set"
 type TelemetryExporterSpec struct {
 	// Exporter is the OTLP connection every signal shares.
 	//
@@ -70,6 +70,7 @@ type TelemetryExporterSpec struct {
 // OTLPExporter is the OTLP connection every signal shares.
 //
 // +kubebuilder:validation:XValidation:rule=`!has(self.endpoint) || self.endpoint.matches(r'^https?://[^@/?#\s]+(/[^?#\s]*)?$')`,fieldPath=".endpoint",message="endpoint must be a base http(s) URL with a host, and no user info, query or fragment"
+// +kubebuilder:validation:XValidation:rule="!has(self.endpoint) || isURL(self.endpoint)",fieldPath=".endpoint",message="endpoint must parse as a URL"
 // +kubebuilder:validation:XValidation:rule="!has(self.tls) || !has(self.endpoint) || self.endpoint.startsWith('https://')",message="tls requires an https:// endpoint"
 type OTLPExporter struct {
 	// Protocol is the OTLP transport: http/protobuf or grpc.

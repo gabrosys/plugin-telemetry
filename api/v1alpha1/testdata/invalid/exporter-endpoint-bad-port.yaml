@@ -1,0 +1,9 @@
+# want: endpoint must parse as a URL
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: TelemetryExporter
+metadata:
+  name: default
+  namespace: app
+spec:
+  exporter:
+    endpoint: http://collector:port

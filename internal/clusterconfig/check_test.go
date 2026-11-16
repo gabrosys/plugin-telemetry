@@ -170,6 +170,20 @@ var _ = Describe("Check", func() {
 		Expect(clusterconfig.Check(newCluster(), p, newExporter())).To(Succeed())
 	})
 
+	It("rejects an invalid exclude glob, naming its index", func() {
+		e := newExporter()
+		e.Spec.Metrics.Exclude.Queries = []string{"pg_stat_["}
+
+		Expect(clusterconfig.Check(newCluster(), peer, e)).To(MatchError(ContainSubstring("spec.metrics.exclude.queries[0]: invalid pattern")))
+	})
+
+	It("rejects an invalid group glob, naming its index", func() {
+		e := newExporter()
+		e.Spec.Metrics.Groups = []v1alpha1.QueryGroup{{Name: "g", Queries: []string{`a\`}}}
+
+		Expect(clusterconfig.Check(newCluster(), peer, e)).To(MatchError(ContainSubstring("spec.metrics.groups[0].queries[0]")))
+	})
+
 	It("rejects an invalid endpoint", func() {
 		e := newExporter()
 		e.Spec.Exporter.Endpoint = "ftp://c:4318"

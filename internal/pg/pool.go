@@ -249,7 +249,8 @@ func (p *Pool) releaser(conn *pgx.Conn, database string) func(bool) {
 
 func (p *Pool) release(conn *pgx.Conn, database string, broken bool) {
 	p.mu.Lock()
-	if broken || conn.IsClosed() || p.closed {
+	// A connection left inside a transaction, open or failed, would carry it into the next run.
+	if broken || conn.IsClosed() || conn.PgConn().TxStatus() != 'I' || p.closed {
 		p.total--
 		p.notifyLocked()
 		p.mu.Unlock()

@@ -275,6 +275,7 @@ var _ = Describe("Executor", func() {
 		var pgErr *pgconn.PgError
 		Expect(errors.As(res.Err, &pgErr)).To(BeTrue(), "error: %v", res.Err)
 		Expect(pgErr.Code).To(Equal("57014"))
+		Expect(pgErr.Message).To(ContainSubstring("canceling statement due to user request"))
 		Expect(res.ConnectionLost).To(BeFalse())
 
 		again := slow.Run(ctx, pid)

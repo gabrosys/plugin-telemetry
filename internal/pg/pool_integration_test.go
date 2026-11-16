@@ -293,6 +293,27 @@ var _ = Describe("Pool", func() {
 		Expect(backendPID(ctx, replacement)).NotTo(Equal(pid))
 	})
 
+	DescribeTable("closes a connection handed back inside a transaction instead of reusing it",
+		func(ctx SpecContext, sql string, fails bool) {
+			newPool(2, time.Minute)
+			conn, release, err := pool.Acquire(ctx, "app")
+			Expect(err).NotTo(HaveOccurred())
+			pid := backendPID(ctx, conn)
+			_, err = conn.Exec(ctx, sql)
+			Expect(err != nil).To(Equal(fails), "error: %v", err)
+
+			release(false)
+			Expect(conn.IsClosed()).To(BeTrue())
+
+			next, release, err := pool.Acquire(ctx, "app")
+			Expect(err).NotTo(HaveOccurred())
+			defer release(false)
+			Expect(backendPID(ctx, next)).NotTo(Equal(pid))
+		},
+		Entry("in a transaction", "BEGIN", false),
+		Entry("in a failed transaction", "BEGIN; SELECT 1/0", true),
+	)
+
 	closeWithLogger := func(ctx context.Context, verbosity int) []string {
 		var mu sync.Mutex
 		var lines []string

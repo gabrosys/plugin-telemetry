@@ -596,6 +596,7 @@ var _ = Describe("Pool", func() {
 			Expect(err).NotTo(HaveOccurred())
 			releaseIdle(false)
 
+			Expect(server.Exec(ctx, "CHECKPOINT")).To(Succeed())
 			Expect(server.StopServerSmart(ctx)).To(Succeed())
 			Expect(server.Running(ctx)).To(BeTrue(), "the busy session keeps the postmaster up")
 
@@ -661,19 +662,18 @@ var _ = Describe("Pool", func() {
 			Expect(conn.IsClosed()).To(BeFalse())
 		})
 
-		It("keeps a released session again once a later Probe connects", func(ctx SpecContext) {
+		It("keeps a released session again once a dial succeeds after the drain", func(ctx SpecContext) {
 			DeferCleanup(server.StartServer)
 			newPool(2, time.Hour)
 			conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 			Expect(err).NotTo(HaveOccurred())
+			Expect(server.Exec(ctx, "CHECKPOINT")).To(Succeed())
 			Expect(server.StopServerSmart(ctx)).To(Succeed())
 			pool.Probe(ctx, "app")
 			release(false)
 			Expect(conn.IsClosed()).To(BeTrue())
 
 			Expect(server.StartServer(ctx)).To(Succeed())
-			pool.Probe(ctx, "app")
-
 			next, release, err := pool.AcquireWithin(ctx, "app", 0)
 			Expect(err).NotTo(HaveOccurred())
 			release(false)

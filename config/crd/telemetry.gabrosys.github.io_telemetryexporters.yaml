@@ -304,8 +304,10 @@ spec:
                         - message: lockTimeout must be at most 2147483647ms
                           rule: duration(self) <= duration('2147483647ms')
                       maxConnections:
-                        description: MaxConnections is the most database connections
-                          the sidecar opens.
+                        description: |-
+                          MaxConnections is the most database connections the sidecar opens for queries. Every 10 seconds
+                          it also opens one more short connection, outside this cap, to see whether PostgreSQL is shutting
+                          down, so the monitoring role needs a connection limit of maxConnections + 1 or more.
                         format: int32
                         minimum: 1
                         type: integer

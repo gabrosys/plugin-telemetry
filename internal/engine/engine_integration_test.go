@@ -602,6 +602,7 @@ var _ = Describe("Run on a smart shutdown of PostgreSQL", func() {
 		Eventually(expectUp(f.srv, 1)).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 
 		DeferCleanup(server.StartServer)
+		Expect(server.Exec(ctx, "CHECKPOINT")).To(Succeed())
 		Expect(server.StopServerSmart(ctx)).To(Succeed())
 		Eventually(func() bool { return server.Running(ctx) }).
 			WithTimeout(15 * time.Second).WithPolling(250 * time.Millisecond).Should(BeFalse())

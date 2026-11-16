@@ -17,8 +17,9 @@ const (
 	initialBackoff    = time.Second
 	defaultMaxBackoff = 30 * time.Second
 	closeTimeout      = 2 * time.Second
-	// shuttingDown is SQLSTATE 57P03, cannot_connect_now: "the database system is shutting down".
-	shuttingDown = "57P03"
+	// cannotConnectNow is SQLSTATE 57P03: the server accepts no new session because it is shutting down,
+	// starting up or in recovery.
+	cannotConnectNow = "57P03"
 )
 
 // ErrPoolClosed is returned by AcquireWithin once the pool is closed.
@@ -46,7 +47,8 @@ type Pool struct {
 	idle   []*idleConn
 	failed map[string]*backoff
 	closed bool
-	// draining is set while PostgreSQL shuts down: release closes connections instead of keeping them.
+	// draining is set while PostgreSQL refuses new sessions (57P03): release closes connections instead of
+	// keeping them. A successful dial clears it.
 	draining bool
 	// changed is closed and replaced whenever a slot or an idle connection becomes available.
 	changed chan struct{}
@@ -205,6 +207,7 @@ func (p *Pool) dial(ctx context.Context, database string) (*pgx.Conn, func(bool)
 		return nil, nil, fmt.Errorf("connect to database %s as %s: %w", database, p.cfg.User, err)
 	}
 	delete(p.failed, database)
+	p.draining = false
 	closed := p.closed
 	if closed {
 		p.total--
@@ -306,21 +309,18 @@ func (p *Pool) CloseIdle(ctx context.Context) {
 	}
 }
 
-// Probe dials database once and closes the connection at once. When PostgreSQL answers that it is shutting
-// down (SQLSTATE 57P03), the pool closes its idle connections and release closes every connection, so that
-// the pool's sessions don't hold a smart shutdown open; a dial that succeeds ends this. Any other error,
-// such as 53300 while the server is out of slots, leaves the sessions alone. ctx is accepted for
-// contextcheck; each close uses WithoutCancel(ctx) and the 2 s closeTimeout.
+// Probe dials database once and closes the connection at once. PostgreSQL answers 57P03 (cannot_connect_now)
+// while it shuts down, starts up or recovers: it accepts no new session, and the pool's sessions only hold
+// it, so the pool closes its idle connections and release closes every connection until a dial succeeds.
+// Any other error, such as 53300 while the server is out of slots, leaves the sessions alone. ctx is
+// accepted for contextcheck; each close uses WithoutCancel(ctx) and the 2 s closeTimeout.
 func (p *Pool) Probe(ctx context.Context, database string) {
 	conn, err := p.connect(ctx, database)
 	var pgErr *pgconn.PgError
 	switch {
 	case err == nil:
 		p.closeConn(ctx, conn, database)
-		p.mu.Lock()
-		p.draining = false
-		p.mu.Unlock()
-	case errors.As(err, &pgErr) && pgErr.Code == shuttingDown:
+	case errors.As(err, &pgErr) && pgErr.Code == cannotConnectNow:
 		p.mu.Lock()
 		p.draining = true
 		stale := p.takeAllIdleLocked()

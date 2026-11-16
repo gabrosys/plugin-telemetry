@@ -273,11 +273,14 @@ type harness struct {
 	clk *clocktesting.FakeClock
 	srv *otlptest.Server
 
-	mu          sync.Mutex // guards lines, rounds, factsTimers and debounces
+	mu          sync.Mutex // guards lines, rounds, factsTimers, probeTimers and debounces
 	lines       []string
 	debounces   int             // the debounce timers the engine armed
 	rounds      []time.Time     // when each facts round started
 	factsTimers []time.Duration // what the engine armed its facts timer with, in order
+	probeTimers []time.Duration // what the engine armed its shutdown probe timer with, in order
+	stopOnce    sync.Once
+	stopEngine  func() // cancels the engine and waits for RunWith to return
 }
 
 // factsClock is the fake clock; it records each timer the engine's setFactsTimer and run create.
@@ -295,6 +298,12 @@ func (c factsClock) NewTimer(d time.Duration) clock.Timer {
 		if first && strings.HasSuffix(f.Function, "engine.(*engine).run") {
 			c.h.mu.Lock()
 			c.h.debounces++
+			c.h.mu.Unlock()
+			break
+		}
+		if strings.HasSuffix(f.Function, "engine.(*engine).setProbeTimer") {
+			c.h.mu.Lock()
+			c.h.probeTimers = append(c.h.probeTimers, d)
 			c.h.mu.Unlock()
 			break
 		}
@@ -357,10 +366,13 @@ func runWith(cfg func(url string) *memConfig, facts factsFunc, o runOptions) *ha
 			Getenv: func(name string) string { return o.env[name] },
 		}, gather)
 	}()
-	DeferCleanup(func() {
-		cancel()
-		Eventually(done).WithTimeout(10 * time.Second).Should(Receive(BeNil()))
-	})
+	h.stopEngine = func() {
+		h.stopOnce.Do(func() {
+			cancel()
+			Eventually(done).WithTimeout(10 * time.Second).Should(Receive(BeNil()))
+		})
+	}
+	DeferCleanup(h.stopEngine)
 	Eventually(h.cfg.watchCalls).Should(BeNumerically(">", 0))
 	return h
 }
@@ -422,6 +434,13 @@ func (h *harness) timersArmed() []time.Duration {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return slices.Clone(h.factsTimers)
+}
+
+// probeTimersArmed returns the durations the engine armed its shutdown probe timer with so far.
+func (h *harness) probeTimersArmed() []time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.probeTimers)
 }
 
 // debounceTimers counts the debounce timers the engine armed.

@@ -6,8 +6,6 @@ import (
 	"strings"
 	"time"
 
-	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
-
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/otlp"
 )
@@ -19,9 +17,10 @@ const (
 )
 
 // Ours reads pod's newest export in lines, found by its k8s.pod.name resource attribute. At is the last
-// success of queryOf[metric] in that export, on the database the series' database or datname label names,
-// else on the oldest; without a query or a success it is the point time. The series are sorted by Name.
-func Ours(lines []otlp.Line, pod string, queryOf map[string]string) []Series {
+// success, in that export, of the last of queryOf[metric] that has one there, on the database the series'
+// database or datname label names, else on the oldest; without such a query it is the point time. The series
+// are sorted by Name.
+func Ours(lines []otlp.Line, pod string, queryOf map[string][]string) []Series {
 	podLines := otlp.ForResource(lines, podAttribute, pod)
 	times := otlp.ExportTimes(podLines)
 	if len(times) == 0 {
@@ -38,22 +37,36 @@ func Ours(lines []otlp.Line, pod string, queryOf map[string]string) []Series {
 		successes[query][p.Attrs["database"]] = p.Value
 	}
 
-	var out []Series
-	for _, l := range export {
-		for _, rm := range l.Request.GetResourceMetrics() {
-			for _, sm := range rm.GetScopeMetrics() {
-				for _, m := range sm.GetMetrics() {
-					for _, s := range points(m) {
-						if byDatabase := successes[queryOf[s.Metric]]; len(byDatabase) > 0 {
-							s.At = successAt(byDatabase, s.Labels)
-						}
-						out = append(out, s)
-					}
-				}
-			}
+	names := map[string]bool{}
+	for _, scope := range otlp.Scopes(export) {
+		for _, name := range otlp.Names(export, scope.Name) {
+			names[name] = true
 		}
 	}
-	slices.SortFunc(out, func(a, b Series) int { return strings.Compare(a.Name, b.Name) })
+	var out []Series
+	for name := range names {
+		add := func(s Series) {
+			s.Name, s.Metric = seriesName(name, s.Labels), name
+			for _, query := range slices.Backward(queryOf[name]) {
+				if byDatabase := successes[query]; len(byDatabase) > 0 {
+					s.At = successAt(byDatabase, s.Labels)
+					break
+				}
+			}
+			out = append(out, s)
+		}
+		for _, p := range otlp.Points(export, name) {
+			kind := kindGauge
+			if p.Monotonic {
+				kind = kindCounter
+			}
+			add(Series{Kind: kind, Labels: p.Attrs, Value: p.Value, At: p.Time})
+		}
+		for _, p := range otlp.HistogramPoints(export, name) {
+			add(Series{Kind: kindHistogram, Labels: p.Attrs, Value: float64(p.Count), Sum: p.Sum, At: p.Time})
+		}
+	}
+	slices.SortStableFunc(out, func(a, b Series) int { return strings.Compare(a.Name, b.Name) })
 
 	return out
 }
@@ -68,70 +81,21 @@ func successAt(byDatabase map[string]float64, labels map[string]string) time.Tim
 	return unixSeconds(slices.Min(slices.Collect(maps.Values(byDatabase))))
 }
 
-// points returns m's data points as series timed by the point.
-func points(m *metricpb.Metric) []Series {
-	var out []Series
-	add := func(kind string, attrs map[string]string, ns uint64, value, sum float64) {
-		out = append(out, Series{
-			Name: seriesName(m.GetName(), attrs), Metric: m.GetName(), Kind: kind, Labels: attrs,
-			Value: value, Sum: sum, At: unixNano(ns),
-		})
-	}
-	switch d := m.GetData().(type) {
-	case *metricpb.Metric_Gauge:
-		for _, dp := range d.Gauge.GetDataPoints() {
-			add(KindGauge, otlp.Attributes(dp.GetAttributes()), dp.GetTimeUnixNano(), pointValue(dp), 0)
-		}
-	case *metricpb.Metric_Sum:
-		kind := KindGauge
-		if d.Sum.GetIsMonotonic() {
-			kind = KindCounter
-		}
-		for _, dp := range d.Sum.GetDataPoints() {
-			add(kind, otlp.Attributes(dp.GetAttributes()), dp.GetTimeUnixNano(), pointValue(dp), 0)
-		}
-	case *metricpb.Metric_Histogram:
-		for _, dp := range d.Histogram.GetDataPoints() {
-			add(KindHistogram, otlp.Attributes(dp.GetAttributes()), dp.GetTimeUnixNano(), float64(dp.GetCount()), dp.GetSum())
-		}
-	case *metricpb.Metric_ExponentialHistogram:
-		for _, dp := range d.ExponentialHistogram.GetDataPoints() {
-			add(KindHistogram, otlp.Attributes(dp.GetAttributes()), dp.GetTimeUnixNano(), float64(dp.GetCount()), dp.GetSum())
-		}
-	case *metricpb.Metric_Summary:
-		for _, dp := range d.Summary.GetDataPoints() {
-			add(KindSummary, otlp.Attributes(dp.GetAttributes()), dp.GetTimeUnixNano(), float64(dp.GetCount()), dp.GetSum())
-		}
-	}
-
-	return out
-}
-
-func pointValue(dp *metricpb.NumberDataPoint) float64 {
-	if v, ok := dp.GetValue().(*metricpb.NumberDataPoint_AsInt); ok {
-		return float64(v.AsInt)
-	}
-
-	return dp.GetAsDouble()
-}
-
-func unixNano(ns uint64) time.Time {
-	return time.Unix(0, int64(ns)) //nolint:gosec // OTLP times are nanoseconds since the epoch, far below MaxInt64
-}
-
-// QueryIndex maps each metric of the queries in sets to its query key, name overrides included. When two
-// queries define one metric, the later set wins, and within a set the key sorting last
-// (pg_stat_bgwriter_17 over pg_stat_bgwriter).
-func QueryIndex(sets ...queries.UserQueries) map[string]string {
-	out := map[string]string{}
+// QueryIndex maps each metric of the queries in sets to the keys of the queries that define it, sorted,
+// name overrides included.
+func QueryIndex(sets ...queries.UserQueries) map[string][]string {
+	out := map[string][]string{}
 	for _, set := range sets {
-		for _, key := range slices.Sorted(maps.Keys(set)) {
-			for _, column := range queries.Define(key, set[key], queries.Options{}).Columns {
-				if column.Role == queries.RoleValue {
-					out[column.Metric] = key
+		for key, q := range set {
+			for _, column := range queries.Define(key, q, queries.Options{}).Columns {
+				if column.Role == queries.RoleValue && !slices.Contains(out[column.Metric], key) {
+					out[column.Metric] = append(out[column.Metric], key)
 				}
 			}
 		}
+	}
+	for metric := range out {
+		slices.Sort(out[metric])
 	}
 
 	return out

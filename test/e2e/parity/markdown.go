@@ -22,7 +22,7 @@ func Markdown(title string, checks []Check) string {
 		if c.Gated {
 			gated = "yes"
 		}
-		fmt.Fprintf(&b, "| `%s` | %s | %s | %s | %s | %s | %s | %s | %s |\n", cell(c.Series), cell(c.Rule), gated,
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", code(cell(c.Series)), cell(c.Rule), gated,
 			sample(c.Before), sample(c.Ours), sample(c.After), Margin, c.Verdict, cell(c.Detail))
 	}
 
@@ -34,7 +34,7 @@ func sample(s *Series) string {
 		return "absent"
 	}
 	at := s.At.UTC().Format(timeLayout)
-	if s.Kind == KindHistogram || s.Kind == KindSummary {
+	if s.Kind == kindHistogram {
 		return fmt.Sprintf("count %s, sum %s at %s", number(s.Value), number(s.Sum), at)
 	}
 
@@ -44,4 +44,23 @@ func sample(s *Series) string {
 // cell escapes s for a table cell.
 func cell(s string) string {
 	return strings.NewReplacer("|", `\|`, "\n", " ").Replace(s)
+}
+
+// code writes s as a code span, with a fence longer than any run of backticks in s.
+func code(s string) string {
+	longest, run := 0, 0
+	for _, r := range s {
+		if r != '`' {
+			run = 0
+			continue
+		}
+		run++
+		longest = max(longest, run)
+	}
+	if longest == 0 {
+		return "`" + s + "`"
+	}
+	fence := strings.Repeat("`", longest+1)
+
+	return fence + " " + s + " " + fence
 }

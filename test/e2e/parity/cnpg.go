@@ -55,19 +55,20 @@ func ParseCNPG(text []byte, at time.Time) ([]Series, error) {
 			s := Series{Name: seriesName(metric, labels), Metric: metric, Labels: labels, At: when}
 			switch mf.GetType() {
 			case dto.MetricType_COUNTER:
-				s.Kind, s.Value = KindCounter, m.GetCounter().GetValue()
+				s.Kind, s.Value = kindCounter, m.GetCounter().GetValue()
 			case dto.MetricType_GAUGE:
-				s.Kind, s.Value = KindGauge, m.GetGauge().GetValue()
+				s.Kind, s.Value = kindGauge, m.GetGauge().GetValue()
 			case dto.MetricType_UNTYPED:
-				s.Kind, s.Value = KindGauge, m.GetUntyped().GetValue()
+				s.Kind, s.Value = kindGauge, m.GetUntyped().GetValue()
 			case dto.MetricType_HISTOGRAM, dto.MetricType_GAUGE_HISTOGRAM:
 				h := m.GetHistogram()
-				s.Kind, s.Value, s.Sum = KindHistogram, float64(h.GetSampleCount()), h.GetSampleSum()
+				s.Kind, s.Value, s.Sum = kindHistogram, float64(h.GetSampleCount()), h.GetSampleSum()
 				if h.SampleCountFloat != nil {
 					s.Value = h.GetSampleCountFloat()
 				}
 			case dto.MetricType_SUMMARY:
-				s.Kind, s.Value, s.Sum = KindSummary, float64(m.GetSummary().GetSampleCount()), m.GetSummary().GetSampleSum()
+				// CNPG's one summary, go_gc_duration_seconds, is expected on its side only.
+				s.Kind, s.Value, s.Sum = kindHistogram, float64(m.GetSummary().GetSampleCount()), m.GetSummary().GetSampleSum()
 			}
 			out = append(out, s)
 		}

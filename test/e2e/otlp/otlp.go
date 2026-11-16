@@ -130,9 +130,10 @@ func ExportAt(lines []Line, t time.Time) []Line {
 
 // Point is one number data point of a gauge or a sum.
 type Point struct {
-	Time  time.Time
-	Attrs map[string]string
-	Value float64
+	Time      time.Time
+	Attrs     map[string]string
+	Value     float64
+	Monotonic bool // a point of a monotonic sum
 }
 
 // Points returns the number data points of the metric called name, in file order.
@@ -142,9 +143,12 @@ func Points(lines []Line, name string) []Point {
 		if m.GetName() != name {
 			return
 		}
+		monotonic := m.GetSum().GetIsMonotonic()
 		dps := append(slices.Clone(m.GetGauge().GetDataPoints()), m.GetSum().GetDataPoints()...)
 		for _, dp := range dps {
-			out = append(out, Point{Time: unixNano(dp.GetTimeUnixNano()), Attrs: Attributes(dp.GetAttributes()), Value: value(dp)})
+			out = append(out, Point{
+				Time: unixNano(dp.GetTimeUnixNano()), Attrs: Attributes(dp.GetAttributes()), Value: value(dp), Monotonic: monotonic,
+			})
 		}
 	})
 	return out

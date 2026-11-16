@@ -2,6 +2,7 @@
 package parity
 
 import (
+	"cmp"
 	"fmt"
 	"maps"
 	"math"
@@ -16,29 +17,28 @@ const Margin = time.Second
 
 // Kinds of a Series.
 const (
-	KindCounter   = "counter"
-	KindGauge     = "gauge"
-	KindHistogram = "histogram"
-	KindSummary   = "summary"
+	kindCounter   = "counter"
+	kindGauge     = "gauge"
+	kindHistogram = "histogram"
 )
 
 // Verdicts of a Check.
 const (
-	VerdictPass        = "pass"
-	VerdictFail        = "fail"
-	VerdictNotCompared = "not compared"
-	VerdictExpected    = "expected"
-	VerdictSkipped     = "skipped"
+	verdictPass        = "pass"
+	verdictFail        = "fail"
+	verdictNotCompared = "not compared"
+	verdictExpected    = "expected"
+	verdictSkipped     = "skipped"
 )
 
 // Rules of a Check; a skipped check carries the exception name from Options.Skip instead.
 const (
-	RuleBracket       = "bracket"
-	RuleSelfMeasuring = "self-measuring"
-	RuleQueryCache    = "cnpg-query-cache"
-	RuleWALRegex      = "v1.30.1-wal-regex"
-	RuleCNPGOnly      = "cnpg-only"
-	RuleOursOnly      = "ours-only"
+	ruleBracket       = "bracket"
+	ruleSelfMeasuring = "self-measuring"
+	ruleQueryCache    = "cnpg-query-cache"
+	ruleWALRegex      = "v1.30.1-wal-regex"
+	ruleCNPGOnly      = "cnpg-only"
+	ruleOursOnly      = "ours-only"
 )
 
 // selfMeasuring are CNPG's metrics that measure its collector (pg_collector.go:112-141 at v1.30.1).
@@ -58,7 +58,7 @@ var queryCache = map[string]string{
 
 // Series is one sample of one side.
 type Series struct {
-	Name, Metric, Kind string // Name metric{k="v",...} sorted; Kind counter, gauge, histogram or summary
+	Name, Metric, Kind string // Name metric{k="v",...} sorted; Kind counter, gauge or histogram
 	Labels             map[string]string
 	Value, Sum         float64 // Value is a histogram's count
 	At                 time.Time
@@ -96,23 +96,23 @@ func Bracket(before, after, ours []Series, o Options) []Check {
 
 	var out []Check
 	for _, metric := range slices.Sorted(maps.Keys(names)) {
-		series := slices.Sorted(slices.Values(names[metric]))
 		var checks []Check
-		switch {
-		case o.Skip[metric] != "":
-			for _, name := range series {
-				checks = append(checks, s.skipped(name, o.Skip[metric]))
+		var series []string // the metric's series no skip names
+		for _, name := range slices.Sorted(slices.Values(names[metric])) {
+			if exception := cmp.Or(o.Skip[name], o.Skip[metric]); exception != "" {
+				checks = append(checks, s.skipped(name, exception))
+				continue
 			}
+			series = append(series, name)
+		}
+		switch {
+		case len(series) == 0:
 		case slices.Contains(selfMeasuring, metric):
-			checks = []Check{s.selfMeasuring(metric, series)}
+			checks = append(checks, s.selfMeasuring(metric, series))
 		case expectedRule(metric) != "":
-			checks = []Check{s.expected(metric, series)}
+			checks = append(checks, s.expected(metric, series))
 		default:
 			for _, name := range series {
-				if exception := o.Skip[name]; exception != "" {
-					checks = append(checks, s.skipped(name, exception))
-					continue
-				}
 				checks = append(checks, s.bracket(name, o.LooseWALCount))
 			}
 		}
@@ -146,7 +146,7 @@ func Retry(first, second []Check) []Check {
 	}
 	var out []Check
 	for _, c := range Failures(first) {
-		if next, ok := again[c.Series]; ok && c.Kind == KindGauge {
+		if next, ok := again[c.Series]; ok && c.Kind == kindGauge {
 			if failing(next) {
 				out = append(out, next)
 			}
@@ -159,7 +159,7 @@ func Retry(first, second []Check) []Check {
 }
 
 func failing(c Check) bool {
-	return c.Gated && c.Verdict != VerdictPass && c.Verdict != VerdictExpected && c.Verdict != VerdictSkipped
+	return c.Gated && c.Verdict != verdictPass && c.Verdict != verdictExpected && c.Verdict != verdictSkipped
 }
 
 type sides struct{ before, after, ours map[string]Series }
@@ -200,27 +200,30 @@ func (s sides) check(name, rule string) Check {
 
 func (s sides) skipped(name, exception string) Check {
 	c := s.check(name, exception)
-	c.Verdict, c.Detail = VerdictSkipped, "named exception "+exception
+	c.Verdict, c.Detail = verdictSkipped, "named exception "+exception
 
 	return c
 }
 
 func (s sides) bracket(name string, looseWAL bool) Check {
-	c := s.check(name, RuleBracket)
+	c := s.check(name, ruleBracket)
 	b, o, a := c.Before, c.Ours, c.After
-	c.Verdict = VerdictNotCompared
+	c.Verdict = verdictNotCompared
 	switch {
 	case o == nil:
-		c.Verdict, c.Detail = VerdictFail, "only in CNPG"
+		c.Verdict, c.Detail = verdictFail, "only in CNPG"
 		return c
 	case b == nil && a == nil:
-		c.Verdict, c.Detail = VerdictFail, "only in ours"
+		c.Verdict, c.Detail = verdictFail, "only in ours"
 		return c
 	case b == nil || a == nil:
 		c.Detail = "CNPG has no sample on one side of ours"
 		return c
-	case b.Kind != o.Kind || a.Kind != o.Kind:
-		c.Verdict, c.Detail = VerdictFail, fmt.Sprintf("kind: CNPG %s, ours %s", a.Kind, o.Kind)
+	case b.Kind != o.Kind:
+		c.Verdict, c.Detail = verdictFail, fmt.Sprintf("kind: CNPG before %s, ours %s", b.Kind, o.Kind)
+		return c
+	case a.Kind != o.Kind:
+		c.Verdict, c.Detail = verdictFail, fmt.Sprintf("kind: CNPG after %s, ours %s", a.Kind, o.Kind)
 		return c
 	case b.At.After(o.At.Add(-Margin)):
 		c.Detail = fmt.Sprintf("CNPG's before sample is less than %s before ours", Margin)
@@ -232,18 +235,18 @@ func (s sides) bracket(name string, looseWAL bool) Check {
 
 	ok := between(b.Value, o.Value, a.Value)
 	c.Detail = "value " + rangeDetail(b.Value, o.Value, a.Value)
-	if o.Kind == KindHistogram || o.Kind == KindSummary {
+	if o.Kind == kindHistogram {
 		ok = ok && between(b.Sum, o.Sum, a.Sum)
 		c.Detail = "count " + rangeDetail(b.Value, o.Value, a.Value) + "; sum " + rangeDetail(b.Sum, o.Sum, a.Sum)
 	}
 	if looseWAL && o.Metric == "cnpg_collector_pg_wal" && (o.Labels["value"] == "count" || o.Labels["value"] == "size") {
-		c.Rule = RuleWALRegex
+		c.Rule = ruleWALRegex
 		ok = o.Value <= max(b.Value, a.Value) // false for any NaN
 		c.Detail = fmt.Sprintf("ours %s, at most CNPG's larger %s", number(o.Value), number(max(b.Value, a.Value)))
 	}
-	c.Verdict = VerdictFail
+	c.Verdict = verdictFail
 	if ok {
-		c.Verdict = VerdictPass
+		c.Verdict = verdictPass
 	}
 
 	return c
@@ -266,7 +269,7 @@ func number(v float64) string { return strconv.FormatFloat(v, 'g', -1, 64) }
 
 // selfMeasuring passes when ours has metric whenever CNPG has it, with the same label keys.
 func (s sides) selfMeasuring(metric string, series []string) Check {
-	c := Check{Series: metric, Metric: metric, Rule: RuleSelfMeasuring}
+	c := Check{Series: metric, Metric: metric, Rule: ruleSelfMeasuring}
 	cnpgKeys, ourKeys := map[string]bool{}, map[string]bool{}
 	for _, name := range series {
 		b, o, a := s.samples(name)
@@ -290,13 +293,13 @@ func (s sides) selfMeasuring(metric string, series []string) Check {
 	cnpgList, ourList := slices.Sorted(maps.Keys(cnpgKeys)), slices.Sorted(maps.Keys(ourKeys))
 	switch {
 	case c.Before == nil && c.After == nil:
-		c.Verdict, c.Detail = VerdictExpected, "only in ours"
+		c.Verdict, c.Detail = verdictExpected, "only in ours"
 	case c.Ours == nil:
-		c.Verdict, c.Detail = VerdictFail, "only in CNPG"
+		c.Verdict, c.Detail = verdictFail, "only in CNPG"
 	case !slices.Equal(cnpgList, ourList):
-		c.Verdict, c.Detail = VerdictFail, fmt.Sprintf("label keys: CNPG %v, ours %v", cnpgList, ourList)
+		c.Verdict, c.Detail = verdictFail, fmt.Sprintf("label keys: CNPG %v, ours %v", cnpgList, ourList)
 	default:
-		c.Verdict, c.Detail = VerdictPass, fmt.Sprintf("present with label keys %v", ourList)
+		c.Verdict, c.Detail = verdictPass, fmt.Sprintf("present with label keys %v", ourList)
 	}
 
 	return c
@@ -314,11 +317,11 @@ func firstOf(kept, next *Series) *Series {
 func expectedRule(metric string) string {
 	switch {
 	case queryCache[metric] != "":
-		return RuleQueryCache
+		return ruleQueryCache
 	case strings.HasPrefix(metric, "go_"), strings.HasPrefix(metric, "process_"):
-		return RuleCNPGOnly
+		return ruleCNPGOnly
 	case strings.HasPrefix(metric, "cnpg_otel_"), strings.HasPrefix(metric, "otel."), strings.HasPrefix(metric, "go."):
-		return RuleOursOnly
+		return ruleOursOnly
 	}
 
 	return ""
@@ -327,7 +330,7 @@ func expectedRule(metric string) string {
 // expected passes metric when it is on its rule's side only.
 func (s sides) expected(metric string, series []string) Check {
 	rule := expectedRule(metric)
-	c := Check{Series: metric, Metric: metric, Rule: rule, Verdict: VerdictExpected}
+	c := Check{Series: metric, Metric: metric, Rule: rule, Verdict: verdictExpected}
 	var inCNPG, inOurs bool
 	for _, name := range series {
 		b, o, a := s.samples(name)
@@ -339,20 +342,20 @@ func (s sides) expected(metric string, series []string) Check {
 		inCNPG = inCNPG || b != nil || a != nil
 		inOurs = inOurs || o != nil
 	}
-	if rule == RuleOursOnly {
+	if rule == ruleOursOnly {
 		c.Detail = "on our side only"
 		if inCNPG {
-			c.Verdict, c.Detail = VerdictFail, "expected on our side only, found in CNPG"
+			c.Verdict, c.Detail = verdictFail, "expected on our side only, found in CNPG"
 		}
 
 		return c
 	}
 	c.Detail = "on CNPG's side only"
-	if rule == RuleQueryCache {
+	if rule == ruleQueryCache {
 		c.Detail += "; ours: " + queryCache[metric]
 	}
 	if inOurs {
-		c.Verdict, c.Detail = VerdictFail, "expected on CNPG's side only, found in ours"
+		c.Verdict, c.Detail = verdictFail, "expected on CNPG's side only, found in ours"
 	}
 
 	return c

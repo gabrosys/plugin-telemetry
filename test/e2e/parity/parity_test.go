@@ -11,6 +11,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/otlp"
@@ -33,8 +35,9 @@ const (
 	beforeUpdate = 1794676040
 	afterUpdate  = 1794676065
 	// Our last success of pg_stat_database in the newest export.
-	xactSuccess = 1794676044.9216478
-	latency     = "cnpg_e2e_base_latency"
+	xactSuccess      = 1794676044.9216478
+	xactSuccessMicro = int64(1794676044921648)
+	latency          = "cnpg_e2e_base_latency"
 )
 
 // testQueries are the queries behind the fixture's series that the specs time, plus a name override.
@@ -118,7 +121,7 @@ func beforeText() []byte {
 	return setSample(fixture("cnpg.prom"), lastUpdate, beforeUpdate)
 }
 
-func index() map[string]string {
+func index() map[string][]string {
 	GinkgoHelper()
 
 	qs, err := queries.Parse([]byte(testQueries))
@@ -199,11 +202,6 @@ func seriesOf(checks []parity.Check) []string {
 	return out
 }
 
-func unix(seconds float64) time.Time {
-	whole := math.Floor(seconds)
-	return time.Unix(int64(whole), int64((seconds-whole)*1e9))
-}
-
 // collectorSeries are the fixture's cnpg_collector_* series but lo_pages, scraped at at.
 func collectorSeries(at time.Time) []parity.Series {
 	GinkgoHelper()
@@ -222,7 +220,34 @@ func retimed(series []parity.Series, at time.Time) []parity.Series {
 	return out
 }
 
-// row returns the Markdown table row of series.
+// asPod returns the fixture's lines moved to the resource of pod name, with every xact_commit point set to v.
+func asPod(name string, v float64) []otlp.Line {
+	GinkgoHelper()
+
+	lines := ourLines()
+	for _, l := range lines {
+		for _, rm := range l.Request.GetResourceMetrics() {
+			for _, kv := range rm.GetResource().GetAttributes() {
+				if kv.GetKey() == "k8s.pod.name" {
+					kv.Value = &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: name}}
+				}
+			}
+			for _, sm := range rm.GetScopeMetrics() {
+				for _, m := range sm.GetMetrics() {
+					if m.GetName() == "cnpg_pg_stat_database_xact_commit" {
+						for _, dp := range m.GetSum().GetDataPoints() {
+							dp.Value = &metricpb.NumberDataPoint_AsDouble{AsDouble: v}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return lines
+}
+
+// row returns the Markdown table row of series, written in a code span with single backticks.
 func row(md, series string) string {
 	GinkgoHelper()
 
@@ -292,12 +317,12 @@ var _ = Describe("QueryIndex", func() {
 	It("maps each metric to its query key, name overrides included", func() {
 		idx := index()
 
-		Expect(idx).To(HaveKeyWithValue("cnpg_pg_stat_bgwriter_buffers_alloc", "pg_stat_bgwriter_17"))
-		Expect(idx).To(HaveKeyWithValue("cnpg_pg_stat_database_xact_commit", "pg_stat_database"))
-		Expect(idx).To(HaveKeyWithValue("cnpg_e2e_base_one", "e2e_base"))
-		Expect(idx).To(HaveKeyWithValue("cnpg_e2e_base_renamed", "e2e_base"))
-		Expect(idx).To(HaveKeyWithValue("cnpg_collector_lo_pages", queries.KeyLOPages))
-		Expect(idx).To(HaveKeyWithValue("cnpg_collector_pg_wal", queries.KeyPGWAL))
+		Expect(idx).To(HaveKeyWithValue("cnpg_pg_stat_bgwriter_buffers_alloc", []string{"pg_stat_bgwriter", "pg_stat_bgwriter_17"}))
+		Expect(idx).To(HaveKeyWithValue("cnpg_pg_stat_database_xact_commit", []string{"pg_stat_database"}))
+		Expect(idx).To(HaveKeyWithValue("cnpg_e2e_base_one", []string{"e2e_base"}))
+		Expect(idx).To(HaveKeyWithValue("cnpg_e2e_base_renamed", []string{"e2e_base"}))
+		Expect(idx).To(HaveKeyWithValue("cnpg_collector_lo_pages", []string{queries.KeyLOPages}))
+		Expect(idx).To(HaveKeyWithValue("cnpg_collector_pg_wal", []string{queries.KeyPGWAL}))
 		Expect(idx).NotTo(HaveKey("cnpg_pg_stat_database_datname"))
 	})
 })
@@ -322,30 +347,58 @@ var _ = Describe("Ours", func() {
 	})
 
 	DescribeTable("times each query by its own last success (PAR-03, PAR-04)",
-		func(series string, success float64) {
-			Expect(named(ours(), series).At).To(BeTemporally("~", unix(success), time.Microsecond))
+		func(series string, success int64) {
+			Expect(named(ours(), series).At).To(BeTemporally("~", time.UnixMicro(success), time.Microsecond))
 		},
-		Entry("pg_stat_database", xactApp, xactSuccess),
+		Entry("pg_stat_database", xactApp, xactSuccessMicro),
 		Entry("pg_stat_database on a database it did not run on, by the oldest",
-			`cnpg_pg_stat_database_xact_commit{datname="template1"}`, xactSuccess),
-		Entry("pg_stat_archiver", "cnpg_pg_stat_archiver_archived_count", 1794676049.9386024),
-		Entry("pg_stat_bgwriter through pg_stat_bgwriter_17", "cnpg_pg_stat_bgwriter_buffers_alloc", 1794676049.7528694),
-		Entry("lo_pages on postgres, by datname", `cnpg_collector_lo_pages{datname="postgres"}`, 1794676044.3891246),
-		Entry("lo_pages on app, by datname", `cnpg_collector_lo_pages{datname="app"}`, 1794676047.9570014),
+			`cnpg_pg_stat_database_xact_commit{datname="template1"}`, xactSuccessMicro),
+		Entry("pg_stat_archiver", "cnpg_pg_stat_archiver_archived_count", int64(1794676049938602)),
+		Entry("pg_stat_bgwriter through pg_stat_bgwriter_17", "cnpg_pg_stat_bgwriter_buffers_alloc", int64(1794676049752869)),
+		Entry("lo_pages on postgres, by datname", `cnpg_collector_lo_pages{datname="postgres"}`, int64(1794676044389125)),
+		Entry("lo_pages on app, by datname", `cnpg_collector_lo_pages{datname="app"}`, int64(1794676047957001)),
 	)
 
 	It("takes the oldest database's success when the series names none of them", func() {
-		series := parity.Ours(ourLines(), pod, map[string]string{"cnpg_pg_stat_database_xact_commit": "pg_extensions"})
+		series := parity.Ours(ourLines(), pod, map[string][]string{"cnpg_pg_stat_database_xact_commit": {"pg_extensions"}})
 
 		Expect(named(series, `cnpg_pg_stat_database_xact_commit{datname="template1"}`).At).
-			To(BeTemporally("~", unix(1794676044.3798277), time.Microsecond))
+			To(BeTemporally("~", time.UnixMicro(1794676044379828), time.Microsecond))
 	})
 
 	It("takes the point time without a query or its success", func() {
-		series := parity.Ours(ourLines(), pod, map[string]string{baseOne: "missing"})
+		series := parity.Ours(ourLines(), pod, map[string][]string{baseOne: {"missing"}})
 
 		Expect(named(series, `cnpg_collector_up{cluster="plugin-peer"}`).At).To(Equal(time.Unix(0, 1794676064129338069)))
 		Expect(named(series, baseOne).At).To(Equal(time.Unix(0, 1794676064129486833)))
+	})
+
+	DescribeTable("times a series two queries define by the one that succeeded, whichever sorts last",
+		func(keys ...string) {
+			series := parity.Ours(ourLines(), pod, map[string][]string{"cnpg_pg_stat_bgwriter_buffers_alloc": keys})
+
+			Expect(named(series, "cnpg_pg_stat_bgwriter_buffers_alloc").At).
+				To(BeTemporally("~", time.UnixMicro(1794676049752869), time.Microsecond))
+		},
+		Entry("the succeeding one sorts first", "pg_stat_bgwriter_17", "zz_missing"),
+		Entry("the succeeding one sorts last", "aa_missing", "pg_stat_bgwriter_17"),
+	)
+
+	It("reads only its pod's lines", func() {
+		lines := append(ourLines(), asPod("plugin-peer-2", 999)...)
+
+		mine := parity.Ours(lines, pod, index())
+		Expect(named(mine, xactApp).Value).To(Equal(168.0))
+		Expect(named(parity.Ours(lines, "plugin-peer-2", index()), xactApp).Value).To(Equal(999.0))
+		Expect(mine).To(Equal(ours()))
+	})
+})
+
+var _ = Describe("the fixtures", func() {
+	It("hold no seeded Secret value", func() {
+		for _, name := range []string{"cnpg.prom", "ours.jsonl"} {
+			Expect(string(fixture(name))).NotTo(ContainSubstring("sentinel-"), name)
+		}
 	})
 })
 
@@ -411,7 +464,7 @@ var _ = Describe("Bracket", func() {
 			as := parseCNPG(hist(fixture("cnpg.prom"), 9, 4.5), afterScrape)
 			mine := append(ours(), parity.Series{
 				Name: latency, Metric: latency, Kind: "histogram", Labels: map[string]string{},
-				Value: count, Sum: sum, At: unix(xactSuccess),
+				Value: count, Sum: sum, At: time.UnixMicro(xactSuccessMicro),
 			})
 
 			c := checkOf(parity.Bracket(bs, as, mine, parity.Options{}), latency)
@@ -501,7 +554,66 @@ var _ = Describe("Bracket", func() {
 			Expect(c.Verdict).To(Equal("expected"))
 			Expect(parity.Failures([]parity.Check{c})).To(BeEmpty())
 		})
+
+		It("honours a skip of one of its series or of the whole metric", func() {
+			cnpgOnly := duration + `{collector="Collect.cnpg"}`
+			mine := without(retimed(collectorSeries(t), t), "cnpg_collector_collections_total")
+
+			checks := parity.Bracket(collectorSeries(t.Add(-5*time.Second)), collectorSeries(t.Add(5*time.Second)), mine,
+				parity.Options{Skip: map[string]string{cnpgOnly: "one-series", "cnpg_collector_collections_total": "whole"}})
+			Expect(checkOf(checks, cnpgOnly).Verdict).To(Equal("skipped"))
+			Expect(checkOf(checks, cnpgOnly).Rule).To(Equal("one-series"))
+			Expect(checkOf(checks, duration).Verdict).To(Equal("pass"))
+			Expect(checkOf(checks, "cnpg_collector_collections_total").Verdict).To(Equal("skipped"))
+		})
 	})
+
+	Context("metrics expected on one side", func() {
+		bracket := func(mine []parity.Series, o parity.Options) []parity.Check {
+			GinkgoHelper()
+
+			return parity.Bracket(parseCNPG(beforeText(), beforeScrape), parseCNPG(fixture("cnpg.prom"), afterScrape), mine, o)
+		}
+
+		It("fails a CNPG-side metric found in ours", func() {
+			mine := append(ours(), parity.Series{Name: "cnpg_cache_hits", Metric: "cnpg_cache_hits", Kind: "gauge", At: afterScrape})
+
+			c := checkOf(bracket(mine, parity.Options{}), "cnpg_cache_hits")
+			Expect(c.Verdict).To(Equal("fail"))
+			Expect(c.Detail).To(ContainSubstring("found in ours"))
+		})
+
+		It("fails an ours-side metric found in CNPG", func() {
+			text := append(fixture("cnpg.prom"), []byte("# TYPE cnpg_otel_series gauge\ncnpg_otel_series 1\n")...)
+			checks := parity.Bracket(parseCNPG(beforeText(), beforeScrape), parseCNPG(text, afterScrape), ours(), parity.Options{})
+
+			c := checkOf(checks, "cnpg_otel_series")
+			Expect(c.Verdict).To(Equal("fail"))
+			Expect(c.Detail).To(ContainSubstring("found in CNPG"))
+		})
+
+		It("honours a skip", func() {
+			c := checkOf(bracket(ours(), parity.Options{Skip: map[string]string{"go_goroutines": "named"}}), "go_goroutines")
+			Expect(c.Verdict).To(Equal("skipped"))
+			Expect(c.Rule).To(Equal("named"))
+		})
+	})
+
+	DescribeTable("fails a series whose kind differs, naming the CNPG sample that differs",
+		func(before, after, detail string) {
+			kind := func(series []parity.Series, k string) []parity.Series {
+				return with(series, xactApp, func(s *parity.Series) { s.Kind = k })
+			}
+			bs := kind(parseCNPG(setSample(beforeText(), xactApp, 150), beforeScrape), before)
+			as := kind(parseCNPG(fixture("cnpg.prom"), afterScrape), after)
+
+			c := checkOf(parity.Bracket(bs, as, ours(), parity.Options{}), xactApp)
+			Expect(c.Verdict).To(Equal("fail"))
+			Expect(c.Detail).To(Equal(detail))
+		},
+		Entry("before", "gauge", "counter", "kind: CNPG before gauge, ours counter"),
+		Entry("after", "counter", "gauge", "kind: CNPG after gauge, ours counter"),
+	)
 
 	Context("built-ins", func() {
 		t := time.Unix(1794676100, 0)
@@ -617,5 +729,26 @@ var _ = Describe("Markdown", func() {
 
 		Expect(r).To(ContainSubstring("| absent |"))
 		Expect(r).To(ContainSubstring("| fail |"))
+	})
+
+	It("renders the same input the same way, whatever its order", func() {
+		bs, as, mine := parseCNPG(beforeText(), beforeScrape), parseCNPG(fixture("cnpg.prom"), afterScrape), ours()
+		md := parity.Markdown("Parity", parity.Bracket(bs, as, mine, parity.Options{}))
+
+		reorders := []func([]parity.Series) []parity.Series{
+			func(s []parity.Series) []parity.Series { return s },
+			func(s []parity.Series) []parity.Series { out := slices.Clone(s); slices.Reverse(out); return out },
+			func(s []parity.Series) []parity.Series { return append(slices.Clone(s[len(s)/2:]), s[:len(s)/2]...) },
+		}
+		for _, reorder := range reorders {
+			Expect(parity.Markdown("Parity", parity.Bracket(reorder(bs), reorder(as), reorder(mine), parity.Options{}))).To(Equal(md))
+		}
+	})
+
+	It("puts a series holding a backtick in a longer code span", func() {
+		name := "cnpg_x{l=\"a``b\"}"
+		md := parity.Markdown("Parity", []parity.Check{{Series: name, Metric: "cnpg_x", Rule: "bracket", Verdict: "fail"}})
+
+		Expect(md).To(ContainSubstring("| ``` " + name + " ``` |"))
 	})
 })

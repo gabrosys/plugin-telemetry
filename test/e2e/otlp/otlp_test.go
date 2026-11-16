@@ -87,7 +87,8 @@ var _ = Describe("readers", func() {
 	})
 
 	It("returns the points, the last matching point and the lines since a time", func() {
-		Expect(otlp.Points(lines, "calls_total")).To(HaveLen(1))
+		Expect(otlp.Points(lines, "calls_total")).To(HaveExactElements(HaveField("Monotonic", true)))
+		Expect(otlp.Points(lines, "up")).To(HaveExactElements(HaveField("Monotonic", false)))
 		p, ok := otlp.Last(lines, "calls_total", map[string]string{"hook": "EVALUATE"})
 		Expect(ok).To(BeTrue())
 		Expect(p.Value).To(Equal(3.0))

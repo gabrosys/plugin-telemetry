@@ -13,6 +13,12 @@ import (
 const (
 	minInterval     = time.Second
 	minQueryTimeout = 100 * time.Millisecond
+	// maxTimeoutMillis is the maximum of statement_timeout, lock_timeout and
+	// idle_in_transaction_session_timeout in PostgreSQL 18 (postgres --describe-config).
+	maxTimeoutMillis = 2147483647
+	// maxQueryTimeout keeps idle_in_transaction_session_timeout, twice the query timeout, in range.
+	maxQueryTimeout = maxTimeoutMillis / 2 * time.Millisecond
+	maxLockTimeout  = maxTimeoutMillis * time.Millisecond
 
 	// ProtocolHTTP is the OTLP/HTTP transport.
 	ProtocolHTTP = "http/protobuf"
@@ -170,8 +176,14 @@ func (s Settings) validateLimits() []error {
 	if l.QueryTimeout < minQueryTimeout {
 		errs = append(errs, fmt.Errorf("limits.queryTimeout: must be at least %s, got %s", minQueryTimeout, l.QueryTimeout))
 	}
+	if l.QueryTimeout > maxQueryTimeout {
+		errs = append(errs, fmt.Errorf("limits.queryTimeout: must be at most %dms, got %s", maxQueryTimeout.Milliseconds(), l.QueryTimeout))
+	}
 	if l.LockTimeout <= 0 {
 		errs = append(errs, fmt.Errorf("limits.lockTimeout: must be positive, got %s", l.LockTimeout))
+	}
+	if l.LockTimeout > maxLockTimeout {
+		errs = append(errs, fmt.Errorf("limits.lockTimeout: must be at most %dms, got %s", maxLockTimeout.Milliseconds(), l.LockTimeout))
 	}
 	for _, c := range []struct {
 		name string

@@ -275,6 +275,24 @@ var _ = Describe("Validate", func() {
 		Entry("maxLabelsPerSeries", func(s *settings.Settings) { s.Limits.MaxLabelsPerSeries = 0 }, "limits.maxLabelsPerSeries"),
 	)
 
+	DescribeTable("bounds the timeouts by PostgreSQL's integer milliseconds",
+		func(mutate func(*settings.Settings), message string) {
+			s := mustLoad("minimal.yaml")
+			mutate(&s)
+			if message == "" {
+				Expect(s.Validate()).To(Succeed())
+				return
+			}
+			Expect(s.Validate()).To(MatchError(ContainSubstring(message)))
+		},
+		Entry("queryTimeout at INT_MAX/2 ms", func(s *settings.Settings) { s.Limits.QueryTimeout = 1073741823 * time.Millisecond }, ""),
+		Entry("queryTimeout one past", func(s *settings.Settings) { s.Limits.QueryTimeout = 1073741824 * time.Millisecond },
+			"limits.queryTimeout: must be at most 1073741823ms"),
+		Entry("lockTimeout at INT_MAX ms", func(s *settings.Settings) { s.Limits.LockTimeout = 2147483647 * time.Millisecond }, ""),
+		Entry("lockTimeout one past", func(s *settings.Settings) { s.Limits.LockTimeout = 2147483648 * time.Millisecond },
+			"limits.lockTimeout: must be at most 2147483647ms"),
+	)
+
 	DescribeTable("never echoes the user info, the query or the fragment of a rejected endpoint",
 		func(endpoint string) {
 			s := mustLoad("minimal.yaml")

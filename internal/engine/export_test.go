@@ -3,9 +3,11 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -178,7 +180,7 @@ func FactsRoundOnStop(ctx context.Context) (up int64) {
 	}
 	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, gather)
 	if err != nil {
-		return -2
+		panic(fmt.Sprintf("FactsRoundOnStop: new engine: %v", err))
 	}
 	s := settings.Settings{
 		Postgres:     settings.Postgres{Host: "127.0.0.1", Port: 1, User: "u", Database: "app", MaxConnections: 2},
@@ -195,4 +197,35 @@ func FactsRoundOnStop(ctx context.Context) (up int64) {
 	e.up.Store(1)
 	e.factsRound(ctx, true)
 	return e.up.Load()
+}
+
+// FactsFailuresAfterPanicOnStop runs one timed facts round, with 3 failures counted before it, whose
+// gather succeeds and stops the engine's context and whose replanning panics, and returns the count after.
+func FactsFailuresAfterPanicOnStop(ctx context.Context) int {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	gather := func(context.Context, settings.Settings) (planner.Facts, error) {
+		cancel()
+		return planner.Facts{Version: *semver.MustParse("18.0.7"), Databases: []string{"app"}}, nil
+	}
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, gather)
+	if err != nil {
+		panic(fmt.Sprintf("FactsFailuresAfterPanicOnStop: new engine: %v", err))
+	}
+	s := settings.Settings{
+		Postgres:     settings.Postgres{Host: "127.0.0.1", Port: 1, User: "u", Database: "app", MaxConnections: 2},
+		Limits:       settings.Limits{QueryTimeout: time.Second, LockTimeout: time.Second},
+		PlanInterval: time.Minute,
+	}
+	e.swapPool(ctx, s, time.Minute)
+	defer func() {
+		if r := e.setRunner(nil); r != nil {
+			r.pool.Close()
+		}
+	}()
+	e.plan.current = &configuration{settings: s}
+	e.plan.update = func(planner.Plan) { panic("replan") }
+	e.factsFailures = 3
+	e.factsRound(ctx, true)
+	return e.factsFailures
 }

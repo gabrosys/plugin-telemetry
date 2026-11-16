@@ -636,12 +636,12 @@ func (e *engine) factsRound(ctx context.Context, timed bool) {
 	if !safe.Call(log.FromContext(ctx).GetLogger(), "facts round", func() { e.gatherRound(ctx, timed) }) {
 		return
 	}
+	// The round may have reset the count before it panicked.
+	e.factsFailures = before
 	if ctx.Err() != nil {
 		return
 	}
 	e.setUp(false)
-	// The round may have reset the count before it panicked.
-	e.factsFailures = before
 	if cur := e.plan.current; timed && cur != nil {
 		e.factsFailures++
 		e.setFactsTimer(factsWait(e.factsFailures, cur.settings.PlanInterval))

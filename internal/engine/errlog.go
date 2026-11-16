@@ -19,7 +19,7 @@ type failure struct {
 // once when it recovers. The zero value is ready to use.
 type errorLog struct {
 	mu      sync.Mutex // guards failing
-	failing map[failure]struct{}
+	failing map[snapshot.Key]map[selfmetrics.Outcome]struct{}
 }
 
 // Failed logs err unless query on database was already failing with outcome since it last succeeded.
@@ -40,13 +40,16 @@ func (l *errorLog) Succeeded(log logr.Logger, query, database string) {
 func (l *errorLog) note(f failure) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if _, ok := l.failing[f]; ok {
+	if _, ok := l.failing[f.key][f.outcome]; ok {
 		return false
 	}
 	if l.failing == nil {
-		l.failing = map[failure]struct{}{}
+		l.failing = map[snapshot.Key]map[selfmetrics.Outcome]struct{}{}
 	}
-	l.failing[f] = struct{}{}
+	if l.failing[f.key] == nil {
+		l.failing[f.key] = map[selfmetrics.Outcome]struct{}{}
+	}
+	l.failing[f.key][f.outcome] = struct{}{}
 	return true
 }
 
@@ -54,13 +57,8 @@ func (l *errorLog) note(f failure) bool {
 func (l *errorLog) forget(k snapshot.Key) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	was := false
-	for f := range l.failing {
-		if f.key == k {
-			delete(l.failing, f)
-			was = true
-		}
-	}
+	_, was := l.failing[k]
+	delete(l.failing, k)
 	return was
 }
 
@@ -68,9 +66,9 @@ func (l *errorLog) forget(k snapshot.Key) bool {
 func (l *errorLog) retain(keep func(snapshot.Key) bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for f := range l.failing {
-		if !keep(f.key) {
-			delete(l.failing, f)
+	for k := range l.failing {
+		if !keep(k) {
+			delete(l.failing, k)
 		}
 	}
 }

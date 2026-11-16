@@ -186,6 +186,10 @@ var _ = Describe("Facts rounds", func() {
 		Expect(engine.FactsRoundOnStop(ctx)).To(BeEquivalentTo(1))
 	})
 
+	It("keeps the failure count when a round panics while the engine stops", func(ctx SpecContext) {
+		Expect(engine.FactsFailuresAfterPanicOnStop(ctx)).To(Equal(3))
+	})
+
 	It("stop writing a job's self-metrics once it leaves the plan", func() {
 		var dropApp atomic.Bool
 		h := run(func(url string) *memConfig { return newMemConfig(fastSettings(url), httpFiles()) },

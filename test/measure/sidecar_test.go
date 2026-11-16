@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -30,19 +29,6 @@ const (
 	warmup               = 5 * time.Minute
 	statePoll            = 2 * time.Second
 )
-
-// stat is the min, median and max of a series of readings.
-type stat struct {
-	Min    uint64 `json:"min"`
-	Median uint64 `json:"median"`
-	Max    uint64 `json:"max"`
-}
-
-func statOf(xs []uint64) stat {
-	s := slices.Sorted(slices.Values(xs))
-
-	return stat{Min: s[0], Median: s[len(s)/2], Max: s[len(s)-1]}
-}
 
 // sidecarMeasurement is sidecar-<cnpg>.json.
 type sidecarMeasurement struct {

@@ -144,19 +144,30 @@ var _ = Describe("Lifecycle", func() {
 				Expect(err).NotTo(HaveOccurred())
 				injected := applyPatch(pod, resp.GetJsonPatch())
 
+				resources := map[string]string{"sidecarCPU": "100m", "sidecarMemory": "128Mi"}
 				resp, err = srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
-					clusterJSON(ours(map[string]string{"sidecarCPU": "100m", "sidecarMemory": "128Mi"})), injected))
+					clusterJSON(ours(resources)), injected))
 				Expect(err).NotTo(HaveOccurred())
 				Expect(resp.GetJsonPatch()).NotTo(BeEmpty())
 
+				want := &corev1.Pod{}
+				Expect(json.Unmarshal(injected, want)).To(Succeed())
+				Expect(podpatch.Apply(want, "fixture", mustParams(resources), testImage)).To(Succeed())
+				wantJSON, err := json.Marshal(want)
+				Expect(err).NotTo(HaveOccurred())
+				patchedJSON := applyPatch(injected, resp.GetJsonPatch())
+				Expect(canonical(patchedJSON)).To(MatchJSON(wantJSON))
+
 				patched := &corev1.Pod{}
-				Expect(json.Unmarshal(applyPatch(injected, resp.GetJsonPatch()), patched)).To(Succeed())
+				Expect(json.Unmarshal(patchedJSON, patched)).To(Succeed())
 				var sidecar corev1.Container
+				found := false
 				for _, c := range patched.Spec.InitContainers {
 					if c.Name == metadata.SidecarContainerName {
-						sidecar = c
+						sidecar, found = c, true
 					}
 				}
+				Expect(found).To(BeTrue(), "init container %q not found in the patched Pod", metadata.SidecarContainerName)
 				for _, list := range []corev1.ResourceList{sidecar.Resources.Requests, sidecar.Resources.Limits} {
 					cpu, memory := list[corev1.ResourceCPU], list[corev1.ResourceMemory]
 					Expect(cpu.String()).To(Equal("100m"))

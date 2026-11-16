@@ -45,6 +45,15 @@ var _ = Describe("errorLog", func() {
 		Expect(lines).To(HaveLen(1))
 	})
 
+	It("forgets a failure whatever its outcome when the query succeeds", func() {
+		err := errors.New("boom")
+		l.Failed(logger, "backends", "app", selfmetrics.Outcome("some-later-outcome"), err)
+		l.Succeeded(logger, "backends", "app")
+		Expect(lines).To(HaveLen(2), "the failure and its recovery")
+		l.Failed(logger, "backends", "app", selfmetrics.Outcome("some-later-outcome"), err)
+		Expect(lines).To(HaveLen(3))
+	})
+
 	It("logs a new line when the outcome changes", func() {
 		err := errors.New("boom")
 		l.Failed(logger, "backends", "app", selfmetrics.OutcomeError, err)

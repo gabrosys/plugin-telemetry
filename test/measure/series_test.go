@@ -14,6 +14,7 @@ import (
 
 	"github.com/gabrosys/plugin-telemetry/api/v1alpha1"
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
+	"github.com/gabrosys/plugin-telemetry/internal/podpatch"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/framework"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/otlp"
@@ -22,7 +23,6 @@ import (
 const (
 	seriesFloor       = 48000
 	seriesWarmupExtra = 2 * time.Minute
-	sidecarMemory     = 67108864 // 64Mi, the default sidecar limit
 	syntheticQueries  = 5
 	syntheticSQL      = "SELECT 'schema_' || (i % 50) AS schemaname, 'relation_' || lpad(i::text, 8, '0') AS relname, " +
 		"i::float8 AS seq_scan, (i * 2)::float8 AS n_live_tup FROM generate_series(1, 4800) AS i"
@@ -78,8 +78,11 @@ func sidecarTermination(pod *corev1.Pod) string {
 }
 
 var _ = Describe("the telemetry container at maxSeriesTotal 50000", Ordered, func() {
-	It("holds 48000 to 50000 series within the default 64Mi limit", func(ctx SpecContext) {
+	It("holds 48000 to 50000 series within the default sidecar memory limit", func(ctx SpecContext) {
 		Expect(settings.Defaults().Limits.MaxSeriesTotal).To(Equal(50000))
+		params, err := podpatch.ParseParams(nil)
+		Expect(err).NotTo(HaveOccurred())
+		sidecarMemory := params.Params.Memory.Value()
 		env, out, c, cfg := measureEnv(ctx)
 
 		ns, err := framework.CreateNamespace(ctx, c, "measure-series")
@@ -149,7 +152,7 @@ var _ = Describe("the telemetry container at maxSeriesTotal 50000", Ordered, fun
 		Expect(sampleErr).NotTo(HaveOccurred(), "sampling usage")
 		Expect(m.SeriesAtStart).To(BeNumerically(">=", seriesFloor), "series at the start")
 		Expect(m.SeriesAtEnd).To(BeNumerically("~", 49000, 1000), "series at the end")
-		Expect(m.WorkingSetBytes.Max).To(BeNumerically("<", sidecarMemory), "max working set")
+		Expect(m.WorkingSetBytes.Max).To(BeNumerically("<", float64(sidecarMemory)), "max working set")
 		Expect(m.RestartsAfter).To(Equal(m.RestartsBefore), "sidecar restarts")
 		Expect(m.LastTerminationReason).NotTo(Equal("OOMKilled"), "last termination reason")
 		Expect(m.ExportErrors).To(BeZero(), "export errors")

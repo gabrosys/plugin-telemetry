@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"sync"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -14,6 +15,9 @@ var (
 	errHistogramDims = errors.New("histogram array has more than one dimension")
 	errHistogramNaN  = errors.New("histogram bound is NaN")
 )
+
+// typeMaps holds the pgtype.Map values scanArray uses; a Map is not safe for concurrent use.
+var typeMaps = sync.Pool{New: func() any { return pgtype.NewMap() }}
 
 // histogramFrom builds a histogram as CNPG's histogram.NewFromRawData does (pkg/management/postgres/metrics/histogram/histogram.go:46-105
 // at v1.30.1). The arrays arrive as text and are parsed with pgtype.
@@ -104,7 +108,13 @@ func scanArray(oid uint32, raw any, dst any) error {
 		return fmt.Errorf("unsupported array value %T", raw)
 	}
 
-	if err := pgtype.NewMap().Scan(oid, pgtype.TextFormatCode, text, dst); err != nil {
+	m, ok := typeMaps.Get().(*pgtype.Map)
+	if !ok {
+		m = pgtype.NewMap()
+	}
+	defer typeMaps.Put(m)
+
+	if err := m.Scan(oid, pgtype.TextFormatCode, text, dst); err != nil {
 		return fmt.Errorf("scan array: %w", err)
 	}
 

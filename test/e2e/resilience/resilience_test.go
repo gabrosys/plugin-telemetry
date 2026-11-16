@@ -25,6 +25,7 @@ var _ = Describe("resilience", Ordered, ContinueOnFailure, func() {
 	}, SpecTimeout(time.Minute))
 
 	collectorSpecs(s)
+	switchoverSpecs(s)
 	sidecarSpecs(s)
 	restartSpecs(s)
 	renewalSpecs(s)

@@ -165,14 +165,7 @@ func (l *Loop) tick(ctx context.Context, t *target, at time.Time) {
 	defer cancel()
 	logger := log.FromContext(ctx)
 
-	l.tickFailed = false
-	defer func() {
-		if !l.tickFailed && l.lastFailure != "" {
-			l.lastFailure = ""
-			logger.Info("export recovered")
-		}
-	}()
-
+	l.tickFailed = false // tick's state is touched only by Run's goroutine
 	start := l.clk.Now()
 	rm := &metricdata.ResourceMetrics{}
 	if err := l.reader.Collect(ctx, rm); err != nil {
@@ -187,6 +180,10 @@ func (l *Loop) tick(ctx context.Context, t *target, at time.Time) {
 
 	for _, b := range Split(rm, t.maxPoints) {
 		l.send(ctx, t, b)
+	}
+	if !l.tickFailed && l.lastFailure != "" {
+		l.lastFailure = ""
+		logger.Info("export recovered")
 	}
 }
 

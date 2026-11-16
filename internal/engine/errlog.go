@@ -50,13 +50,19 @@ func (l *errorLog) note(f failure) bool {
 	return true
 }
 
+// outcomes are the outcomes Failed is called with.
+var outcomes = [...]selfmetrics.Outcome{
+	selfmetrics.OutcomeError, selfmetrics.OutcomeTimeout, selfmetrics.OutcomeDenied,
+}
+
 // forget clears every outcome of k and reports whether k was failing.
 func (l *errorLog) forget(k snapshot.Key) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	was := false
-	for f := range l.failing {
-		if f.key == k {
+	for _, o := range outcomes {
+		f := failure{k, o}
+		if _, ok := l.failing[f]; ok {
 			delete(l.failing, f)
 			was = true
 		}

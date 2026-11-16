@@ -149,6 +149,18 @@ func (h *loopHarness) stop() {
 	h.cancel = nil
 }
 
+// stepUntil steps the clock by one 10 s interval until cond holds, within a bound.
+func (h *loopHarness) stepUntil(cond func() bool) {
+	GinkgoHelper()
+	Eventually(func() bool {
+		if cond() {
+			return true
+		}
+		h.step(10 * time.Second)
+		return cond()
+	}).WithTimeout(time.Minute).WithPolling(0).Should(BeTrue())
+}
+
 // step advances the clock by d while the loop waits for its next tick, and returns once it waits again.
 func (h *loopHarness) step(d time.Duration) {
 	GinkgoHelper()
@@ -432,13 +444,9 @@ var _ = Describe("Loop", func() {
 		h.loop.SetExporter(context.Background(), newExporter(s), 10*time.Second, 1000)
 		h.start()
 
-		for h.exports("error") < 100 {
-			h.step(10 * time.Second)
-		}
+		h.stepUntil(func() bool { return h.exports("error") >= 100 })
 		srv.Respond(otlptest.Response{})
-		for h.exports("ok") == 0 {
-			h.step(10 * time.Second)
-		}
+		h.stepUntil(func() bool { return h.exports("ok") > 0 })
 
 		lines := h.logged()
 		Expect(lines).To(HaveLen(2))
@@ -451,6 +459,35 @@ var _ = Describe("Loop", func() {
 		}
 	})
 
+	It("logs no recovery for a tick that panics, and one at the next good tick", func() {
+		srv := newHTTPServer(nil)
+		srv.Respond(otlptest.Response{HTTPStatus: 400})
+		h := newLoopHarness(1)
+		h.loop.SetExporter(context.Background(), httpExporter(srv), 10*time.Second, 1000)
+		h.start()
+		recoveries := func() int {
+			n := 0
+			for _, l := range h.logged() {
+				if strings.Contains(l, `"msg"="export recovered"`) {
+					n++
+				}
+			}
+			return n
+		}
+
+		h.stepUntil(func() bool { return h.exports("error") >= 1 })
+		h.prod.mu.Lock()
+		h.prod.panics = 1
+		h.prod.mu.Unlock()
+		srv.Respond(otlptest.Response{})
+		h.stepUntil(func() bool { return h.exports("error") >= 2 })
+		Expect(recoveries()).To(BeZero())
+
+		h.stepUntil(func() bool { return h.exports("ok") > 0 })
+		Expect(recoveries()).To(Equal(1))
+		Expect(h.logged()).To(HaveLen(3), "the failure, the panic and the recovery")
+	})
+
 	It("logs a new line when the error type changes", func() {
 		srv := newHTTPServer(nil)
 		h := newLoopHarness(1)
@@ -460,9 +497,7 @@ var _ = Describe("Loop", func() {
 		for _, status := range []int{400, 400, 413, 400} {
 			srv.Respond(otlptest.Response{HTTPStatus: status})
 			want := h.exports("error") + 1
-			for h.exports("error") < want {
-				h.step(10 * time.Second)
-			}
+			h.stepUntil(func() bool { return h.exports("error") >= want })
 		}
 		lines := h.logged()
 		Expect(lines).To(HaveLen(3))
@@ -478,19 +513,13 @@ var _ = Describe("Loop", func() {
 		h.loop.SetExporter(context.Background(), httpExporter(srv), 10*time.Second, 1000)
 		h.start()
 
-		for h.exports("error") < 3 {
-			h.step(10 * time.Second)
-		}
+		h.stepUntil(func() bool { return h.exports("error") >= 3 })
 		h.prod.set(3, nil)
 		srv.Respond(otlptest.Response{Rejected: 1})
-		for len(srv.Requests()) < 3 {
-			h.step(10 * time.Second)
-		}
+		h.stepUntil(func() bool { return len(srv.Requests()) >= 3 })
 		srv.Respond(otlptest.Response{})
 		sent := len(srv.Requests())
-		for len(srv.Requests()) == sent {
-			h.step(10 * time.Second)
-		}
+		h.stepUntil(func() bool { return len(srv.Requests()) > sent })
 
 		lines := h.logged()
 		Expect(lines).To(HaveLen(3))

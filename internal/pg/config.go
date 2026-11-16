@@ -10,9 +10,15 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgconn/ctxwatch"
 )
 
-const applicationName = "cnpg_otel_engine"
+const (
+	applicationName = "cnpg_otel_engine"
+	// cancelDeadlineDelay is how long a cancelled statement may take to end before the socket is closed.
+	cancelDeadlineDelay = 2 * time.Second
+)
 
 // DefaultConnectTimeout bounds a connection attempt when Config.ConnectTimeout is zero.
 const DefaultConnectTimeout = 5 * time.Second
@@ -24,7 +30,7 @@ type Config struct {
 	User string
 	// PasswordFile is read at every connection; empty means no password.
 	PasswordFile string
-	// QueryTimeout is the statement_timeout; idle_in_transaction_session_timeout is twice this.
+	// QueryTimeout is the statement_timeout GuardSQL sets; idle_in_transaction_session_timeout is twice this.
 	QueryTimeout   time.Duration
 	LockTimeout    time.Duration
 	ConnectTimeout time.Duration
@@ -65,7 +71,8 @@ func ClearEnv() []string {
 }
 
 // ConnConfig fails with ErrPGEnv while any of EnvVars is set, then parses a keyword DSN that
-// sets every key pgx would otherwise take from $HOME, and adds the session settings.
+// sets every key pgx would otherwise take from $HOME, and adds the session settings. The limits are not
+// session settings: GuardSQL sets them per transaction, so pg_settings shows the server's values.
 func ConnConfig(c Config, database string) (*pgx.ConnConfig, error) {
 	for _, name := range EnvVars {
 		if _, set := os.LookupEnv(name); set {
@@ -95,15 +102,28 @@ func ConnConfig(c Config, database string) (*pgx.ConnConfig, error) {
 		return nil, ErrInvalidConfig
 	}
 
-	cc.RuntimeParams["default_transaction_read_only"] = "on"
 	cc.RuntimeParams["search_path"] = "pg_catalog, public, pg_temp"
-	cc.RuntimeParams["statement_timeout"] = milliseconds(c.QueryTimeout)
-	cc.RuntimeParams["lock_timeout"] = milliseconds(c.LockTimeout)
-	cc.RuntimeParams["idle_in_transaction_session_timeout"] = milliseconds(2 * c.QueryTimeout)
-	cc.RuntimeParams["jit"] = "off"
-	cc.RuntimeParams["max_parallel_workers_per_gather"] = "0"
 	cc.RuntimeParams["standard_conforming_strings"] = "on"
+	// At a context's end the server is asked to cancel the statement; the socket deadline is the fallback.
+	cc.BuildContextWatcherHandler = func(conn *pgconn.PgConn) ctxwatch.Handler {
+		return &pgconn.CancelRequestContextWatcherHandler{Conn: conn, DeadlineDelay: cancelDeadlineDelay}
+	}
 	return cc, nil
+}
+
+// GuardSQL sets the limits of c for the current transaction only: statement_timeout, lock_timeout,
+// idle_in_transaction_session_timeout (twice the query timeout), jit and max_parallel_workers_per_gather.
+func GuardSQL(c Config) string {
+	set := func(name, value string) string {
+		return "pg_catalog.set_config('" + name + "', '" + value + "', true)"
+	}
+	return "SELECT " + strings.Join([]string{
+		set("statement_timeout", milliseconds(c.QueryTimeout)),
+		set("lock_timeout", milliseconds(c.LockTimeout)),
+		set("idle_in_transaction_session_timeout", milliseconds(2*c.QueryTimeout)),
+		set("jit", "off"),
+		set("max_parallel_workers_per_gather", "0"),
+	}, ", ")
 }
 
 // dsn builds a keyword/value connection string. Empty values are written as a quoted empty string so that

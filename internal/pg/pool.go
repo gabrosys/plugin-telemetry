@@ -25,6 +25,7 @@ var ErrPoolClosed = errors.New("connection pool is closed")
 // Pool hands out connections to databases of one server, with at most maxConns open in total.
 type Pool struct {
 	cfg        Config
+	guard      string
 	maxConns   int
 	maxBackoff time.Duration
 	clk        clock.PassiveClock
@@ -79,6 +80,7 @@ func WithMaxBackoff(d time.Duration) PoolOption {
 func NewPool(c Config, maxConns int, idleTimeout time.Duration, clk clock.PassiveClock, opts ...PoolOption) *Pool {
 	p := &Pool{
 		cfg:         c,
+		guard:       GuardSQL(c),
 		maxConns:    max(1, maxConns),
 		idleTimeout: idleTimeout,
 		maxBackoff:  defaultMaxBackoff,
@@ -93,6 +95,9 @@ func NewPool(c Config, maxConns int, idleTimeout time.Duration, clk clock.Passiv
 	}
 	return p
 }
+
+// Guard returns GuardSQL of the pool's Config, to run after each BEGIN.
+func (p *Pool) Guard() string { return p.guard }
 
 // Acquire returns a connection to database. At the cap it closes the least recently used idle
 // connection of another database, or waits. After a failed connect it returns ErrBackoff until

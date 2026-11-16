@@ -738,7 +738,7 @@ func (e *engine) gatherFacts(ctx context.Context, s settings.Settings) (planner.
 	if err != nil {
 		return planner.Facts{}, fmt.Errorf("acquire a connection: %w", err)
 	}
-	facts, err := planner.GatherFacts(ctx, conn)
+	facts, err := planner.GatherFacts(ctx, conn, e.runner.pool.Guard())
 	release(err != nil)
 	if err != nil {
 		return planner.Facts{}, fmt.Errorf("gather facts: %w", err)

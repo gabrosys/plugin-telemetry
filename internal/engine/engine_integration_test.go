@@ -652,7 +652,8 @@ const primaryOnlyProbe = `primary_probe:
 
 // realFacts reads the facts from PostgreSQL the way the engine does, on a connection of its own.
 func realFacts(ctx context.Context, dir string) (planner.Facts, error) {
-	cc, err := pg.ConnConfig(server.MonitorConfig(dir), "postgres")
+	cfg := server.MonitorConfig(dir)
+	cc, err := pg.ConnConfig(cfg, "postgres")
 	if err != nil {
 		return planner.Facts{}, fmt.Errorf("connection config: %w", err)
 	}
@@ -660,7 +661,7 @@ func realFacts(ctx context.Context, dir string) (planner.Facts, error) {
 	if err != nil {
 		return planner.Facts{}, fmt.Errorf("connect: %w", err)
 	}
-	facts, err := planner.GatherFacts(ctx, conn)
+	facts, err := planner.GatherFacts(ctx, conn, pg.GuardSQL(cfg))
 	if cerr := conn.Close(context.WithoutCancel(ctx)); cerr != nil {
 		err = errors.Join(err, fmt.Errorf("close: %w", cerr))
 	}

@@ -45,10 +45,10 @@ const databasesQuery = `SELECT datname, pg_catalog.has_database_privilege(datnam
 
 // checkSettings maps a check to the setting it reads; a setting the server does not have omits the check.
 // The settings are documented in PostgreSQL 18, "Run-time Statistics", track_io_timing, track_wal_io_timing and
-// track_functions (https://www.postgresql.org/docs/18/runtime-config-statistics.html), and default_transaction_read_only
-// (https://www.postgresql.org/docs/18/runtime-config-client.html).
+// track_functions (https://www.postgresql.org/docs/18/runtime-config-statistics.html), and transaction_read_only, the
+// access mode of the current transaction (https://www.postgresql.org/docs/18/sql-set-transaction.html).
 var checkSettings = map[string]string{
-	"read_only":           "default_transaction_read_only",
+	"read_only":           "transaction_read_only",
 	"track_io_timing":     "track_io_timing",
 	"track_wal_io_timing": "track_wal_io_timing",
 	"track_functions":     "track_functions",
@@ -104,11 +104,12 @@ func rollbackSavepoint(ctx context.Context, check string, sp pgx.Tx) error {
 
 // GatherFacts reads the server version, the recovery state, the live checks and the connectable
 // databases in one read-only transaction on conn, which must be connected to the default database.
-func GatherFacts(ctx context.Context, conn *pgx.Conn) (Facts, error) {
-	return gatherFacts(ctx, conn, checkSettings)
+// guard (pg.Pool.Guard) runs first and sets the transaction's limits.
+func GatherFacts(ctx context.Context, conn *pgx.Conn, guard string) (Facts, error) {
+	return gatherFacts(ctx, conn, guard, checkSettings)
 }
 
-func gatherFacts(ctx context.Context, conn *pgx.Conn, settings map[string]string) (facts Facts, err error) {
+func gatherFacts(ctx context.Context, conn *pgx.Conn, guard string, settings map[string]string) (facts Facts, err error) {
 	tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return Facts{}, fmt.Errorf("begin facts transaction: %w", err)
@@ -118,6 +119,9 @@ func gatherFacts(ctx context.Context, conn *pgx.Conn, settings map[string]string
 			err = errors.Join(err, fmt.Errorf("roll back facts transaction: %w", rbErr))
 		}
 	}()
+	if _, err := tx.Exec(ctx, guard); err != nil {
+		return Facts{}, fmt.Errorf("set the facts transaction limits: %w", err)
+	}
 
 	var versionNum string
 	if err := tx.QueryRow(ctx, "SHOW server_version_num").Scan(&versionNum); err != nil {

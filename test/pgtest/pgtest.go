@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/testcontainers/testcontainers-go"
 	tcexec "github.com/testcontainers/testcontainers-go/exec"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -111,6 +112,21 @@ func (p *Postgres) MonitorConfig(dir string) pg.Config {
 		LockTimeout:    5 * time.Second,
 		ConnectTimeout: 5 * time.Second,
 	}
+}
+
+// PlainConn connects to database as the monitoring role with pgx's defaults and no runtime parameter of
+// its own, so its settings are the server's.
+func (p *Postgres) PlainConn(ctx context.Context, database string) (*pgx.Conn, error) {
+	cc, err := pgx.ParseConfig("sslmode=disable")
+	if err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	cc.Host, cc.Port, cc.User, cc.Password, cc.Database = p.Host, p.Port, MonitorUser, MonitorPassword, database
+	conn, err := pgx.ConnectConfig(ctx, cc)
+	if err != nil {
+		return nil, fmt.Errorf("connect: %w", err)
+	}
+	return conn, nil
 }
 
 // StopServer stops PostgreSQL and keeps it stopped, the container keeps running.

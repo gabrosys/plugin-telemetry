@@ -90,6 +90,9 @@ type Definition struct {
 	Fingerprint     string            // hex sha256 over what shapes samples, not over scheduling or placement
 	Warnings        []string
 	Disabled        string // non-empty: never planned, with this reason
+	// ReadsSettings: the SQL or the predicate names pg_settings or pg_show_all_settings, so the run skips
+	// the per-transaction limits and pg_settings shows the server's values.
+	ReadsSettings bool
 }
 
 // Options tune Define.
@@ -143,6 +146,7 @@ func Define(key string, q UserQuery, opts Options) Definition {
 		TargetDatabases: append([]string(nil), q.TargetDatabases...),
 		CacheSeconds:    q.CacheSeconds,
 		Columns:         make(map[string]Column),
+		ReadsSettings:   readsSettings(q.Query) || readsSettings(q.PredicateQuery),
 	}
 
 	var disabled []string

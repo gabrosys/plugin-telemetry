@@ -41,7 +41,7 @@ var _ = Describe("GatherFacts", func() {
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 
-		f, err := planner.GatherFacts(ctx, conn)
+		f, err := planner.GatherFacts(ctx, conn, pool.Guard())
 		Expect(err).NotTo(HaveOccurred())
 		Expect(f.Version.String()).To(Equal("18.0.7"))
 		Expect(f.InRecovery).To(BeFalse())
@@ -56,7 +56,7 @@ var _ = Describe("GatherFacts", func() {
 		conn, release, err := pool.Acquire(ctx, "postgres")
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
-		f, err := planner.GatherFacts(ctx, conn)
+		f, err := planner.GatherFacts(ctx, conn, pool.Guard())
 		Expect(err).NotTo(HaveOccurred())
 		return f
 	}
@@ -69,6 +69,17 @@ var _ = Describe("GatherFacts", func() {
 			"track_wal_io_timing": false,
 			"track_functions":     false,
 		}))
+	})
+
+	It("checks read_only on the engine's transactions while the server's default_transaction_read_only is off", func(ctx SpecContext) {
+		plain, err := server.PlainConn(ctx, "postgres")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func(ctx SpecContext) { Expect(plain.Close(ctx)).To(Succeed()) })
+		var serverValue string
+		Expect(plain.QueryRow(ctx, "SHOW default_transaction_read_only").Scan(&serverValue)).To(Succeed())
+		Expect(serverValue).To(Equal("off"))
+
+		Expect(gather(ctx).Checks).To(HaveKeyWithValue("read_only", true))
 	})
 
 	It("reports the settings that are on", func(ctx SpecContext) {
@@ -97,7 +108,7 @@ var _ = Describe("GatherFacts", func() {
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 
-		f, err := planner.GatherFactsWith(ctx, conn, map[string]string{
+		f, err := planner.GatherFactsWith(ctx, conn, pool.Guard(), map[string]string{
 			"track_io_timing":     "track_io_timing",
 			"track_wal_io_timing": "no_such_setting",
 		})
@@ -118,7 +129,7 @@ var _ = Describe("GatherFacts", func() {
 
 		cancelled, cancel := context.WithCancel(ctx)
 		cancel()
-		_, err = planner.GatherFacts(cancelled, conn)
+		_, err = planner.GatherFacts(cancelled, conn, pool.Guard())
 		Expect(err).To(MatchError(context.Canceled))
 	})
 

@@ -94,6 +94,18 @@ func jobFor(sql string, mutate ...func(*queries.Definition)) planner.Job {
 	return planner.Job{Query: "probe", Database: "postgres", Def: d}
 }
 
+// definedJob returns a job of sql defined as a query with a label column "datname" and a gauge column "value".
+func definedJob(sql string) planner.Job {
+	def := queries.Define("probe", queries.UserQuery{
+		Query: sql,
+		Metrics: []queries.Mapping{
+			{"datname": {Usage: queries.UsageLabel}},
+			{"value": {Usage: queries.UsageGauge}},
+		},
+	}, queries.Options{})
+	return planner.Job{Query: "probe", Database: "postgres", Def: &def}
+}
+
 func withPredicate(sql string) func(*queries.Definition) {
 	return func(d *queries.Definition) { d.Predicate = sql }
 }
@@ -130,7 +142,7 @@ var _ = Describe("Executor", func() {
 
 		conn, release, err := pool.Acquire(ctx, "postgres")
 		Expect(err).NotTo(HaveOccurred())
-		facts, err := planner.GatherFacts(ctx, conn)
+		facts, err := planner.GatherFacts(ctx, conn, pool.Guard())
 		release(err != nil)
 		Expect(err).NotTo(HaveOccurred())
 
@@ -190,13 +202,84 @@ var _ = Describe("Executor", func() {
 		Expect(res.Err).NotTo(HaveOccurred())
 		Expect(res.Samples).To(HaveLen(1))
 		Expect(res.Samples[0].Value).To(Equal(1.0))
+	})
 
-		Expect(server.Exec(ctx, "CREATE SEQUENCE IF NOT EXISTS public.ro_seq; GRANT USAGE ON SEQUENCE public.ro_seq TO "+pgtest.MonitorUser)).To(Succeed())
-		res = exec.Run(ctx, jobFor("SELECT 'a' AS datname, nextval('public.ro_seq') AS value"))
-		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeError))
+	DescribeTable("fails a query that writes with SQLSTATE 25006",
+		func(ctx SpecContext, sql string, readsSettings bool) {
+			Expect(server.Exec(ctx, "CREATE SEQUENCE IF NOT EXISTS public.ro_seq; GRANT USAGE ON SEQUENCE public.ro_seq TO "+pgtest.MonitorUser)).To(Succeed())
+			job := definedJob(sql)
+			Expect(job.Def.ReadsSettings).To(Equal(readsSettings))
+
+			res := exec.Run(ctx, job)
+			Expect(res.Outcome).To(Equal(selfmetrics.OutcomeError))
+			var pgErr *pgconn.PgError
+			Expect(errors.As(res.Err, &pgErr)).To(BeTrue(), "error: %v", res.Err)
+			Expect(pgErr.Code).To(Equal("25006"))
+		},
+		Entry("guarded", "SELECT 'a' AS datname, nextval('public.ro_seq') AS value", false),
+		Entry("reading pg_settings", "SELECT 'a' AS datname, nextval('public.ro_seq') AS value FROM pg_catalog.pg_settings LIMIT 1", true),
+	)
+
+	It("reports the server's values through CNPG's pg_settings query", func(ctx SpecContext) {
+		var cm struct {
+			Data map[string]string `yaml:"data"`
+		}
+		raw, err := os.ReadFile("../queries/testdata/default-monitoring-main.yaml")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(yaml.Unmarshal(raw, &cm)).To(Succeed())
+		parsed, err := queries.Parse([]byte(cm.Data["queries"]))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(parsed).To(HaveKey("pg_settings"))
+		def := queries.Define("pg_settings", parsed["pg_settings"], queries.Options{MaxLabelsPerSeries: 32})
+		Expect(def.ReadsSettings).To(BeTrue())
+
+		res := exec.Run(ctx, planner.Job{Query: "pg_settings", Database: "postgres", Def: &def})
+		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeOK), "error: %v", res.Err)
+		got := map[string]float64{}
+		for _, sample := range res.Samples {
+			Expect(sample.Metric).To(Equal("cnpg_pg_settings_setting"))
+			Expect(sample.Labels).To(HaveLen(1))
+			got[sample.Labels[0].Value] = sample.Value
+		}
+
+		plain, err := server.PlainConn(ctx, "postgres")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func(ctx SpecContext) { Expect(plain.Close(ctx)).To(Succeed()) })
+		for _, name := range []string{
+			"statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout", "jit",
+			"max_parallel_workers_per_gather", "default_transaction_read_only",
+		} {
+			var want float64
+			Expect(plain.QueryRow(ctx, "SELECT (CASE setting WHEN 'on' THEN '1' WHEN 'off' THEN '0' ELSE setting END)::float8 "+
+				"FROM pg_catalog.pg_settings WHERE name = $1", name).Scan(&want)).To(Succeed())
+			Expect(got).To(HaveKeyWithValue(name, want), name)
+		}
+		Expect(got).To(HaveKeyWithValue("transaction_read_only", 1.0))
+	})
+
+	It("ends an unguarded statement at the run deadline by a server-side cancel", func(ctx SpecContext) {
+		l.QueryTimeout = 4 * time.Second
+		slow := newExecutor(newPool(l), l)
+		pid := jobFor("SELECT 'a' AS datname, pg_backend_pid() AS value")
+		first := slow.Run(ctx, pid)
+		Expect(first.Err).NotTo(HaveOccurred())
+
+		job := definedJob("SELECT pg_sleep(5) FROM pg_catalog.pg_settings LIMIT 1")
+		Expect(job.Def.ReadsSettings).To(BeTrue())
+		deadline, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		start := time.Now()
+		res := slow.Run(deadline, job)
+		Expect(time.Since(start)).To(BeNumerically("<", 2*time.Second))
+		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeTimeout), "error: %v", res.Err)
 		var pgErr *pgconn.PgError
 		Expect(errors.As(res.Err, &pgErr)).To(BeTrue(), "error: %v", res.Err)
-		Expect(pgErr.Code).To(Equal("25006"))
+		Expect(pgErr.Code).To(Equal("57014"))
+		Expect(res.ConnectionLost).To(BeFalse())
+
+		again := slow.Run(ctx, pid)
+		Expect(again.Err).NotTo(HaveOccurred())
+		Expect(again.Samples[0].Value).To(Equal(first.Samples[0].Value), "the connection is kept")
 	})
 
 	It("records a run that fails with SQLSTATE 42501 as outcome denied", func(ctx SpecContext) {

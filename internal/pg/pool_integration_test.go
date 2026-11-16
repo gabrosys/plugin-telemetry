@@ -43,6 +43,21 @@ func showSetting(ctx context.Context, conn *pgx.Conn, name string) string {
 	return value
 }
 
+// serverSettings are the settings the engine's sessions leave at the server's values.
+var serverSettings = []string{
+	"statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout", "jit",
+	"max_parallel_workers_per_gather", "default_transaction_read_only",
+}
+
+// plainConn opens a session as the monitoring role whose settings are the server's.
+func plainConn(ctx context.Context) *pgx.Conn {
+	GinkgoHelper()
+	conn, err := server.PlainConn(ctx, "app")
+	Expect(err).NotTo(HaveOccurred())
+	DeferCleanup(conn.Close, context.WithoutCancel(ctx))
+	return conn
+}
+
 func backendPID(ctx context.Context, conn *pgx.Conn) uint32 {
 	GinkgoHelper()
 	var pid uint32
@@ -70,20 +85,18 @@ var _ = Describe("Pool", func() {
 		clk = clocktesting.NewFakePassiveClock(start)
 	})
 
-	It("applies the session settings as the monitoring role", func(ctx SpecContext) {
+	It("leaves the server's values in the session", func(ctx SpecContext) {
 		newPool(2, time.Minute)
 		conn, release, err := pool.Acquire(ctx, "app")
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
+		plain := plainConn(ctx)
 
-		Expect(showSetting(ctx, conn, "default_transaction_read_only")).To(Equal("on"))
+		for _, name := range serverSettings {
+			Expect(showSetting(ctx, conn, name)).To(Equal(showSetting(ctx, plain, name)), name)
+		}
 		Expect(showSetting(ctx, conn, "search_path")).To(Equal("pg_catalog, public, pg_temp"))
-		Expect(showSetting(ctx, conn, "statement_timeout")).To(Equal("3s"))
-		Expect(showSetting(ctx, conn, "lock_timeout")).To(Equal("1s"))
-		Expect(showSetting(ctx, conn, "idle_in_transaction_session_timeout")).To(Equal("6s"))
 		Expect(showSetting(ctx, conn, "application_name")).To(Equal("cnpg_otel_engine"))
-		Expect(showSetting(ctx, conn, "jit")).To(Equal("off"))
-		Expect(showSetting(ctx, conn, "max_parallel_workers_per_gather")).To(Equal("0"))
 		Expect(showSetting(ctx, conn, "standard_conforming_strings")).To(Equal("on"))
 
 		var user string
@@ -91,29 +104,45 @@ var _ = Describe("Pool", func() {
 		Expect(user).To(Equal("cnpg_metrics_exporter"))
 	})
 
-	It("rejects writes with SQLSTATE 25006", func(ctx SpecContext) {
+	It("Guard sets the limits for one transaction", func(ctx SpecContext) {
 		newPool(2, time.Minute)
 		conn, release, err := pool.Acquire(ctx, "app")
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
+		plain := plainConn(ctx)
 
-		_, err = conn.Exec(ctx, "CREATE TEMP TABLE t (id int)")
-		var pgErr *pgconn.PgError
-		Expect(errors.As(err, &pgErr)).To(BeTrue())
-		Expect(pgErr.Code).To(Equal("25006"))
+		tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+		Expect(err).NotTo(HaveOccurred())
+		_, err = tx.Exec(ctx, pool.Guard())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(showSetting(ctx, conn, "statement_timeout")).To(Equal("3s"))
+		Expect(showSetting(ctx, conn, "lock_timeout")).To(Equal("1s"))
+		Expect(showSetting(ctx, conn, "idle_in_transaction_session_timeout")).To(Equal("6s"))
+		Expect(showSetting(ctx, conn, "jit")).To(Equal("off"))
+		Expect(showSetting(ctx, conn, "max_parallel_workers_per_gather")).To(Equal("0"))
+		Expect(tx.Commit(ctx)).To(Succeed())
+
+		for _, name := range serverSettings {
+			Expect(showSetting(ctx, conn, name)).To(Equal(showSetting(ctx, plain, name)), name)
+		}
 	})
 
-	It("ends a statement past QueryTimeout with SQLSTATE 57014 and keeps the connection", func(ctx SpecContext) {
+	It("ends a guarded statement past QueryTimeout with SQLSTATE 57014 and keeps the connection", func(ctx SpecContext) {
 		cfg.QueryTimeout = time.Second
 		newPool(2, time.Minute)
 		conn, release, err := pool.Acquire(ctx, "app")
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
 
-		_, err = conn.Exec(ctx, "SELECT pg_sleep(5)")
+		tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+		Expect(err).NotTo(HaveOccurred())
+		_, err = tx.Exec(ctx, pool.Guard())
+		Expect(err).NotTo(HaveOccurred())
+		_, err = tx.Exec(ctx, "SELECT pg_sleep(5)")
 		var pgErr *pgconn.PgError
-		Expect(errors.As(err, &pgErr)).To(BeTrue())
+		Expect(errors.As(err, &pgErr)).To(BeTrue(), "error: %v", err)
 		Expect(pgErr.Code).To(Equal("57014"))
+		Expect(tx.Rollback(ctx)).To(Succeed())
 
 		var one int
 		Expect(conn.QueryRow(ctx, "SELECT 1").Scan(&one)).To(Succeed())

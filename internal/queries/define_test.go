@@ -343,6 +343,21 @@ q:
 		Entry("a column of that name", "SELECT 1 AS v FROM t WHERE x_pg_locks = 1", "[a, b]", false),
 	)
 
+	DescribeTable("ReadsSettings",
+		func(query, predicate string, want bool) {
+			def := queries.Define("q", queries.UserQuery{Query: query, PredicateQuery: predicate}, opts)
+			Expect(def.ReadsSettings).To(Equal(want))
+		},
+		Entry("pg_catalog.pg_settings", "SELECT name, setting FROM pg_catalog.pg_settings", "", true),
+		Entry("upper-case pg_settings", "select * from PG_SETTINGS", "", true),
+		Entry("pg_settings in the predicate", "SELECT 1", "SELECT count(*) > 0 FROM pg_settings", true),
+		Entry("pg_show_all_settings()", "SELECT * FROM pg_catalog.pg_show_all_settings()", "", true),
+		Entry("no relation", "SELECT 1", "", false),
+		Entry("a longer identifier", "SELECT my_pg_settings FROM t", "", false),
+		Entry("another schema", "SELECT * FROM other.pg_settings", "", false),
+		Entry("current_setting", "SELECT current_setting('jit')", "", false),
+	)
+
 	Describe("fingerprint", func() {
 		const base = `
 q:

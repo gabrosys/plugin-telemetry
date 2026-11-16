@@ -79,10 +79,24 @@ func selectsSeveralDatabases(targets []string) bool {
 // clusterWideRelations returns, sorted and unique, the cluster-wide relations the SQL names as whole
 // identifiers, optionally prefixed by pg_catalog.
 func clusterWideRelations(sql string) []string {
+	return catalogNames(sql, isClusterWide)
+}
+
+// readsSettings reports whether the SQL names pg_settings or pg_show_all_settings, optionally prefixed by
+// pg_catalog.
+func readsSettings(sql string) bool {
+	return len(catalogNames(sql, func(name string) bool {
+		return name == "pg_settings" || name == "pg_show_all_settings"
+	})) > 0
+}
+
+// catalogNames returns, sorted and unique, the lower-cased whole identifiers in the SQL that match,
+// unqualified or prefixed by pg_catalog.
+func catalogNames(sql string, match func(string) bool) []string {
 	found := map[string]struct{}{}
 	for _, loc := range identifier.FindAllStringIndex(sql, -1) {
 		name := strings.ToLower(sql[loc[0]:loc[1]])
-		if !isClusterWide(name) {
+		if !match(name) {
 			continue
 		}
 
@@ -100,11 +114,11 @@ func clusterWideRelations(sql string) []string {
 		found[name] = struct{}{}
 	}
 
-	relations := make([]string, 0, len(found))
+	names := make([]string, 0, len(found))
 	for name := range found {
-		relations = append(relations, name)
+		names = append(names, name)
 	}
-	sort.Strings(relations)
+	sort.Strings(names)
 
-	return relations
+	return names
 }

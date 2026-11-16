@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	// deadlineGrace lets the server's statement_timeout fire before the context deadline.
+	// deadlineGrace lets the guard's statement_timeout fire before the context deadline.
 	deadlineGrace = 2 * time.Second
 	// rollbackTimeout bounds the rollback of an unfinished transaction.
 	rollbackTimeout = 2 * time.Second
@@ -129,12 +129,14 @@ func (e *Executor) run(ctx context.Context, job planner.Job, res *Result) (pastD
 	defer func() { release(broken) }()
 
 	discard, err := e.inTransaction(rctx, conn, job, res)
-	res.ConnectionLost = conn.IsClosed() || (err != nil && connectionFailed(rctx, conn, err))
+	res.ConnectionLost = conn.IsClosed() || (err != nil && connectionFailed(conn, err))
 	broken = discard || res.ConnectionLost
 	return errors.Is(rctx.Err(), context.DeadlineExceeded), err
 }
 
-// inTransaction runs the predicate and the query in one read-only transaction and commits it.
+// inTransaction runs the predicate and the query in one read-only transaction and commits it. The
+// transaction runs under the pool's guard unless the query reads the settings; such a query is bounded
+// by the cancel request the connection sends at the run deadline.
 func (e *Executor) inTransaction(ctx context.Context, conn *pgx.Conn, job planner.Job, res *Result) (discard bool, err error) {
 	tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
@@ -153,6 +155,12 @@ func (e *Executor) inTransaction(ctx context.Context, conn *pgx.Conn, job planne
 			err = errors.Join(err, fmt.Errorf("roll back: %w", rbErr))
 		}
 	}()
+
+	if !job.Def.ReadsSettings {
+		if _, err := tx.Exec(ctx, e.pool.Guard()); err != nil {
+			return false, fmt.Errorf("set the transaction limits: %w", err)
+		}
+	}
 
 	if job.Def.Predicate != "" {
 		collect, err := predicate(ctx, tx, job.Def.Predicate)
@@ -333,9 +341,10 @@ func logCleanup(ctx context.Context, job planner.Job, msg string, err error) {
 }
 
 // connectionFailed reports whether the connection must be discarded: the pool does not ping idle
-// connections, and pgx closes the connection on a network error or a cancelled or expired context.
-func connectionFailed(ctx context.Context, conn *pgx.Conn, err error) bool {
-	if conn.IsClosed() || ctx.Err() != nil || pgconn.SafeToRetry(err) {
+// connections, and pgx closes the connection on a network error. At a context's end the server cancels
+// the statement and the connection stays usable, unless the cancel did not end it in time.
+func connectionFailed(conn *pgx.Conn, err error) bool {
+	if conn.IsClosed() || pgconn.SafeToRetry(err) {
 		return true
 	}
 	var netErr net.Error

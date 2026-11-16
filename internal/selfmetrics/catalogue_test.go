@@ -105,7 +105,7 @@ var _ = Describe("Catalogue", func() {
 		Expect(text).To(ContainSubstring("Configuration loads by source and outcome (ok, error, denied)."))
 		Expect(text).To(ContainSubstring("| `cnpg_otel_check` | gauge |  | `check` |"))
 		Expect(text).To(ContainSubstring("pg_monitor, read_only, track_io_timing, track_wal_io_timing, track_functions"))
-		Expect(text).To(ContainSubstring("session of the engine itself"))
+		Expect(text).To(ContainSubstring("read_only checks the engine's transactions"))
 	})
 
 	It("renders the committed markdown", func() {

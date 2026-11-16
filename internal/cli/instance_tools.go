@@ -165,7 +165,7 @@ func connect(ctx context.Context, c *config) (*pg.Pool, planner.Facts, error) {
 		pool.Close()
 		return nil, planner.Facts{}, fmt.Errorf("connect to PostgreSQL: %w", err)
 	}
-	facts, err := planner.GatherFacts(ctx, conn)
+	facts, err := planner.GatherFacts(ctx, conn, pool.Guard())
 	release(err != nil)
 	if err != nil {
 		pool.Close()

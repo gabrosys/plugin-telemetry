@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -12,6 +13,24 @@ import (
 
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
 )
+
+var _ = Describe("GuardSQL", func() {
+	It("sets the five limits for the current transaction only", func() {
+		sql := pg.GuardSQL(pg.Config{QueryTimeout: 3 * time.Second, LockTimeout: time.Second})
+
+		Expect(sql).To(HavePrefix("SELECT "))
+		for _, call := range []string{
+			"pg_catalog.set_config('statement_timeout', '3000', true)",
+			"pg_catalog.set_config('lock_timeout', '1000', true)",
+			"pg_catalog.set_config('idle_in_transaction_session_timeout', '6000', true)",
+			"pg_catalog.set_config('jit', 'off', true)",
+			"pg_catalog.set_config('max_parallel_workers_per_gather', '0', true)",
+		} {
+			Expect(sql).To(ContainSubstring(call))
+		}
+		Expect(strings.Count(sql, "set_config(")).To(Equal(5))
+	})
+})
 
 var _ = Describe("ConnConfig", func() {
 	var (
@@ -61,19 +80,29 @@ var _ = Describe("ConnConfig", func() {
 		Expect(cc.ConnectTimeout).To(Equal(pg.DefaultConnectTimeout))
 	})
 
-	It("puts the session settings in RuntimeParams", func() {
+	It("sends only the connection's own settings in the startup packet", func() {
 		cc, err := pg.ConnConfig(cfg, "app")
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(cc.RuntimeParams).To(HaveKeyWithValue("default_transaction_read_only", "on"))
-		Expect(cc.RuntimeParams).To(HaveKeyWithValue("search_path", "pg_catalog, public, pg_temp"))
-		Expect(cc.RuntimeParams).To(HaveKeyWithValue("statement_timeout", "30000"))
-		Expect(cc.RuntimeParams).To(HaveKeyWithValue("lock_timeout", "2000"))
-		Expect(cc.RuntimeParams).To(HaveKeyWithValue("idle_in_transaction_session_timeout", "60000"))
-		Expect(cc.RuntimeParams).To(HaveKeyWithValue("application_name", "cnpg_otel_engine"))
-		Expect(cc.RuntimeParams).To(HaveKeyWithValue("jit", "off"))
-		Expect(cc.RuntimeParams).To(HaveKeyWithValue("max_parallel_workers_per_gather", "0"))
-		Expect(cc.RuntimeParams).To(HaveKeyWithValue("standard_conforming_strings", "on"))
+		Expect(cc.RuntimeParams).To(Equal(map[string]string{
+			"application_name":            "cnpg_otel_engine",
+			"options":                     "",
+			"search_path":                 "pg_catalog, public, pg_temp",
+			"standard_conforming_strings": "on",
+		}))
+	})
+
+	It("cancels a statement on the server when its context ends", func() {
+		cc, err := pg.ConnConfig(cfg, "app")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cc.BuildContextWatcherHandler).NotTo(BeNil())
+
+		handler := cc.BuildContextWatcherHandler(&pgconn.PgConn{})
+		Expect(handler).To(BeAssignableToTypeOf(&pgconn.CancelRequestContextWatcherHandler{}))
+		cancel, ok := handler.(*pgconn.CancelRequestContextWatcherHandler)
+		Expect(ok).To(BeTrue())
+		Expect(cancel.CancelRequestDelay).To(BeZero())
+		Expect(cancel.DeadlineDelay).To(Equal(2 * time.Second))
 	})
 
 	It("reads the password file at every call, trimming one trailing newline", func() {

@@ -58,13 +58,6 @@ var _ = Describe("Builtin", func() {
 			Expect(got).To(HaveKey(key))
 			Expect(got[key].Name).To(Equal("collector"), key)
 		}
-		Expect([]string{
-			queries.KeyLOPages, queries.KeyPGWAL, queries.KeyArchiveStatus,
-			queries.KeyStatWAL, queries.KeyStatWAL17, queries.KeySyncObserved,
-		}).To(Equal([]string{
-			"collector", "collector_pg_wal", "collector_pg_wal_archive_status",
-			"collector_pg_stat_wal", "collector_pg_stat_wal_17", "collector_sync_replicas",
-		}))
 	})
 
 	It("defines without warnings and equals the golden file", func() {

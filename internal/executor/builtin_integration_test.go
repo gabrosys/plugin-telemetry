@@ -22,6 +22,9 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 )
 
+// cnpgSyncNames is CNPG's synchronousStandbyNamesRegex (pg_collector.go:47 at v1.30.1).
+var cnpgSyncNames = regexp.MustCompile(`(?:ANY|FIRST) ([0-9]+) \(.*\)`)
+
 const walSegment = 16777216
 
 // walFileName is CNPG main's regexPGWalFileName (metricserver/wal.go:147 at bc0889a).
@@ -103,7 +106,10 @@ var _ = Describe("SQL built-ins", func() {
 			DeferCleanup(func(ctx SpecContext) {
 				Expect(server.Exec(ctx, "ALTER SYSTEM RESET max_slot_wal_keep_size")).To(Succeed())
 				Expect(server.Exec(ctx, "SELECT pg_reload_conf()")).To(Succeed())
-			})
+				Eventually(func(g Gomega) {
+					g.Expect(math.IsNaN(byLabel(runBuiltin(ctx, exec, queries.KeyPGWAL), "cnpg_collector_pg_wal")["slots_max"])).To(BeTrue())
+				}).WithContext(ctx).WithPolling(200 * time.Millisecond).Should(Succeed())
+			}, NodeTimeout(time.Minute))
 			Expect(server.Exec(ctx, "SELECT pg_reload_conf()")).To(Succeed())
 
 			Eventually(func(g Gomega) {
@@ -117,18 +123,20 @@ var _ = Describe("SQL built-ins", func() {
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(func(ctx SpecContext) { Expect(conn.Close(ctx)).To(Succeed()) })
 
-			names, err := pgx.CollectRows(mustQuery(ctx, conn, "SELECT name FROM pg_catalog.pg_ls_waldir()"), pgx.RowTo[string])
-			Expect(err).NotTo(HaveOccurred())
-			want := 0
-			for _, name := range names {
-				if walFileName.MatchString(name) {
-					want++
+			Eventually(func(g Gomega) {
+				names, err := pgx.CollectRows(mustQuery(ctx, conn, "SELECT name FROM pg_catalog.pg_ls_waldir()"), pgx.RowTo[string])
+				g.Expect(err).NotTo(HaveOccurred())
+				want := 0
+				for _, name := range names {
+					if walFileName.MatchString(name) {
+						want++
+					}
 				}
-			}
-			Expect(want).To(BeNumerically(">=", 1))
+				g.Expect(want).To(BeNumerically(">=", 1))
 
-			got := byLabel(runBuiltin(ctx, exec, queries.KeyPGWAL), "cnpg_collector_pg_wal")
-			Expect(got["count"]).To(Equal(float64(want)))
+				got := byLabel(runBuiltin(ctx, exec, queries.KeyPGWAL), "cnpg_collector_pg_wal")
+				g.Expect(got["count"]).To(Equal(float64(want)))
+			}).WithContext(ctx).WithPolling(200 * time.Millisecond).Should(Succeed())
 		})
 
 		It("uses the anchored regex of CNPG main", func() {
@@ -161,14 +169,16 @@ var _ = Describe("SQL built-ins", func() {
 
 	Describe("collector_pg_wal_archive_status", func() {
 		It("counts the ready and done files of the archive status directory", func(ctx SpecContext) {
-			Expect(server.Exec(ctx, "ALTER SYSTEM SET archive_mode = 'on'")).To(Succeed())
-			Expect(server.Exec(ctx, "ALTER SYSTEM SET archive_command = '/bin/true'")).To(Succeed())
+			// The cleanups run in reverse: the server is started, then archive_mode is reset with a restart.
 			DeferCleanup(func(ctx SpecContext) {
 				Expect(server.Exec(ctx, "ALTER SYSTEM RESET archive_mode")).To(Succeed())
 				Expect(server.Exec(ctx, "ALTER SYSTEM RESET archive_command")).To(Succeed())
 				Expect(server.StopServer(ctx)).To(Succeed())
 				Expect(server.StartServer(ctx)).To(Succeed())
 			}, NodeTimeout(2*time.Minute))
+			Expect(server.Exec(ctx, "ALTER SYSTEM SET archive_mode = 'on'")).To(Succeed())
+			Expect(server.Exec(ctx, "ALTER SYSTEM SET archive_command = '/bin/true'")).To(Succeed())
+			DeferCleanup(func(ctx SpecContext) { Expect(server.StartServer(ctx)).To(Succeed()) }, NodeTimeout(2*time.Minute))
 			Expect(server.StopServer(ctx)).To(Succeed())
 			Expect(server.StartServer(ctx)).To(Succeed())
 
@@ -225,11 +235,16 @@ var _ = Describe("SQL built-ins", func() {
 				Expect(conn.QueryRow(ctx, "SELECT "+queries.SyncObservedSQL+" FROM (SELECT $1::text) AS t(s)", names).
 					Scan(&got)).To(Succeed())
 				Expect(got).To(Equal(want))
+				if want < 0 {
+					Expect(cnpgSyncNames.MatchString(names)).To(BeFalse())
+				}
 			},
 			Entry("ANY", `ANY 2 ("a", "b")`, 2.0),
 			Entry("FIRST", `FIRST 1 ("a")`, 1.0),
 			Entry("a plain list", "a, b", -1.0),
 			Entry("empty", "", 0.0),
+			// Go's . excludes \n, so CNPG's regex (pg_collector.go:47) does not match and CNPG reports -1.
+			Entry("a newline in a quoted name", "ANY 1 (\"a\nb\")", -1.0),
 		)
 	})
 
@@ -247,11 +262,11 @@ var _ = Describe("SQL built-ins", func() {
 			pool := newPool(l)
 			conn, release, err := pool.Acquire(ctx, "postgres")
 			Expect(err).NotTo(HaveOccurred())
-			defer release(false)
+			DeferCleanup(func() { release(false) })
 
 			tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 			Expect(err).NotTo(HaveOccurred())
-			defer func() { Expect(tx.Rollback(ctx)).To(Succeed()) }()
+			DeferCleanup(func(ctx SpecContext) { Expect(tx.Rollback(ctx)).To(Succeed()) })
 
 			job := builtinJob(queries.KeyStatWAL)
 			rows, err := tx.Query(ctx, job.Def.SQL, pg.ResultFormats)

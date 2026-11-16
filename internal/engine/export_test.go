@@ -280,8 +280,13 @@ func RunJobWhileRefused(ctx context.Context) (connections int, err error) {
 	if err != nil {
 		return 0, err
 	}
-	var accepted atomic.Int32
+	var (
+		accepted atomic.Int32
+		closeErr error // written by the accept goroutine, read after done is closed
+		done     = make(chan struct{})
+	)
 	go func() {
+		defer close(done)
 		for {
 			c, err := lis.Accept()
 			if err != nil {
@@ -289,11 +294,16 @@ func RunJobWhileRefused(ctx context.Context) (connections int, err error) {
 			}
 			accepted.Add(1)
 			if err := c.Close(); err != nil {
+				closeErr = fmt.Errorf("close accepted connection: %w", err)
 				return
 			}
 		}
 	}()
-	defer func() { err = errors.Join(err, lis.Close()) }()
+	defer func() {
+		err = errors.Join(err, lis.Close())
+		<-done
+		err = errors.Join(err, closeErr)
+	}()
 
 	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, nil)
 	if err != nil {

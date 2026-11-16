@@ -144,7 +144,8 @@ func exportersToClusters(r client.Reader) handler.MapFunc {
 		logger := log.FromContext(ctx)
 
 		var clusters apiv1.ClusterList
-		if err := r.List(ctx, &clusters, client.InNamespace(obj.GetNamespace())); err != nil {
+		// Items share the cache's maps and slices: read them, never write.
+		if err := r.List(ctx, &clusters, client.InNamespace(obj.GetNamespace()), client.UnsafeDisableDeepCopy); err != nil {
 			logger.Error(err, "list clusters for exporter", "namespace", obj.GetNamespace(), "exporter", obj.GetName())
 
 			return nil

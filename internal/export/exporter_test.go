@@ -22,8 +22,8 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/gabrosys/plugin-telemetry/internal/export"
-	"github.com/gabrosys/plugin-telemetry/internal/export/otlptest"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
+	"github.com/gabrosys/plugin-telemetry/test/otlptest"
 )
 
 func exporterSettings(protocol, endpoint string) settings.Exporter {

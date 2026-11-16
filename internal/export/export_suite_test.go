@@ -6,8 +6,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/gabrosys/plugin-telemetry/internal/export/otlptest"
 	"github.com/gabrosys/plugin-telemetry/internal/safe"
+	"github.com/gabrosys/plugin-telemetry/test/otlptest"
 )
 
 func TestExport(t *testing.T) {

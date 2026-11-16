@@ -33,10 +33,10 @@ import (
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/gabrosys/plugin-telemetry/internal/engine"
-	"github.com/gabrosys/plugin-telemetry/internal/export/otlptest"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
 	"github.com/gabrosys/plugin-telemetry/internal/sources"
+	"github.com/gabrosys/plugin-telemetry/test/otlptest"
 )
 
 // memConfig is an engine.Config held in memory. Its paths exist nowhere on disk.

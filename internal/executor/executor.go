@@ -110,6 +110,9 @@ func (e *Executor) Run(ctx context.Context, job planner.Job) (res Result) {
 	return res
 }
 
+// RunTimeout is the deadline of one run, which starts when the run has a pool slot.
+func RunTimeout(l settings.Limits) time.Duration { return l.QueryTimeout + deadlineGrace }
+
 // run waits for a pool slot under ctx, then runs the job under a deadline that starts at the slot.
 // pastDeadline reports that this deadline had passed when run returned.
 func (e *Executor) run(ctx context.Context, job planner.Job, res *Result) (pastDeadline bool, err error) {
@@ -119,7 +122,7 @@ func (e *Executor) run(ctx context.Context, job planner.Job, res *Result) (pastD
 		res.ConnectionLost = ctx.Err() == nil && !errors.Is(err, pg.ErrBackoff) && !errors.Is(err, pg.ErrPoolClosed)
 		return false, fmt.Errorf("acquire connection to %s: %w", job.Database, err)
 	}
-	rctx, cancel := context.WithTimeout(ctx, e.limits.QueryTimeout+deadlineGrace)
+	rctx, cancel := context.WithTimeout(ctx, RunTimeout(e.limits))
 	defer cancel()
 	// A panic leaves broken true and ConnectionLost false.
 	broken := true

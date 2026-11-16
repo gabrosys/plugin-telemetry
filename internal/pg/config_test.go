@@ -53,6 +53,14 @@ var _ = Describe("ConnConfig", func() {
 		Expect(cc.RuntimeParams).NotTo(HaveKey("timezone"))
 	})
 
+	It("uses DefaultConnectTimeout when ConnectTimeout is zero", func() {
+		cfg.ConnectTimeout = 0
+		cc, err := pg.ConnConfig(cfg, "app")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(pg.DefaultConnectTimeout).To(Equal(5 * time.Second))
+		Expect(cc.ConnectTimeout).To(Equal(pg.DefaultConnectTimeout))
+	})
+
 	It("puts the session settings in RuntimeParams", func() {
 		cc, err := pg.ConnConfig(cfg, "app")
 		Expect(err).NotTo(HaveOccurred())

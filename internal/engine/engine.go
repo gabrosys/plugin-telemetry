@@ -40,11 +40,7 @@ import (
 const (
 	// watchRetry is the wait before a Watch that returned early is started again.
 	watchRetry = 5 * time.Second
-	// connectTimeout bounds a PostgreSQL connection attempt.
-	connectTimeout = 5 * time.Second
-	// runGrace is the executor's margin over the query timeout.
-	runGrace = 2 * time.Second
-	// earlyFactsGap is the shortest time between a facts round and one a run that lost its connection asks for.
+	// earlyFactsGap is the shortest time between the end of a facts round and the start of the next.
 	earlyFactsGap = time.Second
 	// shutdownTimeout bounds each shutdown step that can block.
 	shutdownTimeout = 5 * time.Second
@@ -262,7 +258,7 @@ func (e *engine) run(ctx context.Context) {
 		case <-e.changed:
 			safe.Call(plain, "reload", func() { e.onChange(ctx) })
 		case <-timerC(e.factsTimer):
-			e.factsRound(ctx, true)
+			e.onFactsTimer(ctx)
 		case <-e.early:
 			safe.Call(plain, "early facts request", func() { e.onEarlyFacts(ctx) })
 		case <-timerC(e.earlyTimer):
@@ -490,7 +486,7 @@ func PostgresConfig(s settings.Settings) pg.Config {
 		PasswordFile:   s.Postgres.PasswordFile,
 		QueryTimeout:   s.Limits.QueryTimeout,
 		LockTimeout:    s.Limits.LockTimeout,
-		ConnectTimeout: connectTimeout,
+		ConnectTimeout: pg.DefaultConnectTimeout,
 	}
 }
 
@@ -610,19 +606,37 @@ func (e *engine) onEarlyFacts(ctx context.Context) {
 	if e.earlyTimer != nil {
 		return
 	}
-	wait := e.lastFacts.Add(earlyFactsGap).Sub(e.clk.Now())
-	if wait <= 0 {
-		e.factsRound(ctx, false)
+	if wait := e.factsGapLeft(); wait > 0 {
+		e.earlyTimer = e.clk.NewTimer(wait)
 		return
 	}
-	e.earlyTimer = e.clk.NewTimer(wait)
+	e.factsRound(ctx, false)
 }
 
-// factsRound runs one facts round. A round that panics counts as a failed one: upMetric is 0 and, when
-// the timer drove it, the timer is armed again with the backoff.
+// onFactsTimer runs the timed facts round, or arms the timer again for what is left of earlyFactsGap.
+func (e *engine) onFactsTimer(ctx context.Context) {
+	if wait := e.factsGapLeft(); wait > 0 {
+		e.setFactsTimer(wait)
+		return
+	}
+	e.factsRound(ctx, true)
+}
+
+// factsGapLeft is how long until earlyFactsGap has passed since the last facts round ended.
+func (e *engine) factsGapLeft() time.Duration {
+	return e.lastFacts.Add(earlyFactsGap).Sub(e.clk.Now())
+}
+
+// factsRound runs one facts round and sets lastFacts at its end. A round that panics counts as a failed
+// one: upMetric is 0 and, when the timer drove it, the timer is armed again with the backoff. A round
+// that fails while ctx is done leaves upMetric, the timers and the failure count as they were.
 func (e *engine) factsRound(ctx context.Context, timed bool) {
+	defer func() { e.lastFacts = e.clk.Now() }()
 	before := e.factsFailures
 	if !safe.Call(log.FromContext(ctx).GetLogger(), "facts round", func() { e.gatherRound(ctx, timed) }) {
+		return
+	}
+	if ctx.Err() != nil {
 		return
 	}
 	e.setUp(false)
@@ -644,18 +658,20 @@ func (e *engine) gatherRound(ctx context.Context, timed bool) {
 		return
 	}
 	s := cur.settings
-	e.lastFacts = e.clk.Now()
 
 	facts, err := e.gather(ctx, s)
 	e.runner.pool.CloseIdle()
 	logger := log.FromContext(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		if timed {
 			e.factsFailures++
 			e.setFactsTimer(factsWait(e.factsFailures, s.PlanInterval))
 		}
 		e.setUp(false)
-		if ctx.Err() == nil && !e.factsFailing {
+		if !e.factsFailing {
 			e.factsFailing = true
 			logger.Error(err, "gather facts", "database", s.Postgres.Database)
 		}
@@ -686,10 +702,15 @@ func (e *engine) setUp(ok bool) {
 	e.up.Store(up)
 }
 
+// FactsTimeout bounds a whole facts round: waiting for one run to free a connection, connecting, and the
+// facts queries.
+func FactsTimeout(l settings.Limits) time.Duration {
+	return pg.DefaultConnectTimeout + 2*executor.RunTimeout(l)
+}
+
 // gatherFacts reads the facts from PostgreSQL through the runner's pool. Call it on the control goroutine.
 func (e *engine) gatherFacts(ctx context.Context, s settings.Settings) (planner.Facts, error) {
-	// Long enough to wait for one run to free a connection, connect and run the facts queries.
-	ctx, cancel := context.WithTimeout(ctx, connectTimeout+2*(s.Limits.QueryTimeout+runGrace))
+	ctx, cancel := context.WithTimeout(ctx, FactsTimeout(s.Limits))
 	defer cancel()
 	// factsWait and earlyFactsGap already space the rounds, so they skip the pool's backoff.
 	conn, release, err := e.runner.pool.AcquireNow(ctx, s.Postgres.Database)

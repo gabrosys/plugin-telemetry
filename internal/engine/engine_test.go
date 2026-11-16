@@ -137,6 +137,39 @@ var _ = Describe("Facts rounds", func() {
 		}
 	})
 
+	It("keeps earlyFactsGap between the end of one round and the start of the next while each connect hangs for 5s", func() {
+		var mu sync.Mutex
+		var starts, ends []time.Time
+		var h *harness
+		h = run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) },
+			func(_ context.Context, round int) (planner.Facts, error) {
+				if round == 0 {
+					return memPrimary, nil
+				}
+				mu.Lock()
+				starts = append(starts, h.clk.Now())
+				mu.Unlock()
+				h.clk.Step(5 * time.Second)
+				mu.Lock()
+				ends = append(ends, h.clk.Now())
+				mu.Unlock()
+				return planner.Facts{}, fmt.Errorf("acquire a connection: %w", context.DeadlineExceeded)
+			})
+		begin := h.clk.Now()
+		h.advanceBy(time.Second, func() bool { return h.clk.Now().Sub(begin) >= 60*time.Second })
+
+		mu.Lock()
+		defer mu.Unlock()
+		Expect(len(ends)).To(BeNumerically(">=", 3))
+		for i := 1; i < len(ends) && i < len(starts); i++ {
+			Expect(starts[i].Sub(ends[i-1])).To(BeNumerically(">=", time.Second))
+		}
+	})
+
+	It("leaves cnpg_collector_up as it is when a round fails because the engine stops", func(ctx SpecContext) {
+		Expect(engine.FactsRoundOnStop(ctx)).To(BeEquivalentTo(1))
+	})
+
 	It("stop writing a job's self-metrics once it leaves the plan", func() {
 		var dropApp atomic.Bool
 		h := run(func(url string) *memConfig { return newMemConfig(fastSettings(url), httpFiles()) },
@@ -257,3 +290,11 @@ var _ = Describe("PostgresConfig", func() {
 		Expect(c.ConnectTimeout).To(Equal(5 * time.Second))
 	})
 })
+
+var _ = DescribeTable("FactsTimeout",
+	func(query time.Duration, want time.Duration) {
+		Expect(engine.FactsTimeout(settings.Limits{QueryTimeout: query})).To(Equal(want))
+	},
+	Entry("10 s query timeout", 10*time.Second, 29*time.Second),
+	Entry("100 ms query timeout", 100*time.Millisecond, 9200*time.Millisecond),
+)

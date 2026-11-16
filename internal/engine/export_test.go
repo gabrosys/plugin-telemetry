@@ -166,3 +166,33 @@ func queryRuns(ctx context.Context, e *engine, job planner.Job, outcome selfmetr
 	}
 	return 0, nil
 }
+
+// FactsRoundOnStop runs one timed facts round whose gather stops the engine's context and fails, with
+// cnpg_collector_up at 1 before it, and returns the value afterwards.
+func FactsRoundOnStop(ctx context.Context) (up int64) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	gather := func(context.Context, settings.Settings) (planner.Facts, error) {
+		cancel()
+		return planner.Facts{}, errors.New("acquire a connection: context canceled")
+	}
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, gather)
+	if err != nil {
+		return -2
+	}
+	s := settings.Settings{
+		Postgres:     settings.Postgres{Host: "127.0.0.1", Port: 1, User: "u", Database: "app", MaxConnections: 2},
+		Limits:       settings.Limits{QueryTimeout: time.Second, LockTimeout: time.Second},
+		PlanInterval: time.Minute,
+	}
+	e.swapPool(ctx, s, time.Minute)
+	defer func() {
+		if r := e.setRunner(nil); r != nil {
+			r.pool.Close()
+		}
+	}()
+	e.plan.current = &configuration{settings: s}
+	e.up.Store(1)
+	e.factsRound(ctx, true)
+	return e.up.Load()
+}

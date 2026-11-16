@@ -27,9 +27,8 @@ import (
 )
 
 const (
-	connectTimeout = 5 * time.Second
-	poolIdle       = 30 * time.Second
-	absent         = "-"
+	poolIdle = 30 * time.Second
+	absent   = "-"
 )
 
 // config is a loaded configuration: the settings, the merged sources and their definitions.
@@ -164,7 +163,7 @@ func connect(ctx context.Context, c *config) (*pg.Pool, planner.Facts, error) {
 	pc.ReadFile = c.read
 	pool := pg.NewPool(pc, s.Postgres.MaxConnections, poolIdle, clock.RealClock{},
 		pg.WithLogger(log.FromContext(ctx).GetLogger()))
-	ctx, cancel := context.WithTimeout(ctx, connectTimeout+2*s.Limits.QueryTimeout)
+	ctx, cancel := context.WithTimeout(ctx, engine.FactsTimeout(s.Limits))
 	defer cancel()
 	conn, release, err := pool.Acquire(ctx, s.Postgres.Database)
 	if err != nil {

@@ -12,10 +12,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const (
-	applicationName       = "cnpg_otel_engine"
-	defaultConnectTimeout = 5 * time.Second
-)
+const applicationName = "cnpg_otel_engine"
+
+// DefaultConnectTimeout bounds a connection attempt when Config.ConnectTimeout is zero.
+const DefaultConnectTimeout = 5 * time.Second
 
 // Config holds the settings shared by every connection, whatever the database.
 type Config struct {
@@ -111,7 +111,7 @@ func ConnConfig(c Config, database string) (*pgx.ConnConfig, error) {
 func dsn(c Config, database, password string) string {
 	timeout := c.ConnectTimeout
 	if timeout <= 0 {
-		timeout = defaultConnectTimeout
+		timeout = DefaultConnectTimeout
 	}
 	seconds := max(1, int64((timeout+time.Second-1)/time.Second))
 

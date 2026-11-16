@@ -19,10 +19,6 @@ import (
 )
 
 const (
-	// ManagedByLabel is the label the manager's cache selects on.
-	ManagedByLabel = metadata.ManagedByLabel
-	// ManagedBy is the value of ManagedByLabel.
-	ManagedBy = metadata.ManagedByValue
 	// ClusterLabel names the Cluster an object belongs to.
 	ClusterLabel = metadata.PluginName + "/cluster"
 	// FieldOwner is the server-side apply field manager.
@@ -52,7 +48,7 @@ func Desired(c *apiv1.Cluster, refs clusterconfig.Refs) (Objects, error) {
 		return metav1.ObjectMeta{
 			Name:      name,
 			Namespace: c.Namespace,
-			Labels:    map[string]string{ManagedByLabel: ManagedBy, ClusterLabel: c.Name},
+			Labels:    map[string]string{metadata.ManagedByLabel: metadata.ManagedByValue, ClusterLabel: c.Name},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion:         apiv1.SchemeGroupVersion.String(),
 				Kind:               apiv1.ClusterKind,

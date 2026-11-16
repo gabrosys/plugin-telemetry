@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/gabrosys/plugin-telemetry/internal/metadata"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -161,7 +163,7 @@ var _ = Describe("Ensurer", func() {
 		Expect(token.Annotations).To(Equal(map[string]string{corev1.ServiceAccountNameKey: "pg.telemetry"}))
 		Expect(token.Data).To(BeEmpty())
 		Expect(token.OwnerReferences).To(HaveLen(1))
-		Expect(token.Labels).To(HaveKeyWithValue(identity.ManagedByLabel, identity.ManagedBy))
+		Expect(token.Labels).To(HaveKeyWithValue(metadata.ManagedByLabel, metadata.ManagedByValue))
 	})
 
 	It("writes nothing when the cache holds every object as desired", func() {

@@ -289,13 +289,16 @@ spec:
                       has a default in the sidecar.
                     properties:
                       lockTimeout:
-                        description: LockTimeout is the time a query waits for a lock.
-                          More than zero.
+                        description: |-
+                          LockTimeout is the time a query waits for a lock. More than zero, at most 2147483647ms (PostgreSQL's
+                          lock_timeout maximum).
                         maxLength: 32
                         type: string
                         x-kubernetes-validations:
                         - message: lockTimeout must be more than 0s
                           rule: duration(self) > duration('0s')
+                        - message: lockTimeout must be at most 2147483647ms
+                          rule: duration(self) <= duration('2147483647ms')
                       maxConnections:
                         description: MaxConnections is the most database connections
                           the sidecar opens.
@@ -339,13 +342,16 @@ spec:
                         minimum: 1
                         type: integer
                       queryTimeout:
-                        description: QueryTimeout is the time one query may run. At
-                          least 100ms.
+                        description: |-
+                          QueryTimeout is the time one query may run. At least 100ms, at most 1073741823ms (twice it must fit
+                          PostgreSQL's idle_in_transaction_session_timeout).
                         maxLength: 32
                         type: string
                         x-kubernetes-validations:
                         - message: queryTimeout must be at least 100ms
                           rule: duration(self) >= duration('100ms')
+                        - message: queryTimeout must be at most 1073741823ms
+                          rule: duration(self) <= duration('1073741823ms')
                     type: object
                   maxPointsPerRequest:
                     description: MaxPointsPerRequest caps the data points in one export

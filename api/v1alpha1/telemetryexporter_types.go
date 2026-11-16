@@ -319,19 +319,23 @@ type Limits struct {
 	// +optional
 	MaxLabelsPerSeries *int32 `json:"maxLabelsPerSeries,omitempty"`
 
-	// QueryTimeout is the time one query may run. At least 100ms.
+	// QueryTimeout is the time one query may run. At least 100ms, at most 1073741823ms (twice it must fit
+	// PostgreSQL's idle_in_transaction_session_timeout).
 	//
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MaxLength=32
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('100ms')",message="queryTimeout must be at least 100ms"
+	// +kubebuilder:validation:XValidation:rule="duration(self) <= duration('1073741823ms')",message="queryTimeout must be at most 1073741823ms"
 	// +optional
 	QueryTimeout *metav1.Duration `json:"queryTimeout,omitempty"`
 
-	// LockTimeout is the time a query waits for a lock. More than zero.
+	// LockTimeout is the time a query waits for a lock. More than zero, at most 2147483647ms (PostgreSQL's
+	// lock_timeout maximum).
 	//
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MaxLength=32
 	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="lockTimeout must be more than 0s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) <= duration('2147483647ms')",message="lockTimeout must be at most 2147483647ms"
 	// +optional
 	LockTimeout *metav1.Duration `json:"lockTimeout,omitempty"`
 }

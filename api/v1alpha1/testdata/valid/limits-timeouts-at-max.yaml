@@ -1,0 +1,12 @@
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: TelemetryExporter
+metadata:
+  name: default
+  namespace: app
+spec:
+  exporter:
+    endpoint: https://collector:4318
+  metrics:
+    limits:
+      queryTimeout: 1073741823ms
+      lockTimeout: 2147483647ms

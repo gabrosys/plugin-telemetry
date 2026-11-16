@@ -47,6 +47,7 @@ var _ = Describe("GatherFacts", func() {
 		Expect(f.Version.String()).To(Equal("18.0.7"))
 		Expect(f.InRecovery).To(BeFalse())
 		Expect(f.Databases).To(Equal([]string{"app", "postgres"}))
+		Expect(f.WALSegmentSize).To(Equal(16777216.0))
 	})
 
 	gather := func(ctx SpecContext) planner.Facts {

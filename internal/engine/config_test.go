@@ -300,6 +300,18 @@ func (c factsClock) NewTimer(d time.Duration) clock.Timer {
 // run starts the engine on the Config cfg returns for the receiver's URL; facts answers its facts rounds.
 func run(cfg func(url string) *memConfig, facts factsFunc) *harness {
 	GinkgoHelper()
+	return runWith(cfg, facts, runOptions{})
+}
+
+// runOptions change what run gives the engine.
+type runOptions struct {
+	env    map[string]string              // what Getenv reads; unset variables are empty
+	config func(*memConfig) engine.Config // the Config the engine runs on; nil means the memConfig
+}
+
+// runWith is run with o.
+func runWith(cfg func(url string) *memConfig, facts factsFunc, o runOptions) *harness {
+	GinkgoHelper()
 	h := &harness{clk: clocktesting.NewFakeClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)), srv: otlptest.NewHTTP(nil)}
 	DeferCleanup(h.srv.Close)
 	h.cfg = cfg(h.srv.URL)
@@ -318,12 +330,16 @@ func run(cfg func(url string) *memConfig, facts factsFunc) *harness {
 
 	ctx, cancel := context.WithCancel(ctrllog.IntoContext(context.Background(), logger))
 	done := make(chan error, 1)
+	var config engine.Config = h.cfg
+	if o.config != nil {
+		config = o.config(h.cfg)
+	}
 	go func() {
 		done <- engine.RunWith(ctx, engine.Options{
-			Config: h.cfg,
+			Config: config,
 			Clock:  factsClock{FakeClock: h.clk, h: h},
 			Rand:   mathrand.New(mathrand.NewPCG(1, 2)), //nolint:gosec // seeded jitter for the test
-			Getenv: func(string) string { return "" },
+			Getenv: func(name string) string { return o.env[name] },
 		}, gather)
 	}()
 	DeferCleanup(func() {

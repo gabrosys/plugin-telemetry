@@ -2,12 +2,16 @@ package engine_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
+	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -334,3 +338,227 @@ var _ = DescribeTable("FactsTimeout",
 	Entry("10 s query timeout", 10*time.Second, 29*time.Second),
 	Entry("100 ms query timeout", 100*time.Millisecond, 9200*time.Millisecond),
 )
+
+// clusterConfig is a memConfig that watches the instance's Cluster, as kubesource.Source does.
+type clusterConfig struct {
+	*memConfig
+	cluster atomic.Pointer[apiv1.Cluster]
+}
+
+func (c *clusterConfig) Cluster() (*apiv1.Cluster, bool) {
+	cl := c.cluster.Load()
+	return cl, cl != nil
+}
+
+var _ engine.ClusterReader = (*clusterConfig)(nil)
+
+// builtinCluster is Cluster c: 2 instances, sync 1/1, c-1 the current primary, a 1Gi WAL volume, both
+// instances on one node.
+func builtinCluster() *apiv1.Cluster {
+	c := &apiv1.Cluster{}
+	c.Name = "c"
+	c.Spec.Instances = 2
+	c.Spec.MinSyncReplicas = 1
+	c.Spec.MaxSyncReplicas = 1
+	c.Spec.WalStorage = &apiv1.StorageConfiguration{Size: "1Gi"}
+	c.Status.CurrentPrimary = "c-1"
+	c.Status.InstancesStatus = map[apiv1.PodStatus][]string{apiv1.PodHealthy: {"c-1", "c-2"}}
+	c.Status.Topology = apiv1.Topology{SuccessfullyExtracted: true, NodesUsed: 1}
+	return c
+}
+
+// builtinFacts is a PostgreSQL 18.0.7 primary with 16 MiB WAL segments.
+var builtinFacts = planner.Facts{Version: *semver.MustParse("18.0.7"), Databases: memPrimary.Databases, WALSegmentSize: 16777216}
+
+// series is one exported series: a metric name and its exact attributes.
+type series struct {
+	name  string
+	attrs map[string]string
+}
+
+func (s series) String() string { return fmt.Sprintf("%s%v", s.name, s.attrs) }
+
+// valueIn returns the value of s in req.
+func valueIn(req otlptest.Request, s series) (float64, bool) {
+	for _, p := range requestPoints(req, s.name) {
+		if maps.Equal(p.attrs, s.attrs) {
+			return p.value, true
+		}
+	}
+	return 0, false
+}
+
+var (
+	timestamps = []series{
+		{"cnpg_collector_first_recoverability_point", map[string]string{}},
+		{"cnpg_collector_last_available_backup_timestamp", map[string]string{}},
+		{"cnpg_collector_last_failed_backup_timestamp", map[string]string{}},
+	}
+	fencingOn     = series{"cnpg_collector_fencing_on", map[string]string{}}
+	walVolumeSize = series{"cnpg_collector_pg_wal", map[string]string{"value": "volume_size"}}
+	walVolumeMax  = series{"cnpg_collector_pg_wal", map[string]string{"value": "volume_max"}}
+	pgVersion     = series{"cnpg_collector_postgres_version", map[string]string{"full": "18.7", "cluster": "c"}}
+)
+
+// builtinValue is the value of one built-in series.
+type builtinValue struct {
+	series
+	value float64
+}
+
+// builtinValues are the built-ins of builtinCluster and builtinFacts on c-1.
+func builtinValues() []builtinValue {
+	none := map[string]string{}
+	want := []builtinValue{
+		{series{"cnpg_collector_replica_mode", none}, 0},
+		{fencingOn, 0},
+		{series{"cnpg_collector_nodes_used", none}, 1},
+		{series{"cnpg_collector_sync_replicas", map[string]string{"value": "min"}}, 1},
+		{series{"cnpg_collector_sync_replicas", map[string]string{"value": "max"}}, 1},
+		{series{"cnpg_collector_sync_replicas", map[string]string{"value": "expected"}}, 1},
+		{series{"cnpg_collector_manual_switchover_required", none}, 0},
+		{walVolumeSize, 1073741824},
+		{walVolumeMax, 64},
+		{pgVersion, 18.7},
+	}
+	for _, t := range timestamps {
+		want = append(want, builtinValue{t, 0})
+	}
+	return want
+}
+
+var _ = Describe("The built-ins computed outside SQL", func() {
+	var (
+		h       *harness
+		cfg     *clusterConfig
+		failing atomic.Bool
+		standby atomic.Bool
+	)
+
+	BeforeEach(func() {
+		failing.Store(false)
+		standby.Store(false)
+		h = runWith(func(url string) *memConfig {
+			return newMemConfig(strings.Replace(httpSettings(url), "cluster: mem\n", "cluster: c\n", 1), httpFiles())
+		}, func(context.Context, int) (planner.Facts, error) {
+			if failing.Load() {
+				return planner.Facts{}, errors.New("acquire a connection: connection refused")
+			}
+			f := builtinFacts
+			f.InRecovery = standby.Load()
+			return f, nil
+		}, runOptions{
+			env: map[string]string{"POD_NAME": "c-1"},
+			config: func(m *memConfig) engine.Config {
+				cfg = &clusterConfig{memConfig: m}
+				cfg.cluster.Store(builtinCluster())
+				return cfg
+			},
+		})
+	})
+
+	// exportsAfter waits for n more requests than now and returns them.
+	exportsAfter := func(n int) []otlptest.Request {
+		GinkgoHelper()
+		since := len(h.requests())
+		h.advance(func() bool { return len(h.requests()) >= since+n })
+		return h.requests()[since:]
+	}
+
+	It("follow the Cluster at each export and the newest facts round", func() {
+		h.advance(func() bool {
+			reqs := h.requests()
+			if len(reqs) == 0 {
+				return false
+			}
+			_, ok := valueIn(reqs[len(reqs)-1], pgVersion)
+			return ok
+		})
+		for _, req := range exportsAfter(3) {
+			for _, b := range builtinValues() {
+				got, ok := valueIn(req, b.series)
+				Expect(ok).To(BeTrue(), "%v missing", b.series)
+				Expect(got).To(Equal(b.value), "%v", b.series)
+			}
+		}
+
+		By("fencing c-1, with the configuration generation unchanged")
+		fenced := builtinCluster()
+		fenced.Annotations = map[string]string{"cnpg.io/fencedInstances": `["c-1"]`}
+		cfg.cluster.Store(fenced)
+		req := exportsAfter(1)[0]
+		got, ok := valueIn(req, fencingOn)
+		Expect(ok).To(BeTrue())
+		Expect(got).To(Equal(1.0))
+		for _, p := range points(h.srv, "cnpg_otel_config_info", time.Time{}) {
+			Expect(p.attrs).To(HaveKeyWithValue("generation", "1"))
+		}
+
+		By("failing the facts rounds")
+		failing.Store(true)
+		h.advance(h.has("cnpg_collector_up", map[string]string{"cluster": "c"}, 0))
+		for _, req := range exportsAfter(2) {
+			for _, s := range append([]series{walVolumeSize, walVolumeMax, pgVersion}, timestamps...) {
+				_, ok := valueIn(req, s)
+				Expect(ok).To(BeFalse(), "%v exported while the facts fail", s)
+			}
+			got, ok := valueIn(req, fencingOn)
+			Expect(ok).To(BeTrue())
+			Expect(got).To(Equal(1.0))
+		}
+
+		By("gathering the facts of a server in recovery")
+		standby.Store(true)
+		failing.Store(false)
+		h.advance(h.has("cnpg_collector_up", map[string]string{"cluster": "c"}, 1))
+		for _, req := range exportsAfter(2) {
+			for _, s := range timestamps {
+				_, ok := valueIn(req, s)
+				Expect(ok).To(BeFalse(), "%v exported in recovery", s)
+			}
+			for _, s := range []series{walVolumeSize, walVolumeMax, pgVersion} {
+				_, ok := valueIn(req, s)
+				Expect(ok).To(BeTrue(), "%v missing in recovery", s)
+			}
+		}
+	})
+})
+
+var _ = Describe("The self-measuring metrics", func() {
+	It("count the facts rounds under collector=Collect.up", func() {
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) },
+			func(ctx context.Context, round int) (planner.Facts, error) {
+				switch round {
+				case 0:
+					return memPrimary, nil
+				case 1:
+					return unreachable(ctx, round)
+				default:
+					<-ctx.Done()
+					return planner.Facts{}, ctx.Err()
+				}
+			})
+		h.advance(func() bool { return len(h.roundTimes()) >= 3 })
+		up := map[string]string{"collector": "Collect.up"}
+		h.advance(h.has("cnpg_collector_collections_total", map[string]string{}, 2))
+		h.advance(h.has("cnpg_collector_collection_errors_total", up, 1))
+		h.advance(h.has("cnpg_collector_last_collection_error", map[string]string{}, 1))
+		_, ok := h.lastValue("cnpg_collector_collection_duration_seconds", up)
+		Expect(ok).To(BeTrue())
+	})
+
+	It("report nothing before the first facts round", func() {
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) },
+			func(ctx context.Context, _ int) (planner.Facts, error) {
+				<-ctx.Done()
+				return planner.Facts{}, ctx.Err()
+			})
+		h.advance(func() bool { return len(h.requests()) >= 2 })
+		for _, name := range []string{
+			"cnpg_collector_collections_total", "cnpg_collector_collection_errors_total",
+			"cnpg_collector_last_collection_error", "cnpg_collector_collection_duration_seconds",
+		} {
+			Expect(points(h.srv, name, time.Time{})).To(BeEmpty(), name)
+		}
+	})
+})

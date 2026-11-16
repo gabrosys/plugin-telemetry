@@ -211,6 +211,29 @@ var _ = Describe("Run", Ordered, func() {
 		}).WithTimeout(30 * time.Second).WithPolling(250 * time.Millisecond).Should(Succeed())
 	})
 
+	It("exports every built-in a file configuration has, which has no Cluster", func() {
+		Eventually(func(g Gomega) {
+			reqs := f.srv.Requests()
+			g.Expect(reqs).NotTo(BeEmpty())
+			req := reqs[len(reqs)-1]
+			g.Expect(attrValues(requestPoints(req, "cnpg_collector_pg_wal"), "value")).To(
+				ConsistOf("count", "size", "min", "max", "keep", "slots_max"))
+			g.Expect(attrValues(requestPoints(req, "cnpg_collector_pg_wal_archive_status"), "value")).To(ConsistOf("ready", "done"))
+			for _, name := range []string{
+				"cnpg_collector_wal_records", "cnpg_collector_wal_fpi", "cnpg_collector_wal_bytes", "cnpg_collector_wal_buffers_full",
+			} {
+				g.Expect(requestPoints(req, name)).To(HaveLen(1), name)
+			}
+			g.Expect(attrValues(requestPoints(req, "cnpg_collector_sync_replicas"), "value")).To(ConsistOf("observed"))
+			version := requestPoints(req, "cnpg_collector_postgres_version")
+			g.Expect(version).To(HaveLen(1))
+			g.Expect(version[0].attrs).To(Equal(map[string]string{"full": "18.7", "cluster": "it"}))
+			g.Expect(version[0].value).To(Equal(18.7))
+			g.Expect(requestPoints(req, "cnpg_collector_collections_total")).To(HaveLen(1))
+			g.Expect(requestPoints(req, "cnpg_collector_fencing_on")).To(BeEmpty())
+		}).WithTimeout(30 * time.Second).WithPolling(250 * time.Millisecond).Should(Succeed())
+	})
+
 	It("exports a query appended to a source file within debounce + interval + export interval", func() {
 		bound := engine.WatchDebounce + queryInterval + exportInterval + slack
 		start := time.Now()

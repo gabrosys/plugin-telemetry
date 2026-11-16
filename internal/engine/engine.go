@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	"github.com/cloudnative-pg/machinery/pkg/log"
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel/attribute"
@@ -24,6 +25,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	"k8s.io/utils/clock"
 
+	"github.com/gabrosys/plugin-telemetry/internal/builtin"
 	"github.com/gabrosys/plugin-telemetry/internal/executor"
 	"github.com/gabrosys/plugin-telemetry/internal/export"
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
@@ -61,6 +63,9 @@ var errWatchEnded = errors.New("the watch ended before the engine stopped")
 
 // errWatchPanicked stands for the error of a Watch that panicked.
 var errWatchPanicked = errors.New("the watch panicked")
+
+// errGatherPanicked stands for the error of a facts gathering that panicked.
+var errGatherPanicked = errors.New("gathering the facts panicked")
 
 // Options configure Run.
 type Options struct {
@@ -123,6 +128,7 @@ type engine struct {
 	rnd    *rand.Rand // control goroutine only
 	getenv func(string) string
 	gather func(context.Context, settings.Settings) (planner.Facts, error)
+	pod    string // POD_NAME, the instance the built-ins describe
 
 	stats  *selfmetrics.Stats
 	store  *snapshot.Store
@@ -135,6 +141,7 @@ type engine struct {
 	up      atomic.Int64                   // 1 or 0 after the last facts round, -1 before the first
 	cluster atomic.Pointer[string]         // the cluster label of upMetric; nil before a valid configuration
 	server  atomic.Pointer[semver.Version] // from the last successful facts round
+	facts   atomic.Pointer[builtin.Facts]  // from the newest facts round; nil after a failed one
 	files   atomic.Pointer[[]string]       // what the watch covers besides the settings
 	changed chan struct{}                  // the watch saw a change
 	early   chan struct{}                  // a run lost its connection
@@ -178,8 +185,9 @@ func newEngine(ctx context.Context, o Options, gather func(context.Context, sett
 	if e.gather == nil {
 		e.gather = e.gatherFacts
 	}
+	e.pod = e.getenv("POD_NAME")
 
-	e.reader = sdkmetric.NewManualReader(sdkmetric.WithProducer(export.NewProducer(e.store, e.clk, e.duplicates)))
+	e.reader = sdkmetric.NewManualReader(sdkmetric.WithProducer(export.NewProducer(e.store, e.clk, e.duplicates, e.builtins)))
 	e.mp = newMeterProvider(e.reader)
 	meter := e.mp.Meter(export.ScopeName, metric.WithInstrumentationVersion(version.Version))
 	if err := e.instrument(meter); err != nil {
@@ -478,6 +486,7 @@ func (e *engine) teardown() {
 	e.cluster.Store(nil)
 	e.up.Store(-1)
 	e.server.Store(nil)
+	e.facts.Store(nil)
 	e.factsFailures = 0
 	e.factsFailing = false
 	e.checksErr = ""
@@ -637,8 +646,9 @@ func (e *engine) factsGapLeft() time.Duration {
 }
 
 // factsRound runs one facts round and sets lastFacts at its end. A round that panics counts as a failed
-// one: upMetric is 0 and, when the timer drove it, the timer is armed again with the backoff. A round
-// that fails while ctx is done leaves upMetric, the timers and the failure count as they were.
+// one: upMetric is 0, the built-ins lose the facts and, when the timer drove it, the timer is armed again
+// with the backoff. A round that fails while ctx is done leaves upMetric, the facts, the collection
+// metrics, the timers and the failure count as they were.
 func (e *engine) factsRound(ctx context.Context, timed bool) {
 	defer func() { e.lastFacts = e.clk.Now() }()
 	before := e.factsFailures
@@ -651,13 +661,15 @@ func (e *engine) factsRound(ctx context.Context, timed bool) {
 		return
 	}
 	e.setUp(false)
+	e.facts.Store(nil)
 	if cur := e.plan.current; timed && cur != nil {
 		e.factsFailures++
 		e.setFactsTimer(factsWait(e.factsFailures, cur.settings.PlanInterval))
 	}
 }
 
-// gatherRound gathers the facts, sets upMetric, closes idle connections, replans when the facts changed
+// gatherRound gathers the facts (a panic in gather fails the round), records the collection, keeps the
+// facts for the built-ins, sets upMetric, closes idle connections, replans when the facts changed
 // and schedules the next round: a planning cycle after a success, sooner with backoff after a failure
 // of a round the timer drove (timed). A failed early round leaves the timer as it is.
 func (e *engine) gatherRound(ctx context.Context, timed bool) {
@@ -667,14 +679,22 @@ func (e *engine) gatherRound(ctx context.Context, timed bool) {
 		return
 	}
 	s := cur.settings
-
-	facts, err := e.gather(ctx, s)
-	e.runner.pool.CloseIdle()
 	logger := log.FromContext(ctx)
+
+	var facts planner.Facts
+	var err error
+	start := e.clk.Now()
+	if safe.Call(logger.GetLogger(), "gather facts", func() { facts, err = e.gather(ctx, s) }) {
+		err = errGatherPanicked
+	}
+	took := e.clk.Since(start)
+	e.runner.pool.CloseIdle()
 	if err != nil {
 		if ctx.Err() != nil {
 			return
 		}
+		e.stats.Collection(true, took)
+		e.facts.Store(nil)
 		if timed {
 			e.factsFailures++
 			e.setFactsTimer(factsWait(e.factsFailures, s.PlanInterval))
@@ -686,6 +706,8 @@ func (e *engine) gatherRound(ctx context.Context, timed bool) {
 		}
 		return
 	}
+	e.stats.Collection(false, took)
+	e.facts.Store(&builtin.Facts{Version: facts.Version, Primary: !facts.InRecovery, WALSegmentSize: facts.WALSegmentSize})
 	e.factsFailures = 0
 	e.setFactsTimer(s.PlanInterval)
 	if e.factsFailing {
@@ -712,6 +734,22 @@ func (e *engine) logChecks(logger log.Logger, err error) {
 		e.checksErr = ""
 		logger.Info("live checks readable again")
 	}
+}
+
+// builtins is the producer's extra: the built-ins of the Cluster a ClusterReader Config watches and of the
+// newest facts; none before a valid configuration.
+func (e *engine) builtins() []queries.Sample {
+	cluster := e.cluster.Load()
+	if cluster == nil {
+		return nil
+	}
+	var c *apiv1.Cluster
+	if r, ok := e.cfg.(ClusterReader); ok {
+		if got, ok := r.Cluster(); ok {
+			c = got
+		}
+	}
+	return builtin.Samples(c, e.pod, *cluster, e.facts.Load())
 }
 
 // setUp records the outcome of a facts round for upMetric.

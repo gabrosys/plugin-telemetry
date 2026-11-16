@@ -86,6 +86,28 @@
   unit: s
   description: Duration of an export operation after the last retry, in a single bucket. error.type is set only on failure, http.response.status_code only for HTTP.
   attributes: [error.type, http.response.status_code, otel.component.type, otel.component.name, server.address, server.port]
+- component: engine
+  name: cnpg_collector_collections_total
+  instrument: counter
+  unit: ""
+  description: Total number of times PostgreSQL was accessed for metrics.
+- component: engine
+  name: cnpg_collector_collection_errors_total
+  instrument: counter
+  unit: ""
+  description: Total errors occurred accessing PostgreSQL for metrics.
+  attributes: [collector]
+- component: engine
+  name: cnpg_collector_last_collection_error
+  instrument: gauge
+  unit: ""
+  description: 1 if the last collection ended with error, 0 otherwise.
+- component: engine
+  name: cnpg_collector_collection_duration_seconds
+  instrument: gauge
+  unit: ""
+  description: Collection time duration in seconds
+  attributes: [collector]
 - component: plugin
   name: cnpg_otel_plugin_hook_calls_total
   instrument: counter

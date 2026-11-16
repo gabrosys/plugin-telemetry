@@ -84,6 +84,7 @@ var _ = Describe("Stats", func() {
 		export.Outcome = selfmetrics.OutcomeError
 		export.ErrorType = "timeout"
 		stats.Export(export)
+		stats.Collection(true, time.Second)
 
 		got := collect()
 		optional := []string{"error.type", "http.response.status_code"}
@@ -122,6 +123,41 @@ var _ = Describe("Stats", func() {
 				}
 			}
 		}
+	})
+
+	It("reports no collection metric before the first Collection", func() {
+		got := collect()
+		for _, name := range []string{
+			"cnpg_collector_collections_total", "cnpg_collector_collection_errors_total",
+			"cnpg_collector_last_collection_error", "cnpg_collector_collection_duration_seconds",
+		} {
+			if m, ok := got[name]; ok {
+				Expect(points(m)).To(BeEmpty(), name)
+			}
+		}
+	})
+
+	It("counts the facts rounds under collector=Collect.up and keeps the last one's error and duration", func() {
+		up := `collector=Collect.up`
+		stats.Collection(false, 250*time.Millisecond)
+		got := collect()
+		Expect(points(got["cnpg_collector_collections_total"])).To(Equal(map[string]float64{"": 1}))
+		Expect(points(got["cnpg_collector_collection_errors_total"])).To(Equal(map[string]float64{up: 0}))
+		Expect(points(got["cnpg_collector_last_collection_error"])).To(Equal(map[string]float64{"": 0}))
+		Expect(points(got["cnpg_collector_collection_duration_seconds"])).To(Equal(map[string]float64{up: 0.25}))
+
+		stats.Collection(true, 2*time.Second)
+		stats.Collection(true, time.Second)
+		got = collect()
+		Expect(points(got["cnpg_collector_collections_total"])).To(Equal(map[string]float64{"": 3}))
+		Expect(points(got["cnpg_collector_collection_errors_total"])).To(Equal(map[string]float64{up: 2}))
+		Expect(points(got["cnpg_collector_last_collection_error"])).To(Equal(map[string]float64{"": 1}))
+		Expect(points(got["cnpg_collector_collection_duration_seconds"])).To(Equal(map[string]float64{up: 1}))
+
+		stats.Collection(false, 0)
+		got = collect()
+		Expect(points(got["cnpg_collector_last_collection_error"])).To(Equal(map[string]float64{"": 0}))
+		Expect(selfmetrics.CollectorUp).To(Equal("Collect.up"))
 	})
 
 	It("records query values", func() {

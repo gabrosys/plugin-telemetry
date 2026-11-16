@@ -531,6 +531,23 @@ func (s *Source) ReadFile(name string) ([]byte, error) {
 	return content(k, dataKey, obj)
 }
 
+// Cluster returns the watched Cluster, whether or not the plugin is enabled with valid parameters; false
+// before its watch syncs, while it does not exist, is denied or does not decode.
+func (s *Source) Cluster() (*apiv1.Cluster, bool) {
+	s.mu.Lock()
+	obj, err := s.objectLocked(key{kind: kindCluster, name: s.o.Cluster})
+	s.mu.Unlock()
+	if err != nil || obj == nil {
+		return nil, false
+	}
+	// Watch reports replace the object; none changes it in place.
+	cluster := &apiv1.Cluster{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, cluster); err != nil {
+		return nil, false
+	}
+	return cluster, true
+}
+
 // Sensitive reports whether the virtual file holds Secret data.
 func (*Source) Sensitive(name string) bool { return strings.HasPrefix(name, "secret/") }
 

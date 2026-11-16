@@ -44,6 +44,10 @@ var _ = Describe("Catalogue", func() {
 					"otel.component.name", "server.address", "server.port",
 				},
 			},
+			{"cnpg_collector_collections_total", "counter", "", nil},
+			{"cnpg_collector_collection_errors_total", "counter", "", []string{"collector"}},
+			{"cnpg_collector_last_collection_error", "gauge", "", nil},
+			{"cnpg_collector_collection_duration_seconds", "gauge", "", []string{"collector"}},
 		}
 
 		got := make([]row, 0, len(want))
@@ -89,6 +93,18 @@ var _ = Describe("Catalogue", func() {
 		Expect(text).To(ContainSubstring("| `cnpg_otel_plugin_hook_calls_total` | counter | `{call}` | `service`, `operation`, `outcome` |"))
 		Expect(strings.Index(text, "## Plugin")).To(BeNumerically("<", strings.Index(text, "cnpg_otel_plugin_hook_calls_total")))
 		Expect(strings.Index(text, "## Engine")).To(BeNumerically("<", strings.Index(text, "cnpg_otel_query_runs_total")))
+	})
+
+	It("gives the self-measuring rows CloudNativePG's descriptions", func() {
+		help := map[string]string{}
+		for _, m := range selfmetrics.ByComponent(selfmetrics.ComponentEngine) {
+			help[m.Name] = m.Description
+		}
+		// pg_collector.go:112-141 at v1.30.1.
+		Expect(help).To(HaveKeyWithValue("cnpg_collector_collections_total", "Total number of times PostgreSQL was accessed for metrics."))
+		Expect(help).To(HaveKeyWithValue("cnpg_collector_collection_errors_total", "Total errors occurred accessing PostgreSQL for metrics."))
+		Expect(help).To(HaveKeyWithValue("cnpg_collector_last_collection_error", "1 if the last collection ended with error, 0 otherwise."))
+		Expect(help).To(HaveKeyWithValue("cnpg_collector_collection_duration_seconds", "Collection time duration in seconds"))
 	})
 
 	It("leaves the unit cell empty for a metric without a unit", func() {

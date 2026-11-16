@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
+	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
+
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
 	"github.com/gabrosys/plugin-telemetry/internal/sources"
 )
@@ -70,6 +72,9 @@ func (c fileConfig) Watch(ctx context.Context, files func() []string, notify fun
 	}
 	return nil
 }
+
+// ClusterReader is a Config that watches the instance's Cluster.
+type ClusterReader interface{ Cluster() (*apiv1.Cluster, bool) }
 
 // sensitiveConfig is implemented by a Config whose files may hold secret data.
 type sensitiveConfig interface {

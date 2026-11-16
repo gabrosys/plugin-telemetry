@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"time"
@@ -25,6 +26,8 @@ type Facts struct {
 	// Checks are pg_monitor, read_only, track_io_timing, track_wal_io_timing and track_functions: the
 	// keys are the values of the check attribute and true means the check holds.
 	Checks map[string]bool
+	// WALSegmentSize is wal_segment_size from pg_settings, in bytes; always positive.
+	WALSegmentSize float64
 	// ChecksErr joins the errors of the checks that could not be read; they are missing from Checks.
 	ChecksErr error
 }
@@ -37,6 +40,21 @@ func ParseVersionNum(s string) (semver.Version, error) {
 		return semver.Version{}, fmt.Errorf("parse server_version_num %q: %w", s, err)
 	}
 	return *semver.New(n/10000, (n/100)%100, n%100, "", ""), nil
+}
+
+// walSegmentSizeQuery reads the setting as CloudNativePG does (metricserver/wal.go:86-88 at v1.30.1).
+const walSegmentSizeQuery = "SELECT setting FROM pg_catalog.pg_settings WHERE name = 'wal_segment_size'"
+
+// errWALSegmentSize is what a wal_segment_size that is not a positive number of bytes wraps.
+var errWALSegmentSize = errors.New("wal_segment_size is not a positive number of bytes")
+
+// parseWALSegmentSize parses the pg_settings value of wal_segment_size, which PostgreSQL gives in bytes.
+func parseWALSegmentSize(setting string) (float64, error) {
+	v, err := strconv.ParseFloat(setting, 64)
+	if err != nil || v <= 0 || math.IsInf(v, 0) || math.IsNaN(v) {
+		return 0, fmt.Errorf("%w: %q", errWALSegmentSize, setting)
+	}
+	return v, nil
 }
 
 // rollbackTimeout bounds the rollback of an unfinished facts transaction.
@@ -106,7 +124,7 @@ func rollbackSavepoint(ctx context.Context, check string, sp pgx.Tx) error {
 	return nil
 }
 
-// GatherFacts reads the server version, the recovery state, the live checks and the connectable
+// GatherFacts reads the server version, the recovery state, wal_segment_size, the live checks and the connectable
 // databases in one read-only transaction on conn, which must be connected to the default database.
 // guard (pg.Pool.Guard) runs first and sets the transaction's limits.
 func GatherFacts(ctx context.Context, conn *pgx.Conn, guard string) (Facts, error) {
@@ -143,6 +161,15 @@ func gatherFacts(ctx context.Context, conn *pgx.Conn, guard string, settings map
 		return Facts{}, fmt.Errorf("check recovery state: %w", err)
 	}
 
+	var segment string
+	if err := tx.QueryRow(ctx, walSegmentSizeQuery).Scan(&segment); err != nil {
+		return Facts{}, fmt.Errorf("read wal_segment_size: %w", err)
+	}
+	walSegmentSize, err := parseWALSegmentSize(segment)
+	if err != nil {
+		return Facts{}, err
+	}
+
 	checks, checksErr := readChecks(ctx, tx, settings)
 
 	rows, err := tx.Query(ctx, databasesQuery)
@@ -175,5 +202,8 @@ func gatherFacts(ctx context.Context, conn *pgx.Conn, guard string, settings map
 
 	sort.Strings(databases)
 	sort.Strings(skipped)
-	return Facts{Version: version, InRecovery: inRecovery, Databases: databases, SkippedDatabases: skipped, Checks: checks, ChecksErr: checksErr}, nil
+	return Facts{
+		Version: version, InRecovery: inRecovery, WALSegmentSize: walSegmentSize,
+		Databases: databases, SkippedDatabases: skipped, Checks: checks, ChecksErr: checksErr,
+	}, nil
 }

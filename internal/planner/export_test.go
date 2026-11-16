@@ -10,3 +10,6 @@ import (
 func GatherFactsWith(ctx context.Context, conn *pgx.Conn, guard string, settings map[string]string) (Facts, error) {
 	return gatherFacts(ctx, conn, guard, settings)
 }
+
+// ParseWALSegmentSize is parseWALSegmentSize.
+var ParseWALSegmentSize = parseWALSegmentSize

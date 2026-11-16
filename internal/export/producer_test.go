@@ -45,7 +45,7 @@ var _ = Describe("Producer", func() {
 		obs = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 		now = obs.Add(time.Minute)
 		seen = nil
-		prod = export.NewProducer(store, clocktesting.NewFakePassiveClock(now), func(d map[snapshot.Key]int) { seen = d })
+		prod = export.NewProducer(store, clocktesting.NewFakePassiveClock(now), func(d map[snapshot.Key]int) { seen = d }, nil)
 	})
 
 	It("exports COUNTER as a monotonic cumulative Sum, GAUGE, MAPPEDMETRIC and DURATION as a Gauge, HISTOGRAM as a cumulative Histogram", func() {
@@ -178,7 +178,7 @@ var _ = Describe("Producer", func() {
 	})
 
 	It("accepts a nil onDuplicates", func() {
-		p := export.NewProducer(store, clocktesting.NewFakePassiveClock(now), nil)
+		p := export.NewProducer(store, clocktesting.NewFakePassiveClock(now), nil, nil)
 		put("a", queries.Sample{Metric: "m", Kind: queries.KindGauge, Value: 1})
 		put("b", queries.Sample{Metric: "m", Kind: queries.KindGauge, Value: 1})
 
@@ -203,5 +203,101 @@ var _ = Describe("Producer", func() {
 		dp := gd.DataPoints[0]
 
 		Expect(dp.Attributes).To(Equal(attribute.NewSet(attribute.String("a", "1"), attribute.String("b", "2"))))
+	})
+
+	Describe("with extra samples", func() {
+		pgWAL := func(value string, v float64) queries.Sample {
+			return queries.Sample{
+				Metric: "cnpg_collector_pg_wal", Description: queries.PGWALHelp, Kind: queries.KindGauge, Value: v,
+				Labels: []queries.Label{{Key: "value", Value: value}},
+			}
+		}
+		withExtra := func(extra func() []queries.Sample) *export.Producer {
+			return export.NewProducer(store, clocktesting.NewFakePassiveClock(now), func(d map[snapshot.Key]int) { seen = d }, extra)
+		}
+
+		It("joins them to the snapshot's points of the same name", func() {
+			var samples []queries.Sample
+			for i, v := range []string{"count", "size", "min", "max", "keep", "slots_max"} {
+				samples = append(samples, pgWAL(v, float64(i)))
+			}
+			put("collector_pg_wal", samples...)
+			prod = withExtra(func() []queries.Sample {
+				return []queries.Sample{pgWAL("volume_size", 1073741824), pgWAL("volume_max", 64)}
+			})
+
+			ms := produce()
+
+			Expect(ms).To(HaveLen(1))
+			Expect(ms[0].Name).To(Equal("cnpg_collector_pg_wal"))
+			Expect(ms[0].Description).To(Equal(queries.PGWALHelp))
+			g, ok := ms[0].Data.(metricdata.Gauge[float64])
+			Expect(ok).To(BeTrue())
+			Expect(g.DataPoints).To(HaveLen(8))
+			values := map[string]float64{}
+			for _, dp := range g.DataPoints {
+				Expect(dp.Time).To(Equal(now))
+				v, _ := dp.Attributes.Value("value")
+				values[v.AsString()] = dp.Value
+			}
+			Expect(values).To(HaveKeyWithValue("volume_size", 1073741824.0))
+			Expect(values).To(HaveKeyWithValue("volume_max", 64.0))
+			Expect(values).To(HaveKeyWithValue("count", 0.0))
+			Expect(seen).To(BeNil())
+		})
+
+		It("exports them without a snapshot", func() {
+			prod = withExtra(func() []queries.Sample { return []queries.Sample{pgWAL("volume_size", 1)} })
+
+			ms := produce()
+
+			Expect(ms).To(HaveLen(1))
+			Expect(ms[0].Name).To(Equal("cnpg_collector_pg_wal"))
+		})
+
+		It("calls extra once per Produce", func() {
+			calls := 0
+			prod = withExtra(func() []queries.Sample { calls++; return nil })
+
+			produce()
+			produce()
+
+			Expect(calls).To(Equal(2))
+		})
+
+		It("drops only extra's samples when it panics", func() {
+			put("q", queries.Sample{Metric: "g", Kind: queries.KindGauge, Value: 1})
+			prod = withExtra(func() []queries.Sample { panic("extra broke") })
+
+			ms := produce()
+
+			Expect(ms).To(HaveLen(1))
+			Expect(ms[0].Name).To(Equal("g"))
+		})
+
+		It("keeps an extra sample over a snapshot series with its name and labels, or its name and another kind, and reports the snapshot's", func() {
+			put("mine", queries.Sample{
+				Metric: "cnpg_collector_pg_wal", Kind: queries.KindGauge, Value: 9,
+				Labels: []queries.Label{{Key: "value", Value: "volume_size"}},
+			})
+			put("other", queries.Sample{Metric: "cnpg_collector_fencing_on", Kind: queries.KindCounter, Value: 9})
+			prod = withExtra(func() []queries.Sample {
+				return []queries.Sample{
+					pgWAL("volume_size", 1),
+					{Metric: "cnpg_collector_fencing_on", Kind: queries.KindGauge, Value: 0},
+				}
+			})
+
+			ms := produce()
+
+			Expect(ms).To(HaveLen(2))
+			for _, m := range ms {
+				g, ok := m.Data.(metricdata.Gauge[float64])
+				Expect(ok).To(BeTrue(), m.Name)
+				Expect(g.DataPoints).To(HaveLen(1), m.Name)
+				Expect(g.DataPoints[0].Value).NotTo(Equal(9.0), m.Name)
+			}
+			Expect(seen).To(Equal(map[snapshot.Key]int{{Query: "mine", Database: "app"}: 1, {Query: "other", Database: "app"}: 1}))
+		})
 	})
 })

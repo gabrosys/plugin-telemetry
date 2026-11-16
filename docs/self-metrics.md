@@ -21,6 +21,10 @@ Metrics the engine reports about itself.
 | `cnpg_otel_last_export_success_timestamp_seconds` | gauge | `s` |  | Unix time of the last successful export. |
 | `otel.sdk.exporter.metric_data_point.exported` | counter | `{data_point}` | `error.type`, `otel.component.type`, `otel.component.name`, `server.address`, `server.port` | Data points an export operation sent; rejected points count as failed with error.type=rejected. error.type is set only on failure. |
 | `otel.sdk.exporter.operation.duration` | histogram | `s` | `error.type`, `http.response.status_code`, `otel.component.type`, `otel.component.name`, `server.address`, `server.port` | Duration of an export operation after the last retry, in a single bucket. error.type is set only on failure, http.response.status_code only for HTTP. |
+| `cnpg_collector_collections_total` | counter |  |  | Total number of times PostgreSQL was accessed for metrics. |
+| `cnpg_collector_collection_errors_total` | counter |  | `collector` | Total errors occurred accessing PostgreSQL for metrics. |
+| `cnpg_collector_last_collection_error` | gauge |  |  | 1 if the last collection ended with error, 0 otherwise. |
+| `cnpg_collector_collection_duration_seconds` | gauge |  | `collector` | Collection time duration in seconds |
 
 ## Plugin
 

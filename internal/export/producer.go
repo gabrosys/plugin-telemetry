@@ -7,12 +7,14 @@ import (
 	"slices"
 	"time"
 
+	"github.com/cloudnative-pg/machinery/pkg/log"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/instrumentation"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"k8s.io/utils/clock"
 
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
+	"github.com/gabrosys/plugin-telemetry/internal/safe"
 	"github.com/gabrosys/plugin-telemetry/internal/snapshot"
 	"github.com/gabrosys/plugin-telemetry/internal/version"
 )
@@ -26,12 +28,19 @@ type Producer struct {
 	store        *snapshot.Store
 	clk          clock.PassiveClock
 	onDuplicates func(map[snapshot.Key]int)
+	extra        func() []queries.Sample
 }
 
 // NewProducer returns a Producer reading store. onDuplicates may be nil; it receives the
 // dropped series per Key once per Produce when there are any.
-func NewProducer(store *snapshot.Store, clk clock.PassiveClock, onDuplicates func(map[snapshot.Key]int)) *Producer {
-	return &Producer{store: store, clk: clk, onDuplicates: onDuplicates}
+// extra, when not nil, is called once per Produce; its samples join the snapshot's points of the same name.
+// A panic in extra drops only its samples (safe.Call): a Producer error drops the whole collection.
+// An extra sample wins over a snapshot series of its name and labels, or of its name and another kind;
+// the snapshot's series counts as a duplicate.
+func NewProducer(
+	store *snapshot.Store, clk clock.PassiveClock, onDuplicates func(map[snapshot.Key]int), extra func() []queries.Sample,
+) *Producer {
+	return &Producer{store: store, clk: clk, onDuplicates: onDuplicates, extra: extra}
 }
 
 // metricBuilder collects the data points of one metric name.
@@ -43,16 +52,37 @@ type metricBuilder struct {
 }
 
 // Produce converts the snapshot into one ScopeMetrics.
-func (p *Producer) Produce(_ context.Context) ([]metricdata.ScopeMetrics, error) {
+func (p *Producer) Produce(ctx context.Context) ([]metricdata.ScopeMetrics, error) {
+	var extra []queries.Sample
+	if p.extra != nil {
+		safe.Call(log.FromContext(ctx).GetLogger(), "extra samples", func() { extra = p.extra() })
+	}
 	points, duplicates := p.store.Points()
 	if duplicates == nil {
 		duplicates = make(map[snapshot.Key]int)
 	}
 	now := p.clk.Now()
 
+	all := make([]snapshot.Point, 0, len(extra)+len(points))
+	extraIDs := make(map[string]struct{}, len(extra))
+	for _, s := range extra {
+		extraIDs[queries.SeriesID(s.Metric, s.Labels)] = struct{}{}
+		all = append(all, snapshot.Point{
+			Metric: s.Metric, Description: s.Description, Kind: s.Kind, Labels: s.Labels, Value: s.Value, Histogram: s.Histogram,
+		})
+	}
+	for _, pt := range points {
+		if _, dup := extraIDs[queries.SeriesID(pt.Metric, pt.Labels)]; dup {
+			duplicates[pt.Key]++
+
+			continue
+		}
+		all = append(all, pt)
+	}
+
 	var order []*metricBuilder
 	byName := make(map[string]*metricBuilder)
-	for _, pt := range points {
+	for _, pt := range all {
 		b, ok := byName[pt.Metric]
 		switch {
 		case !ok:

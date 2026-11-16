@@ -179,6 +179,60 @@ var _ = Describe("Source", func() {
 		Expect(err).NotTo(MatchError(engine.ErrNoConfiguration))
 	})
 
+	Describe("Cluster", func() {
+		It("returns the watched Cluster, and false before its watch syncs or once it is deleted", func() {
+			_, ok := src.Cluster()
+			Expect(ok).To(BeFalse())
+			start()
+			_, ok = src.Cluster()
+			Expect(ok).To(BeFalse())
+
+			fw.set("clusters", "pg", cluster(clusterOpts{
+				plugins:     []any{pluginEntry(map[string]any{}, nil)},
+				status:      map[string]any{"currentPrimary": "pg-1"},
+				annotations: map[string]string{"cnpg.io/fencedInstances": `["pg-1"]`},
+			}))
+			c, ok := src.Cluster()
+			Expect(ok).To(BeTrue())
+			Expect(c.Name).To(Equal("pg"))
+			Expect(c.Status.CurrentPrimary).To(Equal("pg-1"))
+			Expect(c.Annotations).To(HaveKeyWithValue("cnpg.io/fencedInstances", `["pg-1"]`))
+
+			fw.set("clusters", "pg", nil)
+			_, ok = src.Cluster()
+			Expect(ok).To(BeFalse())
+		})
+
+		DescribeTable("returns the Cluster whatever the plugin's entry, which only the configuration depends on",
+			func(plugins []any) {
+				start()
+				fw.set("clusters", "pg", cluster(clusterOpts{plugins: plugins}))
+				_, _, err := src.Settings()
+				Expect(err).To(MatchError(engine.ErrNoConfiguration))
+				c, ok := src.Cluster()
+				Expect(ok).To(BeTrue())
+				Expect(c.Name).To(Equal("pg"))
+			},
+			Entry("absent", []any{map[string]any{"name": "other"}}),
+			Entry("disabled", []any{pluginEntry(map[string]any{}, map[string]any{"enabled": false})}),
+			Entry("invalid parameters", []any{pluginEntry(map[string]any{"auth": "kerberos"}, nil)}),
+		)
+
+		It("returns false while the Cluster is denied or does not decode", func() {
+			start()
+			fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+			fw.fail("clusters", "pg", errors.Join(errors.New("forbidden"), sources.ErrDenied))
+			_, ok := src.Cluster()
+			Expect(ok).To(BeFalse())
+
+			bad := enabledCluster(map[string]any{})
+			Expect(unstructured.SetNestedField(bad.Object, "three", "spec", "instances")).To(Succeed())
+			fw.set("clusters", "pg", bad)
+			_, ok = src.Cluster()
+			Expect(ok).To(BeFalse())
+		})
+	})
+
 	It("keeps the last good references watched while an input is not ready", func() {
 		start()
 		fw.set("clusters", "pg", enabledCluster(map[string]any{}))

@@ -3,7 +3,9 @@ package framework_test
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 
+	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/preflight"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/framework"
 )
@@ -62,4 +64,14 @@ var _ = Describe("DecodeReportFromLogs", func() {
 		Entry("empty logs", ""),
 		Entry("two reports", report+"\n"+line+"\n"+report+"\n"),
 	)
+})
+
+var _ = Describe("SidecarRestarts", func() {
+	It("reads the sidecar's count from the init container statuses and is 0 without one", func() {
+		pod := &corev1.Pod{Status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{
+			{Name: "other", RestartCount: 9}, {Name: metadata.SidecarContainerName, RestartCount: 2},
+		}}}
+		Expect(framework.SidecarRestarts(pod)).To(Equal(int32(2)))
+		Expect(framework.SidecarRestarts(&corev1.Pod{})).To(Equal(int32(0)))
+	})
 })

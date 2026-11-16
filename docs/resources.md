@@ -20,7 +20,7 @@ Measured on kind (Kubernetes 1.37, PostgreSQL 18.7) with the commands below; eac
 
 A measurement writes its JSON before it asserts, so a missed target is on record with its numbers.
 
-The Go runtime's garbage collector makes the sidecar's working set move in a sawtooth of 1 to 2 MB around its level; the min, median and max cover it.
+The Go runtime's garbage collector makes the sidecar's working set move between readings; the min, median and max cover it.
 
 ## Sidecar with CNPG's default queries
 
@@ -30,8 +30,8 @@ Setup: one `TelemetryExporter` with `spec.metrics.interval: 30s` and nothing els
 
 | Quantity | Min | Median | Max | Target | Met |
 |---|---|---|---|---|---|
-| Working set | 16355328 B (15.6 MiB) | 18006016 B (17.2 MiB) | 19169280 B (18.3 MiB) | <= 41943040 B | yes |
-| `rssBytes` | 15917056 B | 17367040 B | 18444288 B | | |
-| Mean CPU | | 838092 nanocores (0.8m) | | <= 10000000 | yes |
+| Working set | 17510400 B (16.7 MiB) | 18190336 B (17.3 MiB) | 19202048 B (18.3 MiB) | <= 41943040 B | yes |
+| `rssBytes` | 16859136 B | 17539072 B | 18182144 B | | |
+| Mean CPU | | 626924 nanocores (0.6m) | | <= 10000000 | yes |
 
-The sidecar exported 417 series, skipped no query run (`cnpg_otel_query_runs_total{outcome="skipped"}` delta 0) and did not restart.
+The sidecar exported 417 series, skipped no query run (`cnpg_otel_query_runs_total{outcome="skipped"}` delta 0) and did not restart. Min to max span 1.7 MB.

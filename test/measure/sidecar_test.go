@@ -4,7 +4,6 @@ package measure_test
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -32,46 +31,18 @@ const (
 
 // sidecarMeasurement is sidecar-<cnpg>.json.
 type sidecarMeasurement struct {
-	CNPGVersion      string   `json:"cnpgVersion"`
-	WorkingSetBytes  stat     `json:"workingSetBytes"`
-	RSSBytes         stat     `json:"rssBytes"`
-	MeanCPUNanoCores uint64   `json:"meanCPUNanoCores"`
-	Series           float64  `json:"series"`
-	SkippedRuns      float64  `json:"skippedRuns"`
-	Samples          int      `json:"samples"`
-	WorkingSetSeries []uint64 `json:"workingSetSeries"`
-	RSSSeries        []uint64 `json:"rssSeries"`
-	CPUSeries        []uint64 `json:"cpuNanoCoresSeries"`
-	RestartsBefore   int32    `json:"restartsBefore"`
-	RestartsAfter    int32    `json:"restartsAfter"`
-}
-
-func sidecarRestarts(pod *corev1.Pod) int32 {
-	for _, st := range pod.Status.InitContainerStatuses {
-		if st.Name == metadata.SidecarContainerName {
-			return st.RestartCount
-		}
-	}
-
-	return 0
-}
-
-// skippedDelta sums, over the skipped-outcome series of cnpg_otel_query_runs_total, the last value minus the first.
-func skippedDelta(lines []otlp.Line) float64 {
-	first, last := map[string]float64{}, map[string]float64{}
-	for _, p := range otlp.Matching(otlp.Points(lines, "cnpg_otel_query_runs_total"), map[string]string{"outcome": "skipped"}) {
-		key := fmt.Sprint(p.Attrs)
-		if _, ok := first[key]; !ok {
-			first[key] = p.Value
-		}
-		last[key] = p.Value
-	}
-	var d float64
-	for key, v := range last {
-		d += v - first[key]
-	}
-
-	return d
+	CNPGVersion      string         `json:"cnpgVersion"`
+	WorkingSetBytes  framework.Stat `json:"workingSetBytes"`
+	RSSBytes         framework.Stat `json:"rssBytes"`
+	MeanCPUNanoCores uint64         `json:"meanCPUNanoCores"`
+	Series           float64        `json:"series"`
+	SkippedRuns      float64        `json:"skippedRuns"`
+	Samples          int            `json:"samples"`
+	WorkingSetSeries []uint64       `json:"workingSetSeries"`
+	RSSSeries        []uint64       `json:"rssSeries"`
+	CPUSeries        []uint64       `json:"cpuNanoCoresSeries"`
+	RestartsBefore   int32          `json:"restartsBefore"`
+	RestartsAfter    int32          `json:"restartsAfter"`
 }
 
 var _ = Describe("the sidecar with CNPG's default queries", Ordered, func() {
@@ -93,7 +64,7 @@ var _ = Describe("the sidecar with CNPG's default queries", Ordered, func() {
 			Expect(client.IgnoreNotFound(c.Delete(ctx, ns))).To(Succeed())
 		})
 
-		Expect(c.Create(ctx, framework.ExporterFor(ns.Name, podpatch.DefaultExporter))).To(Succeed())
+		Expect(c.Create(ctx, measuredExporter(ns.Name, podpatch.DefaultExporter))).To(Succeed())
 		key := client.ObjectKey{Namespace: ns.Name, Name: "sidecar"}
 		cluster := framework.PeerCluster(ns.Name, key.Name, env.PostgresImage)
 		Expect(c.Create(ctx, cluster)).To(Succeed())
@@ -119,7 +90,7 @@ var _ = Describe("the sidecar with CNPG's default queries", Ordered, func() {
 
 		var pod corev1.Pod
 		Expect(c.Get(ctx, podKey, &pod)).To(Succeed())
-		before := sidecarRestarts(&pod)
+		before := framework.SidecarRestarts(&pod)
 
 		start := time.Now()
 		readings, err := framework.SampleUsage(ctx, cfg, []types.NamespacedName{podKey}, metadata.SidecarContainerName, usageEvery, usageWindow)
@@ -133,8 +104,8 @@ var _ = Describe("the sidecar with CNPG's default queries", Ordered, func() {
 		Expect(ok).To(BeTrue(), "cnpg_otel_series")
 
 		m := sidecarMeasurement{
-			CNPGVersion: env.CNPGVersion, Series: series.Value, SkippedRuns: skippedDelta(lines), Samples: len(readings),
-			RestartsBefore: before, RestartsAfter: sidecarRestarts(&pod),
+			CNPGVersion: env.CNPGVersion, Series: series.Value, SkippedRuns: counterDelta(lines, "cnpg_otel_query_runs_total", "skipped"), Samples: len(readings),
+			RestartsBefore: before, RestartsAfter: framework.SidecarRestarts(&pod),
 		}
 		var cpuSum uint64
 		for _, u := range readings {
@@ -143,7 +114,7 @@ var _ = Describe("the sidecar with CNPG's default queries", Ordered, func() {
 			m.CPUSeries = append(m.CPUSeries, u.CPUNanoCores)
 			cpuSum += u.CPUNanoCores
 		}
-		m.WorkingSetBytes, m.RSSBytes = statOf(m.WorkingSetSeries), statOf(m.RSSSeries)
+		m.WorkingSetBytes, m.RSSBytes = framework.StatOf(m.WorkingSetSeries), framework.StatOf(m.RSSSeries)
 		m.MeanCPUNanoCores = cpuSum / uint64(len(readings))
 
 		data, err := json.MarshalIndent(m, "", "  ")

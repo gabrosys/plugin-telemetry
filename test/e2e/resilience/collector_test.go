@@ -82,7 +82,7 @@ func collectorSpecs(s *suite) {
 		restartsBefore := make([]int32, len(instances))
 		for i := range instances {
 			pods[i] = types.NamespacedName{Namespace: instances[i].Namespace, Name: instances[i].Name}
-			restartsBefore[i] = sidecarRestarts(&instances[i])
+			restartsBefore[i] = framework.SidecarRestarts(&instances[i])
 		}
 
 		reader := framework.NewCollectorReader(s.cfg)
@@ -152,8 +152,8 @@ func collectorSpecs(s *suite) {
 		for i, pod := range pods {
 			var p corev1.Pod
 			Expect(s.c.Get(ctx, pod, &p)).To(Succeed())
-			AddReportEntry("sidecar restarts "+pod.Name, fmt.Sprintf("before %d, after %d", restartsBefore[i], sidecarRestarts(&p)))
-			soft.Expect(sidecarRestarts(&p)).To(Equal(restartsBefore[i]), "restarts of the sidecar of %s", pod.Name)
+			AddReportEntry("sidecar restarts "+pod.Name, fmt.Sprintf("before %d, after %d", restartsBefore[i], framework.SidecarRestarts(&p)))
+			soft.Expect(framework.SidecarRestarts(&p)).To(Equal(restartsBefore[i]), "restarts of the sidecar of %s", pod.Name)
 		}
 		Expect(breaches).To(BeEmpty())
 	}, SpecTimeout(20*time.Minute))

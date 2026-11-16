@@ -28,17 +28,6 @@ const (
 
 var pgbenchSummary = regexp.MustCompile(`(?m)^(tps = .*|number of (?:transactions actually processed|failed transactions).*)$`)
 
-// sidecarRestarts returns the sidecar's restart count, which CNPG's native sidecar reports in initContainerStatuses.
-func sidecarRestarts(pod *corev1.Pod) int32 {
-	for _, st := range pod.Status.InitContainerStatuses {
-		if st.Name == metadata.SidecarContainerName {
-			return st.RestartCount
-		}
-	}
-
-	return 0
-}
-
 // killSidecar kills the primary's sidecar and polls until it restarted and the primary is back in -rw.
 // It returns the longest time the primary was missing from -rw.
 func (s *suite) killSidecar(ctx context.Context, primary string) time.Duration {
@@ -47,7 +36,7 @@ func (s *suite) killSidecar(ctx context.Context, primary string) time.Duration {
 	key := client.ObjectKey{Namespace: s.ns, Name: primary}
 	var pod corev1.Pod
 	Expect(s.c.Get(ctx, key, &pod)).To(Succeed())
-	before := sidecarRestarts(&pod)
+	before := framework.SidecarRestarts(&pod)
 	Expect(framework.KillContainer(ctx, &pod, metadata.SidecarContainerName)).To(Succeed())
 
 	var (
@@ -72,7 +61,7 @@ func (s *suite) killSidecar(ctx context.Context, primary string) time.Duration {
 				outFrom = time.Time{}
 			}
 
-			return sawOut && sidecarRestarts(&p) == before+1, nil
+			return sawOut && framework.SidecarRestarts(&p) == before+1, nil
 		}
 		if outFrom.IsZero() {
 			outFrom, sawOut = now, true

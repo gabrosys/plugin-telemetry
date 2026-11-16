@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -127,4 +128,18 @@ func sampleUsage(
 	}
 
 	return readings, nil
+}
+
+// Stat is the min, median and max of a series of readings.
+type Stat struct {
+	Min    uint64 `json:"min"`
+	Median uint64 `json:"median"`
+	Max    uint64 `json:"max"`
+}
+
+// StatOf returns the Stat of xs, which must not be empty.
+func StatOf(xs []uint64) Stat {
+	s := slices.Sorted(slices.Values(xs))
+
+	return Stat{Min: s[0], Median: s[len(s)/2], Max: s[len(s)-1]}
 }

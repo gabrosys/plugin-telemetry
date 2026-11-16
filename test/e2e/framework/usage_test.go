@@ -119,3 +119,9 @@ var _ = Describe("SampleUsage", func() {
 		Expect(res.got).To(HaveLen(2))
 	})
 })
+
+var _ = Describe("StatOf", func() {
+	It("returns the min, median and max of unsorted readings", func() {
+		Expect(framework.StatOf([]uint64{5, 1, 9, 3, 7})).To(Equal(framework.Stat{Min: 1, Median: 5, Max: 9}))
+	})
+})

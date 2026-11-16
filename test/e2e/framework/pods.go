@@ -156,3 +156,14 @@ func ContainerLogs(
 
 	return string(logs), nil
 }
+
+// SidecarRestarts returns the sidecar's restart count, which CNPG's native sidecar reports in initContainerStatuses.
+func SidecarRestarts(pod *corev1.Pod) int32 {
+	for _, st := range pod.Status.InitContainerStatuses {
+		if st.Name == metadata.SidecarContainerName {
+			return st.RestartCount
+		}
+	}
+
+	return 0
+}

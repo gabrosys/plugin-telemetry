@@ -17,7 +17,9 @@ const (
 	initialBackoff    = time.Second
 	defaultMaxBackoff = 30 * time.Second
 	closeTimeout      = 2 * time.Second
-	// maxConnAge is how long a connection lives, measured from its dial.
+	// maxConnAge is how long a connection lives, measured from its dial. A release and each CloseIdle (every
+	// plan interval) close an older one, so the pool holds a smart shutdown for about one plan interval plus
+	// the queries in flight.
 	maxConnAge = 10 * time.Second
 )
 
@@ -251,7 +253,8 @@ func (p *Pool) releaser(ctx context.Context, conn *pgx.Conn, database string, di
 }
 
 // release hands conn back to the idle list, or closes it when it is broken, mid-transaction or older than
-// maxConnAge: a native sidecar must not hold PostgreSQL's smart shutdown open with pooled sessions.
+// maxConnAge, so that a native sidecar's pooled sessions don't hold PostgreSQL's smart shutdown open; an
+// idle connection that nothing acquires is closed by CloseIdle.
 func (p *Pool) release(ctx context.Context, conn *pgx.Conn, database string, dialed time.Time, broken bool) {
 	p.mu.Lock()
 	// A connection left inside a transaction, open or failed, would carry it into the next run.
@@ -281,15 +284,15 @@ func (p *Pool) IdleTimeout() time.Duration {
 	return p.idleTimeout
 }
 
-// CloseIdle closes the idle connections that have been unused for the idle timeout. ctx is accepted
-// for contextcheck; each close uses WithoutCancel(ctx) and the 2 s closeTimeout.
+// CloseIdle closes the idle connections that have been unused for the idle timeout or are older than
+// maxConnAge. ctx is accepted for contextcheck; each close uses WithoutCancel(ctx) and the 2 s closeTimeout.
 func (p *Pool) CloseIdle(ctx context.Context) {
 	p.mu.Lock()
 	now := p.clk.Now()
 	var stale []*idleConn
 	kept := p.idle[:0]
 	for _, ic := range p.idle {
-		if now.Sub(ic.since) >= p.idleTimeout {
+		if now.Sub(ic.since) >= p.idleTimeout || now.Sub(ic.dialed) >= maxConnAge {
 			stale = append(stale, ic)
 			continue
 		}

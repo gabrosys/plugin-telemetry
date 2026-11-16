@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -16,20 +17,23 @@ import (
 
 	"github.com/gabrosys/plugin-telemetry/internal/podpatch"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/framework"
+	"github.com/gabrosys/plugin-telemetry/test/e2e/otlp"
 )
 
 const (
 	shutdownCluster = "smart-shutdown"
-	// maxSmartShutdown is far below CNPG's 180 s smartShutdownTimeout, which pooled sessions used to run out.
-	maxSmartShutdown = 30 * time.Second
+	// maxSmartShutdown is far below CNPG's 180 s smartShutdownTimeout, which pooled sessions used to run out, and
+	// above one plan interval plus the queries in flight, the pool's hold.
+	maxSmartShutdown = time.Minute
+	exportWait       = 3 * time.Minute
 	shutdownPoll     = time.Second
 )
 
 var _ = Describe("smart shutdown", func() {
-	It("lets PostgreSQL finish a smart shutdown within 30 seconds of a Pod delete", func(ctx SpecContext) {
+	It("lets PostgreSQL finish a smart shutdown within 60 seconds of a Pod delete", func(ctx SpecContext) {
 		env, err := framework.LoadEnv(os.Getenv)
 		Expect(err).NotTo(HaveOccurred())
-		c, _, err := framework.NewClients(env.KubeContext)
+		c, cfg, err := framework.NewClients(env.KubeContext)
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(framework.PluginAvailable).WithContext(ctx).WithArguments(c).
 			WithTimeout(3 * time.Minute).WithPolling(statePoll).Should(BeTrue())
@@ -45,16 +49,27 @@ var _ = Describe("smart shutdown", func() {
 		Expect(c.Create(ctx, cluster)).To(Succeed())
 		// Runs before the namespace's cleanup: a namespace deleted around a live Cluster stays Terminating.
 		key := client.ObjectKeyFromObject(cluster)
-		DeferCleanup(func(ctx SpecContext) { Expect(client.IgnoreNotFound(c.Delete(ctx, cluster))).To(Succeed()) }, NodeTimeout(3*time.Minute))
+		DeferCleanup(func(ctx SpecContext) {
+			Expect(client.IgnoreNotFound(c.Delete(ctx, cluster))).To(Succeed())
+			Eventually(func(ctx SpecContext) bool {
+				return apierrors.IsNotFound(c.Get(ctx, key, &apiv1.Cluster{}))
+			}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(statePoll).Should(BeTrue())
+		}, NodeTimeout(3*time.Minute))
 
 		Eventually(func(ctx context.Context) (bool, error) { return framework.ClusterReady(ctx, c, key) }).
 			WithContext(ctx).WithTimeout(clusterTimeout).WithPolling(statePoll).Should(BeTrue(), "cluster ready")
 		Eventually(framework.PluginRolledOut).WithContext(ctx).WithArguments(c).
 			WithTimeout(3*time.Minute).WithPolling(statePoll).Should(BeTrue(), "plugin rolled out")
-		// The sidecar's sessions are what held the smart shutdown, so let it run a few rounds first.
-		Expect(framework.WaitUntil(ctx, time.Now().Add(30*time.Second))).To(Succeed())
+		// The sidecar's sessions are what held the smart shutdown, so it must be exporting this Cluster first.
+		reader := framework.NewCollectorReader(cfg)
+		podName := shutdownCluster + "-1"
+		Eventually(func(ctx context.Context) (bool, error) {
+			lines, err := reader.Since(ctx, time.Time{})
 
-		podKey := client.ObjectKey{Namespace: namespace.Name, Name: shutdownCluster + "-1"}
+			return len(otlp.ForResource(lines, "k8s.pod.name", podName)) > 0, err
+		}).WithContext(ctx).WithTimeout(exportWait).WithPolling(statePoll).Should(BeTrue(), "the sidecar exports")
+
+		podKey := client.ObjectKey{Namespace: namespace.Name, Name: podName}
 		var pod corev1.Pod
 		Expect(c.Get(ctx, podKey, &pod)).To(Succeed())
 		deleted := time.Now()

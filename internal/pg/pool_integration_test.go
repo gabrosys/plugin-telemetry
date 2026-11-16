@@ -297,12 +297,12 @@ var _ = Describe("Pool", func() {
 		Expect(err).NotTo(HaveOccurred())
 		release(false)
 
-		clk.SetTime(start.Add(40 * time.Second))
+		clk.SetTime(start.Add(55 * time.Second))
 		recent, release, err := pool.AcquireWithin(ctx, "postgres", 0)
 		Expect(err).NotTo(HaveOccurred())
 		release(false)
 
-		clk.SetTime(start.Add(70 * time.Second))
+		clk.SetTime(start.Add(61 * time.Second))
 		pool.CloseIdle(ctx)
 
 		Expect(old.IsClosed()).To(BeTrue())
@@ -625,6 +625,23 @@ var _ = Describe("Pool", func() {
 		Expect(err).NotTo(HaveOccurred(), "the closed connection freed its slot")
 		release(false)
 		Expect(next).NotTo(BeIdenticalTo(conn))
+	})
+
+	It("CloseIdle closes an idle connection past the maximum age even when its idle time is short", func(ctx SpecContext) {
+		newPool(3, time.Hour)
+		old, release, err := pool.AcquireWithin(ctx, "app", 0)
+		Expect(err).NotTo(HaveOccurred())
+		clk.SetTime(start.Add(9 * time.Second))
+		release(false)
+		young, release, err := pool.AcquireWithin(ctx, "postgres", 0)
+		Expect(err).NotTo(HaveOccurred())
+		clk.SetTime(start.Add(10 * time.Second))
+		release(false)
+
+		pool.CloseIdle(ctx)
+
+		Expect(old.IsClosed()).To(BeTrue())
+		Expect(young.IsClosed()).To(BeFalse())
 	})
 
 	It("fails AcquireWithin after Close", func(ctx SpecContext) {

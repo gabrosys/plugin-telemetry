@@ -194,7 +194,8 @@ var _ = Describe("Watch", func() {
 	})
 
 	It("retries a missing directory every 5 s, logging it and its recovery once", func() {
-		missing := filepath.Join(dir, "later")
+		// The missing directory sits outside the watched ones, so creating it raises no event that re-arms the debounce timer.
+		missing := filepath.Join(GinkgoT().TempDir(), "later")
 		start(file, filepath.Join(missing, "q.yaml"))
 		Expect(logged("watch the configuration files")).To(Equal(1))
 
@@ -210,7 +211,10 @@ var _ = Describe("Watch", func() {
 		expect(2)
 		Expect(logged("watching the configuration files again")).To(Equal(1))
 
-		write(filepath.Join(missing, "q.yaml"), "b:\n  query: SELECT 1\n")
+		// A rename raises one event; a create followed by a write would raise two, and the second could land after the step.
+		tmp := filepath.Join(filepath.Dir(missing), "q.yaml.tmp")
+		write(tmp, "b:\n  query: SELECT 1\n")
+		Expect(os.Rename(tmp, filepath.Join(missing, "q.yaml"))).To(Succeed())
 		fire()
 		expect(3)
 		Expect(logged("watch the configuration files")).To(Equal(1))

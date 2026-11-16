@@ -9,6 +9,7 @@ import (
 	"maps"
 	"math/rand/v2"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -150,9 +151,9 @@ type engine struct {
 	factsTimer    clock.Timer
 	earlyTimer    clock.Timer
 	lastFacts     time.Time
-	factsFailures int      // consecutive failed facts rounds the timer drove
-	factsErrs     errorLog // the facts errors logged, keyed by the default database
-	idleReason    string   // the ErrNoConfiguration reason last logged
+	factsFailures int    // consecutive failed facts rounds the timer drove
+	factsFailing  bool   // a failed facts round was logged and no round has succeeded since
+	idleReason    string // the ErrNoConfiguration reason last logged
 }
 
 func newEngine(ctx context.Context, o Options, gather func(context.Context, settings.Settings) (planner.Facts, error)) (*engine, error) {
@@ -271,7 +272,7 @@ func (e *engine) run(ctx context.Context) {
 }
 
 // watch runs the Config's watch until ctx ends, starting it again watchRetry after it returns early.
-// A failing Watch is logged once per error text, and once when a Watch notifies again.
+// A failing Watch is logged once per kind of failure, and once when a Watch notifies again.
 func (e *engine) watch(ctx context.Context) {
 	logger := log.FromContext(ctx)
 	files := func() []string {
@@ -311,29 +312,39 @@ func (e *engine) watch(ctx context.Context) {
 	}
 }
 
-// watchLog remembers the Watch error last logged.
+// watchLog remembers which kinds of Watch failure were logged since a Watch last ran.
 type watchLog struct {
 	mu      sync.Mutex // guards failing
-	failing string     // empty while a Watch runs
+	failing [3]bool    // by watchKind
 }
 
-// failed records err and reports whether it differs from the error last logged.
+// watchKind tells a panic and a Watch that ended on its own from any other error.
+func watchKind(err error) int {
+	switch {
+	case errors.Is(err, errWatchPanicked):
+		return 0
+	case errors.Is(err, errWatchEnded):
+		return 1
+	}
+	return 2
+}
+
+// failed records err and reports whether its kind was not logged yet.
 func (w *watchLog) failed(err error) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if err.Error() == w.failing {
-		return false
-	}
-	w.failing = err.Error()
-	return true
+	k := watchKind(err)
+	was := w.failing[k]
+	w.failing[k] = true
+	return !was
 }
 
-// recovered forgets the error last logged and reports whether there was one.
+// recovered forgets every kind and reports whether one was logged.
 func (w *watchLog) recovered() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	was := w.failing != ""
-	w.failing = ""
+	was := slices.Contains(w.failing[:], true)
+	w.failing = [3]bool{}
 	return was
 }
 
@@ -464,7 +475,7 @@ func (e *engine) teardown() {
 	e.up.Store(-1)
 	e.server.Store(nil)
 	e.factsFailures = 0
-	e.factsErrs.retain(func(snapshot.Key) bool { return false })
+	e.factsFailing = false
 	if r := e.setRunner(nil); r != nil {
 		r.pool.Close()
 	}
@@ -548,7 +559,7 @@ func (e *engine) record(ctx context.Context, res executor.Result) {
 			default:
 				outcome = selfmetrics.OutcomeError
 				e.store.Fail(key)
-				e.errs.Failed(logger, job.Query, job.Database, fmt.Errorf("store the result: %w", err))
+				e.errs.Failed(logger, job.Query, job.Database, outcome, fmt.Errorf("store the result: %w", err))
 			}
 		case selfmetrics.OutcomeCapped:
 			e.store.Fail(key)
@@ -558,7 +569,7 @@ func (e *engine) record(ctx context.Context, res executor.Result) {
 		case selfmetrics.OutcomeError, selfmetrics.OutcomeTimeout, selfmetrics.OutcomeDenied:
 			e.store.Fail(key)
 			if res.Err != nil {
-				e.errs.Failed(logger, job.Query, job.Database, res.Err)
+				e.errs.Failed(logger, job.Query, job.Database, outcome, res.Err)
 			}
 		}
 		if res.ConnectionLost {
@@ -638,21 +649,22 @@ func (e *engine) gatherRound(ctx context.Context, timed bool) {
 	facts, err := e.gather(ctx, s)
 	e.runner.pool.CloseIdle()
 	logger := log.FromContext(ctx)
-	key := snapshot.Key{Database: s.Postgres.Database}
 	if err != nil {
 		if timed {
 			e.factsFailures++
 			e.setFactsTimer(factsWait(e.factsFailures, s.PlanInterval))
 		}
 		e.setUp(false)
-		if ctx.Err() == nil && e.factsErrs.note(key, err.Error()) {
+		if ctx.Err() == nil && !e.factsFailing {
+			e.factsFailing = true
 			logger.Error(err, "gather facts", "database", s.Postgres.Database)
 		}
 		return
 	}
 	e.factsFailures = 0
 	e.setFactsTimer(s.PlanInterval)
-	if e.factsErrs.forget(key) {
+	if e.factsFailing {
+		e.factsFailing = false
 		logger.Info("gathered facts again", "database", s.Postgres.Database)
 	}
 	e.setUp(true)

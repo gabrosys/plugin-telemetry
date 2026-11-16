@@ -23,9 +23,6 @@ import (
 // ErrorLog is errorLog.
 type ErrorLog = errorLog
 
-// MaxMessages is how many distinct messages errorLog remembers per failing query and database.
-const MaxMessages = maxMessages
-
 // WatchDebounce is the quiet time after a file change before the engine reacts.
 const WatchDebounce = sources.Debounce
 

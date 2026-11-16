@@ -765,17 +765,29 @@ var _ = Describe("An engine on an in-memory Config", func() {
 		Expect(h.cfg.watchCalls()).To(Equal(2))
 	})
 
-	It("logs a Watch that keeps returning early once per error, and its recovery once", func() {
+	It("logs a Watch that keeps returning early once, whatever its error text, and its recovery once", func() {
 		h := run(func(url string) *memConfig {
 			c := newMemConfig(httpSettings(url), httpFiles())
-			c.watchErr = []error{errors.New("watch broke"), errors.New("watch broke"), errors.New("watch broke again")}
+			c.watchErr = []error{errors.New("watch broke"), errors.New("watch broke again"), errors.New("watch broke")}
 			return c
 		}, unreachable)
 		h.advanceBy(time.Second, func() bool { return h.cfg.watchCalls() == 4 })
 		Eventually(h.cfg.watching).Should(BeTrue())
 		Eventually(func() int { return h.logged("watching the configuration again") }).Should(Equal(1))
 		Expect(h.logged(`"error"="watch broke"`)).To(Equal(1))
-		Expect(h.logged(`"error"="watch broke again"`)).To(Equal(1))
+		Expect(h.logged(`"error"="watch broke again"`)).To(BeZero())
+	})
+
+	It("logs failed facts rounds once whatever their messages, and the first success after them", func() {
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) },
+			func(_ context.Context, round int) (planner.Facts, error) {
+				if round < 6 {
+					return planner.Facts{}, fmt.Errorf("acquire a connection: dial tcp 10.0.0.1:%d: refused", 40000+round)
+				}
+				return memPrimary, nil
+			})
+		h.advance(func() bool { return h.logged("gathered facts again") == 1 })
+		Expect(h.logged(`"msg"="gather facts"`)).To(Equal(1))
 	})
 
 	header := func(h *harness, value string) func() bool {

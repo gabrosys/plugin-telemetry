@@ -35,7 +35,13 @@ type Loop struct {
 	pending *target
 	current *Exporter     // the exporter Run exports through, nil before its first take
 	wake    chan struct{} // signals the first SetExporter to a waiting Run
+
+	lastFailure string // the kind of the last failed export, "" while exports succeed; Run only
+	tickFailed  bool   // an export of the running tick failed; Run only
 }
+
+// failureCollect is the lastFailure of a collection that failed.
+const failureCollect = "collect"
 
 // NewLoop returns a Loop that exports what reader collects with res as the resource.
 func NewLoop(reader *sdkmetric.ManualReader, res *resource.Resource, clk clock.Clock, rnd *rand.Rand, stats *selfmetrics.Stats) *Loop {
@@ -159,10 +165,18 @@ func (l *Loop) tick(ctx context.Context, t *target, at time.Time) {
 	defer cancel()
 	logger := log.FromContext(ctx)
 
+	l.tickFailed = false
+	defer func() {
+		if !l.tickFailed && l.lastFailure != "" {
+			l.lastFailure = ""
+			logger.Info("export recovered")
+		}
+	}()
+
 	start := l.clk.Now()
 	rm := &metricdata.ResourceMetrics{}
 	if err := l.reader.Collect(ctx, rm); err != nil {
-		logger.Error(err, "collect metrics")
+		l.failed(failureCollect, func() { logger.Error(err, "collect metrics") })
 		rec := l.record(t, selfmetrics.OutcomeError)
 		rec.Duration = l.clk.Since(start)
 		rec.ErrorType = errorTypeOther
@@ -196,14 +210,26 @@ func (l *Loop) send(ctx context.Context, t *target, b *metricdata.ResourceMetric
 			return
 		case errorType == errorTypeRejected:
 			rec.Rejected = min(rejected, rec.Points)
-			logger.Info("export partially rejected", "rejected", rejected, "error", err.Error())
+			l.failed(errorTypeRejected, func() {
+				logger.Info("export partially rejected", "rejected", rejected, "error", err.Error())
+			})
 		default:
 			rec.Outcome = selfmetrics.OutcomeError
 			rec.ErrorType = errorType
-			logger.Error(err, "export metrics", "error.type", errorType)
+			l.failed(errorType, func() { logger.Error(err, "export metrics", "error.type", errorType) })
 		}
 	}
 	l.stats.Export(rec) //nolint:contextcheck // Stats.Export takes no context
+}
+
+// failed marks the tick failed and calls logFn unless the last failed export was of the same kind.
+func (l *Loop) failed(kind string, logFn func()) {
+	l.tickFailed = true
+	if kind == l.lastFailure {
+		return
+	}
+	l.lastFailure = kind
+	logFn()
 }
 
 func points(rm *metricdata.ResourceMetrics) int {

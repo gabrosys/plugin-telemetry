@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"go.opentelemetry.io/otel/attribute"
@@ -21,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	"google.golang.org/grpc/codes"
 	testingclock "k8s.io/utils/clock/testing"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/gabrosys/plugin-telemetry/internal/export"
 	"github.com/gabrosys/plugin-telemetry/internal/export/otlptest"
@@ -89,6 +91,16 @@ type loopHarness struct {
 
 	cancel context.CancelFunc
 	done   chan error
+
+	mu    sync.Mutex // guards lines
+	lines []string   // the log lines of the loop
+}
+
+// logged returns the log lines so far.
+func (h *loopHarness) logged() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.lines)
 }
 
 func newLoopHarness(seed uint64) *loopHarness {
@@ -116,7 +128,12 @@ func newLoopHarness(seed uint64) *loopHarness {
 func (h *loopHarness) start() {
 	GinkgoHelper()
 	var ctx context.Context
-	ctx, h.cancel = context.WithCancel(context.Background())
+	logger := funcr.New(func(_, args string) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		h.lines = append(h.lines, args)
+	}, funcr.Options{})
+	ctx, h.cancel = context.WithCancel(ctrllog.IntoContext(context.Background(), logger))
 	h.done = make(chan error, 1)
 	go func() { h.done <- h.loop.Run(ctx) }()
 	DeferCleanup(h.stop)
@@ -404,6 +421,82 @@ var _ = Describe("Loop", func() {
 		Expect(srv.Requests()).To(BeEmpty())
 		Expect(h.value("otel.sdk.exporter.operation.duration", componentAttrs(srv, attribute.String("error.type", "_OTHER"))...)).To(Equal(1.0))
 		Expect(h.value("otel.sdk.exporter.metric_data_point.exported", componentAttrs(srv, attribute.String("error.type", "_OTHER"))...)).To(BeZero())
+	})
+
+	It("logs a long run of export errors once at the start and once at recovery, holding no growing state", func() {
+		srv := newHTTPServer(nil)
+		srv.Respond(otlptest.Response{HTTPStatus: 503})
+		h := newLoopHarness(1)
+		s := exporterSettings(settings.ProtocolHTTP, srv.URL+"/v1/metrics")
+		s.Timeout = 9*time.Second - time.Nanosecond // the retry budget is spent after the first attempt
+		h.loop.SetExporter(context.Background(), newExporter(s), 10*time.Second, 1000)
+		h.start()
+
+		for h.exports("error") < 100 {
+			h.step(10 * time.Second)
+		}
+		srv.Respond(otlptest.Response{})
+		for h.exports("ok") == 0 {
+			h.step(10 * time.Second)
+		}
+
+		lines := h.logged()
+		Expect(lines).To(HaveLen(2))
+		Expect(lines[0]).To(And(ContainSubstring(`"msg"="export metrics"`), ContainSubstring(`"error.type"="503"`)))
+		Expect(lines[1]).To(ContainSubstring(`"msg"="export recovered"`))
+		reqs := srv.Requests()
+		Expect(len(reqs)).To(BeNumerically(">", 100))
+		for _, r := range reqs[1:] { // the first lacks the self-metrics a failed export adds
+			Expect(r.Points()).To(Equal(reqs[1].Points()), "a request never grows with the failures before it")
+		}
+	})
+
+	It("logs a new line when the error type changes", func() {
+		srv := newHTTPServer(nil)
+		h := newLoopHarness(1)
+		h.loop.SetExporter(context.Background(), httpExporter(srv), 10*time.Second, 1000)
+		h.start()
+
+		for _, status := range []int{400, 400, 413, 400} {
+			srv.Respond(otlptest.Response{HTTPStatus: status})
+			want := h.exports("error") + 1
+			for h.exports("error") < want {
+				h.step(10 * time.Second)
+			}
+		}
+		lines := h.logged()
+		Expect(lines).To(HaveLen(3))
+		Expect(lines[0]).To(ContainSubstring(`"error.type"="400"`))
+		Expect(lines[1]).To(ContainSubstring(`"error.type"="413"`))
+		Expect(lines[2]).To(ContainSubstring(`"error.type"="400"`))
+	})
+
+	It("logs a collection failure and a rejection once each, and the recovery once", func() {
+		srv := newHTTPServer(nil)
+		h := newLoopHarness(1)
+		h.prod.set(3, errors.New("producer failed"))
+		h.loop.SetExporter(context.Background(), httpExporter(srv), 10*time.Second, 1000)
+		h.start()
+
+		for h.exports("error") < 3 {
+			h.step(10 * time.Second)
+		}
+		h.prod.set(3, nil)
+		srv.Respond(otlptest.Response{Rejected: 1})
+		for len(srv.Requests()) < 3 {
+			h.step(10 * time.Second)
+		}
+		srv.Respond(otlptest.Response{})
+		sent := len(srv.Requests())
+		for len(srv.Requests()) == sent {
+			h.step(10 * time.Second)
+		}
+
+		lines := h.logged()
+		Expect(lines).To(HaveLen(3))
+		Expect(lines[0]).To(ContainSubstring(`"msg"="collect metrics"`))
+		Expect(lines[1]).To(ContainSubstring(`"msg"="export partially rejected"`))
+		Expect(lines[2]).To(ContainSubstring(`"msg"="export recovered"`))
 	})
 
 	It("counts a panicking tick as one failed export and exports at the next one", func() {

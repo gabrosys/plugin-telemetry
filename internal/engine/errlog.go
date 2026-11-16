@@ -5,68 +5,72 @@ import (
 
 	"github.com/go-logr/logr"
 
+	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 	"github.com/gabrosys/plugin-telemetry/internal/snapshot"
 )
 
-// maxMessages bounds the distinct messages remembered per failing (query, database).
-const maxMessages = 16
-
-// errorLog logs a failure of one (query, database) once per distinct message and logs its recovery once.
-// The zero value is ready to use.
-type errorLog struct {
-	mu      sync.Mutex                           // guards failing
-	failing map[snapshot.Key]map[string]struct{} // the messages logged since each key last succeeded
+// failure is one way a (query, database) fails.
+type failure struct {
+	key     snapshot.Key
+	outcome selfmetrics.Outcome
 }
 
-// Failed logs err unless its message was already logged since query last succeeded on database.
-func (l *errorLog) Failed(log logr.Logger, query, database string, err error) {
-	if l.note(snapshot.Key{Query: query, Database: database}, err.Error()) {
-		log.Error(err, "query failed", "query", query, "database", database)
+// errorLog logs when a (query, database) starts failing with an outcome, whatever the error text, and
+// once when it recovers. The zero value is ready to use.
+type errorLog struct {
+	mu      sync.Mutex // guards failing
+	failing map[failure]struct{}
+}
+
+// Failed logs err unless query on database was already failing with outcome since it last succeeded.
+func (l *errorLog) Failed(log logr.Logger, query, database string, outcome selfmetrics.Outcome, err error) {
+	if l.note(failure{snapshot.Key{Query: query, Database: database}, outcome}) {
+		log.Error(err, "query failed", "query", query, "database", database, "outcome", string(outcome))
 	}
 }
 
-// Succeeded logs the recovery of query on database if it was failing.
+// Succeeded logs the recovery of query on database if it was failing, and forgets every outcome.
 func (l *errorLog) Succeeded(log logr.Logger, query, database string) {
 	if l.forget(snapshot.Key{Query: query, Database: database}) {
 		log.Info("query recovered", "query", query, "database", database)
 	}
 }
 
-// note records msg for k and reports whether it is new. Past maxMessages it starts over.
-func (l *errorLog) note(k snapshot.Key, msg string) bool {
+// note records f and reports whether it is new.
+func (l *errorLog) note(f failure) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	seen := l.failing[k]
-	if _, ok := seen[msg]; ok {
+	if _, ok := l.failing[f]; ok {
 		return false
 	}
-	if seen == nil || len(seen) >= maxMessages {
-		if l.failing == nil {
-			l.failing = map[snapshot.Key]map[string]struct{}{}
-		}
-		seen = map[string]struct{}{}
-		l.failing[k] = seen
+	if l.failing == nil {
+		l.failing = map[failure]struct{}{}
 	}
-	seen[msg] = struct{}{}
+	l.failing[f] = struct{}{}
 	return true
 }
 
-// forget clears k and reports whether it was failing.
+// forget clears every outcome of k and reports whether k was failing.
 func (l *errorLog) forget(k snapshot.Key) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	_, ok := l.failing[k]
-	delete(l.failing, k)
-	return ok
+	was := false
+	for f := range l.failing {
+		if f.key == k {
+			delete(l.failing, f)
+			was = true
+		}
+	}
+	return was
 }
 
 // retain forgets the keys keep rejects.
 func (l *errorLog) retain(keep func(snapshot.Key) bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for k := range l.failing {
-		if !keep(k) {
-			delete(l.failing, k)
+	for f := range l.failing {
+		if !keep(f.key) {
+			delete(l.failing, f)
 		}
 	}
 }

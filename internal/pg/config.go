@@ -44,7 +44,7 @@ var (
 	ErrPGEnv = errors.New("a PG* environment variable is set")
 	// ErrInvalidConfig never wraps pgx's error: it holds the connection string, password included.
 	ErrInvalidConfig = errors.New("invalid PostgreSQL connection settings")
-	// ErrBackoff is returned by Acquire while a database waits before the next connect attempt.
+	// ErrBackoff is returned by AcquireWithin while a database waits before the next connect attempt.
 	ErrBackoff = errors.New("waiting before reconnecting")
 )
 

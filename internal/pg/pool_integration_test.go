@@ -474,7 +474,7 @@ var _ = Describe("Pool", func() {
 		}
 	})
 
-	It("caps the delay at WithMaxBackoff", func(ctx SpecContext) {
+	It("caps the delay at the max backoff", func(ctx SpecContext) {
 		cfg.Port = 1
 		pool = pg.NewPool(cfg, 2, time.Minute, clk, logr.Logger{}, 5*time.Second)
 		DeferCleanup(pool.Close)
@@ -574,7 +574,7 @@ var _ = Describe("Pool", func() {
 		Expect(pgErr.Code).To(Equal("42501"))
 	})
 
-	It("fails Acquire after Close", func(ctx SpecContext) {
+	It("fails AcquireWithin after Close", func(ctx SpecContext) {
 		newPool(2, time.Minute)
 		pool.Close()
 		_, _, err := pool.AcquireWithin(ctx, "app", 0)

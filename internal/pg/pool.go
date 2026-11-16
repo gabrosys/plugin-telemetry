@@ -19,7 +19,7 @@ const (
 	closeTimeout      = 2 * time.Second
 )
 
-// ErrPoolClosed is returned by Acquire once the pool is closed.
+// ErrPoolClosed is returned by AcquireWithin once the pool is closed.
 var ErrPoolClosed = errors.New("connection pool is closed")
 
 // ErrNoSlot is returned by AcquireWithin when no slot came free within maxWait.
@@ -303,7 +303,7 @@ func (p *Pool) CloseIdle() {
 	}
 }
 
-// Close closes the idle connections and makes Acquire fail. Connections still in use are
+// Close closes the idle connections and makes AcquireWithin fail. Connections still in use are
 // closed when they are released.
 func (p *Pool) Close() {
 	p.mu.Lock()

@@ -36,11 +36,20 @@ type observed struct {
 // Register creates one observable instrument per catalogue entry that reads s,
 // and the synchronous operation duration histogram that Export records into.
 func Register(m metric.Meter, s *Stats) error {
+	return register(m, s, ByComponent(ComponentEngine))
+}
+
+// register is Register over the given metrics. It fails for a counter or gauge that s
+// has no reader for, so the callback never returns an error.
+func register(m metric.Meter, s *Stats, ms []Metric) error {
 	var obs []observed
 	var instruments []metric.Observable
-	for _, def := range ByComponent(ComponentEngine) {
+	for _, def := range ms {
 		switch Instrument(def.Instrument) {
 		case InstrumentCounter:
+			if _, ok := s.points(def.Name); !ok {
+				return fmt.Errorf("metric %s: no reader", def.Name)
+			}
 			c, err := m.Int64ObservableCounter(def.Name, metric.WithUnit(def.Unit), metric.WithDescription(def.Description))
 			if err != nil {
 				return fmt.Errorf("create counter %s: %w", def.Name, err)
@@ -48,6 +57,9 @@ func Register(m metric.Meter, s *Stats) error {
 			obs = append(obs, observed{name: def.Name, counter: c})
 			instruments = append(instruments, c)
 		case InstrumentGauge:
+			if _, ok := s.points(def.Name); !ok {
+				return fmt.Errorf("metric %s: no reader", def.Name)
+			}
 			g, err := m.Float64ObservableGauge(def.Name, metric.WithUnit(def.Unit), metric.WithDescription(def.Description))
 			if err != nil {
 				return fmt.Errorf("create gauge %s: %w", def.Name, err)
@@ -74,10 +86,7 @@ func Register(m metric.Meter, s *Stats) error {
 
 	_, err := m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		for _, ob := range obs {
-			pts, ok := s.points(ob.name)
-			if !ok {
-				return fmt.Errorf("observe %s: no reader", ob.name)
-			}
+			pts, _ := s.points(ob.name)
 			for _, p := range pts {
 				opt := metric.WithAttributes(p.attrs...)
 				if ob.counter != nil {

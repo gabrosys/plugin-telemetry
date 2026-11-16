@@ -404,3 +404,38 @@ var _ = Describe("Stats", func() {
 		wg.Wait()
 	})
 })
+
+var _ = Describe("Register", func() {
+	newMeter := func() (*sdkmetric.ManualReader, *sdkmetric.MeterProvider) {
+		GinkgoHelper()
+		reader := sdkmetric.NewManualReader()
+		provider := sdkmetric.NewMeterProvider(
+			sdkmetric.WithReader(reader),
+			sdkmetric.WithView(selfmetrics.Views()...),
+		)
+		DeferCleanup(provider.Shutdown)
+		return reader, provider
+	}
+
+	It("fails at start for a catalogue entry without a reader", func() {
+		_, provider := newMeter()
+		ms := append(selfmetrics.ByComponent(selfmetrics.ComponentEngine), selfmetrics.Metric{
+			Component:  selfmetrics.ComponentEngine,
+			Name:       "cnpg_otel_test_orphan",
+			Instrument: string(selfmetrics.InstrumentCounter),
+		})
+
+		err := selfmetrics.RegisterMetrics(provider.Meter("test"), selfmetrics.NewStats(), ms)
+
+		Expect(err).To(MatchError(ContainSubstring("metric cnpg_otel_test_orphan: no reader")))
+	})
+
+	It("collects the engine catalogue without an error", func() {
+		reader, provider := newMeter()
+		stats := selfmetrics.NewStats()
+		Expect(selfmetrics.Register(provider.Meter("test"), stats)).To(Succeed())
+
+		var rm metricdata.ResourceMetrics
+		Expect(reader.Collect(context.Background(), &rm)).To(Succeed())
+	})
+})

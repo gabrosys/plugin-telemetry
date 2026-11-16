@@ -3,9 +3,7 @@
 package measure_test
 
 import (
-	"encoding/json"
 	"os"
-	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -15,7 +13,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
-	"github.com/gabrosys/plugin-telemetry/internal/podpatch"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/framework"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/otlp"
 )
@@ -64,7 +61,7 @@ var _ = Describe("the sidecar with CNPG's default queries", Ordered, func() {
 			Expect(client.IgnoreNotFound(c.Delete(ctx, ns))).To(Succeed())
 		})
 
-		Expect(c.Create(ctx, measuredExporter(ns.Name, podpatch.DefaultExporter))).To(Succeed())
+		Expect(c.Create(ctx, measuredExporter(ns.Name))).To(Succeed())
 		key := client.ObjectKey{Namespace: ns.Name, Name: "sidecar"}
 		cluster := framework.PeerCluster(ns.Name, key.Name, env.PostgresImage)
 		Expect(c.Create(ctx, cluster)).To(Succeed())
@@ -117,10 +114,7 @@ var _ = Describe("the sidecar with CNPG's default queries", Ordered, func() {
 		m.WorkingSetBytes, m.RSSBytes = framework.StatOf(m.WorkingSetSeries), framework.StatOf(m.RSSSeries)
 		m.MeanCPUNanoCores = cpuSum / uint64(len(readings))
 
-		data, err := json.MarshalIndent(m, "", "  ")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(os.WriteFile(filepath.Join(out, "sidecar-"+env.CNPGVersion+".json"), append(data, '\n'), 0o644)).To(Succeed()) //nolint:gosec // a report file
-		AddReportEntry("sidecar", string(data))
+		writeMeasurement(out, "sidecar", env.CNPGVersion, m)
 
 		Expect(m.WorkingSetBytes.Max).To(BeNumerically("<=", sidecarWorkingSetMax), "max working set")
 		Expect(m.MeanCPUNanoCores).To(BeNumerically("<=", sidecarCPUMax), "mean CPU")

@@ -3,10 +3,8 @@
 package measure_test
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -17,7 +15,6 @@ import (
 
 	"github.com/gabrosys/plugin-telemetry/api/v1alpha1"
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
-	"github.com/gabrosys/plugin-telemetry/internal/podpatch"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/framework"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/otlp"
@@ -102,7 +99,7 @@ var _ = Describe("the sidecar at maxSeriesTotal 50000", Ordered, func() {
 		})
 
 		Expect(c.Create(ctx, syntheticSet(ns.Name))).To(Succeed())
-		exporter := measuredExporter(ns.Name, podpatch.DefaultExporter)
+		exporter := measuredExporter(ns.Name)
 		exporter.Spec.Metrics.QuerySets = []string{"synthetic"}
 		Expect(c.Create(ctx, exporter)).To(Succeed())
 		key := client.ObjectKey{Namespace: ns.Name, Name: "series"}
@@ -157,10 +154,7 @@ var _ = Describe("the sidecar at maxSeriesTotal 50000", Ordered, func() {
 			m.MeanCPUNanoCores = cpuSum / uint64(len(readings))
 		}
 
-		data, err := json.MarshalIndent(m, "", "  ")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(os.WriteFile(filepath.Join(out, "series-"+env.CNPGVersion+".json"), append(data, '\n'), 0o644)).To(Succeed()) //nolint:gosec // a report file
-		AddReportEntry("series", string(data))
+		writeMeasurement(out, "series", env.CNPGVersion, m)
 
 		Expect(sampleErr).NotTo(HaveOccurred(), "sampling usage")
 		Expect(m.SeriesAtStart).To(BeNumerically(">=", seriesFloor), "series at the start")

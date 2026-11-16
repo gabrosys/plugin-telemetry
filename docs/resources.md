@@ -60,3 +60,31 @@ Options for the user (decision in Task 4.5.16):
 
 1. Raise the default `sidecarMemory` to 96Mi.
 2. Lower the default `maxSeriesTotal` to the largest count measured within 64Mi. No count below 48417 was measured; this needs a further run at a lower count (for example 24000 and 36000 series).
+
+## Plugin replica with 1000 Clusters
+
+`make measure CNPG_VERSION=v1.30.1 E2E_FOCUS=plugin` writes `bin/measure/plugin-v1.30.1.json`.
+
+Method: one real peer Cluster `measure-ref` with 2 instances, brought to Ready. Then 100 namespaces, each with a `TelemetryExporter/default` and 10 Clusters `pg-00` to `pg-09`. Each carries `measure-ref`'s spec, the annotation `cnpg.io/reconciliationLoop: disabled` (so CloudNativePG creates no Pods for it) and `measure-ref`'s status with the name replaced, written through the status subresource. The test client runs at QPS 50, burst 100, 16 creates at a time. Everything is deleted afterwards.
+
+Why it stands for a real replica: the replica is the deployed one, with the same binary, manifest (request 64Mi, limit 128Mi) and manager options. Its cache decodes the 1000 Clusters into the pinned CloudNativePG types, and the identity controller gives each its ServiceAccount, Role, RoleBinding and token Secret, so the cache holds 1000 Clusters and 4000 identity objects as in production. The 1000 Clusters make no hook calls, so there is no per-call allocation from them; hook traffic comes from real Clusters, whose allocations are per call and short-lived.
+
+The measurement was taken with the single Cluster List of `exportersToClusters` using `client.UnsafeDisableDeepCopy`.
+
+Objects: 100 namespaces, 1000 unreconciled Clusters (plus `measure-ref`), 1000 token Secrets with a token, no Pod in the 100 namespaces. The mean JSON size of one Cluster is 9504 B (`clusterBytes`). Creating the objects took 38 s; the 1000 token Secrets were ready 149 s after the first create.
+
+Idle replicas, 5 minutes after the identities were ready, then 41 readings over 10 minutes:
+
+| Replica | Working set min | median | max | `rssBytes` max | Target | Met |
+|---|---|---|---|---|---|---|
+| first | 51855360 B (49.5 MiB) | 56115200 B (53.5 MiB) | 58347520 B (55.6 MiB) | 57192448 B | <= 67108864 B | yes |
+| second | 53018624 B (50.6 MiB) | 56360960 B (53.7 MiB) | 60252160 B (57.5 MiB) | 59113472 B | <= 67108864 B | yes |
+
+Replacement replica: one replica deleted with the 1000 Clusters cached. The new Pod was Ready 12.1 s after the delete, with 0 restarts and no last termination reason (no OOM kill under the 128Mi limit). Readings from 2 minutes after Ready, every 15 s for 5 minutes (21 readings):
+
+| Quantity | Min | Median | Max | Target | Met |
+|---|---|---|---|---|---|
+| Working set | 44109824 B (42.1 MiB) | 47292416 B (45.1 MiB) | 58773504 B (56.1 MiB) | <= 67108864 B | yes |
+| `rssBytes` | 43020288 B | 46202880 B | 57683968 B | | |
+
+Both targets are met with the change in place. The headroom to 64 MiB is 3.8 MiB on the highest idle reading.

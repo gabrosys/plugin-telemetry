@@ -92,6 +92,22 @@ var _ = Describe("cnpg_collector_up", func() {
 	})
 })
 
+var _ = Describe("Databases whose names are not valid UTF-8", func() {
+	It("log one warning while the list stays the same, none when it empties", func() {
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) },
+			func(_ context.Context, round int) (planner.Facts, error) {
+				f := memPrimary
+				if round < 3 {
+					f.SkippedDatabases = []string{`"bad\xffname"`}
+				}
+				return f, nil
+			})
+		h.advance(func() bool { return len(h.roundTimes()) >= 6 })
+		Expect(h.logged("databases not monitored, their names are not valid UTF-8")).To(Equal(1))
+		Expect(h.loggedAll("databases not monitored", `"databases"=["\"bad\\xffname\""]`)).To(Equal(1))
+	})
+})
+
 // gaps returns the time between consecutive entries of times.
 func gaps(times []time.Time) []time.Duration {
 	out := make([]time.Duration, 0, len(times))

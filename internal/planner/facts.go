@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"unicode/utf8"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/jackc/pgx/v5"
@@ -16,7 +17,10 @@ import (
 type Facts struct {
 	Version    semver.Version
 	InRecovery bool
-	Databases  []string // allow connections, not templates, CONNECT granted; sorted
+	Databases  []string // allow connections, not templates, CONNECT granted, valid UTF-8 names; sorted
+	// SkippedDatabases are the connectable databases whose names are not valid UTF-8, quoted with
+	// strconv.QuoteToASCII and sorted; they are never planned.
+	SkippedDatabases []string
 	// Checks are pg_monitor, read_only, track_io_timing, track_wal_io_timing and track_functions.
 	Checks map[string]bool
 	// ChecksErr joins the errors of the checks that could not be read; they are missing from Checks.
@@ -135,7 +139,7 @@ func gatherFacts(ctx context.Context, conn *pgx.Conn, settings map[string]string
 	if err != nil {
 		return Facts{}, fmt.Errorf("discover databases: %w", err)
 	}
-	var databases []string
+	var databases, skipped []string
 	for rows.Next() {
 		var name string
 		var canConnect bool
@@ -143,8 +147,12 @@ func gatherFacts(ctx context.Context, conn *pgx.Conn, settings map[string]string
 			rows.Close()
 			return Facts{}, fmt.Errorf("scan pg_database row: %w", err)
 		}
-		if canConnect {
+		switch {
+		case !canConnect:
+		case utf8.ValidString(name):
 			databases = append(databases, name)
+		default:
+			skipped = append(skipped, strconv.QuoteToASCII(name))
 		}
 	}
 	rows.Close()
@@ -156,5 +164,6 @@ func gatherFacts(ctx context.Context, conn *pgx.Conn, settings map[string]string
 	}
 
 	sort.Strings(databases)
-	return Facts{Version: version, InRecovery: inRecovery, Databases: databases, Checks: checks, ChecksErr: checksErr}, nil
+	sort.Strings(skipped)
+	return Facts{Version: version, InRecovery: inRecovery, Databases: databases, SkippedDatabases: skipped, Checks: checks, ChecksErr: checksErr}, nil
 }

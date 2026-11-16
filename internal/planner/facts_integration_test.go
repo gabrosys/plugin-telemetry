@@ -120,4 +120,32 @@ var _ = Describe("GatherFacts", func() {
 		_, err = planner.GatherFacts(cancelled, conn)
 		Expect(err).To(MatchError(context.Canceled))
 	})
+
+	// renameBad renames a database from a SQL_ASCII database, whose sessions pass bytes above 127 unchecked
+	// (PostgreSQL 18, "Character Set Support"); the docker exec API cannot carry such a byte in an argument.
+	renameBad := func(from, to string) string {
+		return "SET client_encoding = 'SQL_ASCII'; DO $$ BEGIN EXECUTE format('ALTER DATABASE %I RENAME TO %I', '" +
+			from + "', '" + to + "'); END $$"
+	}
+
+	It("skips connectable databases whose names are not valid UTF-8", func(ctx SpecContext) {
+		Expect(server.Exec(ctx, "CREATE DATABASE sqlascii TEMPLATE template0 ENCODING 'SQL_ASCII' LOCALE_PROVIDER libc LOCALE 'C'")).To(Succeed())
+		DeferCleanup(func(ctx SpecContext) {
+			Expect(server.Exec(ctx, "DROP DATABASE sqlascii")).To(Succeed())
+		})
+		Expect(server.Exec(ctx, "CREATE DATABASE badname")).To(Succeed())
+		renamed := false
+		DeferCleanup(func(ctx SpecContext) {
+			if renamed {
+				Expect(server.ExecIn(ctx, "sqlascii", renameBad("bad' || chr(255) || 'name", "badname"))).To(Succeed())
+			}
+			Expect(server.Exec(ctx, "DROP DATABASE badname")).To(Succeed())
+		})
+		Expect(server.ExecIn(ctx, "sqlascii", renameBad("badname", "bad' || chr(255) || 'name"))).To(Succeed())
+		renamed = true
+
+		f := gather(ctx)
+		Expect(f.Databases).To(Equal([]string{"app", "postgres", "sqlascii"}))
+		Expect(f.SkippedDatabases).To(Equal([]string{`"bad\xffname"`}))
+	})
 })

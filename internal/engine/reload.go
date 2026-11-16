@@ -48,6 +48,7 @@ type replanner struct {
 	loaderFiles []string
 	current     *configuration // nil until the first valid configuration
 	facts       *planner.Facts // nil until the first facts round
+	skipped     []string       // the databases skipped for their names in the last facts round
 	generation  uint64
 	digest      string // of the settings bytes, the sources and the exporter files the last reload read
 
@@ -211,6 +212,10 @@ func (r *replanner) commit(logger log.Logger, next *configuration) {
 
 // setFacts records the facts of a round and replans when they changed.
 func (r *replanner) setFacts(ctx context.Context, f planner.Facts) {
+	if !slices.Equal(r.skipped, f.SkippedDatabases) && len(f.SkippedDatabases) > 0 {
+		log.FromContext(ctx).Warning("databases not monitored, their names are not valid UTF-8", "databases", f.SkippedDatabases)
+	}
+	r.skipped = f.SkippedDatabases
 	if r.facts != nil && sameFacts(*r.facts, f) {
 		return
 	}
@@ -232,7 +237,7 @@ func (r *replanner) replan(ctx context.Context) {
 
 // idle drops the configuration in force and hands the scheduler an empty plan.
 func (r *replanner) idle(ctx context.Context) {
-	r.current, r.facts, r.loader, r.loaderFiles = nil, nil, nil, nil
+	r.current, r.facts, r.skipped, r.loader, r.loaderFiles = nil, nil, nil, nil, nil
 	r.publish(ctx, planner.Plan{})
 }
 

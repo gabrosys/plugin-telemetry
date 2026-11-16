@@ -100,6 +100,9 @@ func collectorSpecs(s *suite) {
 			return ready, err
 		}).WithContext(ctx).WithTimeout(2*time.Minute).WithPolling(failoverPoll).Should(BeTrue(), "collector endpoint back")
 
+		// Record every instance's diagnostics first; the checks run together at the end, so one breach hides none.
+		var breaches []string
+		soft := NewGomega(func(message string, _ ...int) { breaches = append(breaches, message) })
 		for i, pod := range pods {
 			steady := median(steadyWS[i])
 			highest := slices.Max(outageWS[i])
@@ -107,7 +110,7 @@ func collectorSpecs(s *suite) {
 				steady, slices.Min(outageWS[i]), highest))
 			AddReportEntry("rssBytes "+pod.Name, fmt.Sprintf("steady %d, min %d, max %d bytes",
 				median(steadyRSS[i]), slices.Min(outageRSS[i]), slices.Max(outageRSS[i])))
-			Expect(float64(highest)).To(BeNumerically("<=", growthLimit*float64(steady)), "working set of %s", pod.Name)
+			soft.Expect(float64(highest)).To(BeNumerically("<=", growthLimit*float64(steady)), "working set of %s", pod.Name)
 		}
 
 		var delays []time.Duration
@@ -127,13 +130,15 @@ func collectorSpecs(s *suite) {
 		}).WithContext(ctx).WithTimeout(2*time.Minute).WithPolling(statePoll).Should(BeTrue(), "every sidecar exports again")
 		for i, pod := range pods {
 			AddReportEntry("resume delay "+pod.Name, delays[i].String())
-			Expect(delays[i]).To(BeNumerically("<=", resumeLimit), "first point of %s after the collector is back", pod.Name)
+			soft.Expect(delays[i]).To(BeNumerically("<=", resumeLimit), "first point of %s after the collector is back", pod.Name)
 		}
 
 		for i, pod := range pods {
 			var p corev1.Pod
 			Expect(s.c.Get(ctx, pod, &p)).To(Succeed())
-			Expect(sidecarRestarts(&p)).To(Equal(restartsBefore[i]), "restarts of the sidecar of %s", pod.Name)
+			AddReportEntry("sidecar restarts "+pod.Name, fmt.Sprintf("before %d, after %d", restartsBefore[i], sidecarRestarts(&p)))
+			soft.Expect(sidecarRestarts(&p)).To(Equal(restartsBefore[i]), "restarts of the sidecar of %s", pod.Name)
 		}
+		Expect(breaches).To(BeEmpty())
 	}, SpecTimeout(20*time.Minute))
 }

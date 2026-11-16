@@ -85,7 +85,7 @@ func ContainerUsage(ctx context.Context, cfg *rest.Config, pod types.NamespacedN
 	return ParseUsage(summary, pod, container)
 }
 
-// SampleUsage reads each pod's container usage every `every` for d, the first tick at once, and returns the
+// SampleUsage reads each pod's container usage every `every` over d, the first tick at once and the last at d, and returns the
 // readings in tick order and, within a tick, pod order. When ctx ends it returns the readings so far with its error.
 func SampleUsage(
 	ctx context.Context, cfg *rest.Config, pods []types.NamespacedName, container string, every, d time.Duration,
@@ -108,7 +108,7 @@ func sampleUsage(
 	defer ticker.Stop()
 
 	var readings []Usage
-	for tick := range int((d + every - 1) / every) {
+	for tick := range int(d/every) + 1 {
 		if tick > 0 {
 			select {
 			case <-ctx.Done():

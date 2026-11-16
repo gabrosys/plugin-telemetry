@@ -75,7 +75,7 @@ var _ = Describe("SampleUsage", func() {
 			Consistently(done, 20*time.Millisecond).ShouldNot(Receive())
 		}
 
-		// Full duration: three ticks of 10 s in 30 s, the first at once.
+		// Full duration: four ticks over 30 s (t=0, 10, 20, 30), the first at once.
 		done := make(chan result, 1)
 		go func() {
 			defer GinkgoRecover()
@@ -87,11 +87,20 @@ var _ = Describe("SampleUsage", func() {
 		clk.Step(10 * time.Second)
 		step(done, 4)
 		clk.Step(10 * time.Second)
+		step(done, 6)
+		clk.Step(10 * time.Second)
 		var res result
 		Eventually(done).Should(Receive(&res))
 		Expect(res.err).NotTo(HaveOccurred())
 		Expect(res.got).To(Equal([]framework.Usage{
-			{WorkingSet: 1}, {WorkingSet: 102}, {WorkingSet: 3}, {WorkingSet: 104}, {WorkingSet: 5}, {WorkingSet: 106},
+			{WorkingSet: 1},
+			{WorkingSet: 102},
+			{WorkingSet: 3},
+			{WorkingSet: 104},
+			{WorkingSet: 5},
+			{WorkingSet: 106},
+			{WorkingSet: 7},
+			{WorkingSet: 108},
 		}))
 
 		// Context ends after the second tick: the readings so far come back with its error.
@@ -102,7 +111,7 @@ var _ = Describe("SampleUsage", func() {
 			got, err := framework.SampleUsageWith(ctx, clk, read, pods, 10*time.Second, time.Hour)
 			done <- result{got, err}
 		}()
-		step(done, 8)
+		step(done, 10)
 		Eventually(clk.HasWaiters).Should(BeTrue())
 		cancel()
 		Eventually(done).Should(Receive(&res))

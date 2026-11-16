@@ -40,6 +40,7 @@ E2E_TIMEOUT_plugin := 50m
 E2E_TIMEOUT_engine := 20m
 E2E_TIMEOUT_collector-metrics := 30m
 E2E_TIMEOUT_resilience := 60m
+E2E_TIMEOUT_measure := 4h
 E2E_PROCS_plugin := 3
 # Regex for ginkgo --focus; empty runs every spec.
 E2E_FOCUS ?=
@@ -121,6 +122,14 @@ $(E2E_TARGETS): e2e-%: deploy
 	$(KUBECTL) --context kind-$(KIND_CLUSTER) rollout status deployment/collector -n telemetry-e2e --timeout=180s
 	E2E_KUBE_CONTEXT=kind-$(KIND_CLUSTER) CNPG_VERSION=$(CNPG_VERSION) POSTGRES_IMAGE=$(POSTGRES_IMAGE) CMCTL=$(CMCTL) \
 		$(call ginkgo-run,$*,test/e2e/$*)
+
+.PHONY: measure
+measure: deploy ## Measure resource use on the kind environment (E2E_FOCUS=<regex>); JSON in bin/measure
+	mkdir -p $(BIN)/measure
+	$(KUBECTL) --context kind-$(KIND_CLUSTER) rollout restart deployment/collector -n telemetry-e2e
+	$(KUBECTL) --context kind-$(KIND_CLUSTER) rollout status deployment/collector -n telemetry-e2e --timeout=180s
+	MEASURE_OUT=$(abspath $(BIN)/measure) E2E_KUBE_CONTEXT=kind-$(KIND_CLUSTER) CNPG_VERSION=$(CNPG_VERSION) POSTGRES_IMAGE=$(POSTGRES_IMAGE) \
+		$(call ginkgo-run,measure,test/measure)
 
 .PHONY: e2e-engine
 e2e-engine: build ## Run the engine e2e suite with Docker, without kind (E2E_FOCUS=<regex>)

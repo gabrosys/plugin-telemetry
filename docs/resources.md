@@ -4,18 +4,18 @@ Measured on kind (Kubernetes 1.37, PostgreSQL 18.7) with the commands below; eac
 
 ## Verdicts
 
-Each row names the measured value and the section that holds the method. The sidecar, plugin and watch runs were taken on commit 360b671; the 64Mi series rerun with the per-row change (see "Per-row conversion and batching"); the 96Mi series run on a1ee3f7.
+Each row gives the measured value; the sections below hold the method and the full numbers.
 
 | Quantity | Target | Measured | Verdict |
 |---|---|---|---|
 | Sidecar, CNPG's default queries, one database, every 30 s (CNPG v1.30.1): working set | max <= 40 MiB (41943040 B) | max 19202048 B (18.3 MiB) | met |
 | The same: CPU | mean <= 10m | mean 626924 nanocores (0.6m) | met |
-| Sidecar at `maxSeriesTotal` 50000: working set, restarts | max < the sidecar's memory limit, no OOM kill, no restart, no export error | At the 96Mi default (100663296 B): 48417 series, max reading 77631488 B (74.0 MiB, 22.0 MiB under the limit), 0 restarts, no OOM kill, 0 export errors. The default was raised from 64Mi to 96Mi by the user's decision after two OOM kills at 64Mi (both with 48417 series; max readings 60993536 B and 54104064 B before the kill) | met at 96Mi |
+| Sidecar at `maxSeriesTotal` 50000: working set, restarts | max < the sidecar's memory limit, no OOM kill, no restart, no export error | At the 96Mi default (100663296 B): 48417 series, max reading 77631488 B (74.0 MiB, 22.0 MiB under the limit), 0 restarts, no OOM kill, 0 export errors. The default was raised from 64Mi to 96Mi after two OOM kills at 64Mi (both with 48417 series; max readings 60993536 B and 54104064 B before the kill) | met at 96Mi |
 | Plugin replica with 1000 Clusters cached: settled working set | <= 64 MiB (67108864 B) | max 60252160 B (57.5 MiB) over both replicas | met |
 | A replacement replica with 1000 Clusters | no OOM kill under its 128Mi limit, settles <= 64 MiB | Ready in 12.1 s, 0 restarts, no termination reason, max 58773504 B (56.1 MiB) | met |
 | Open watches added by 10 sidecars | 60 +/- 5 (6 per sidecar: its 5 informers and the kubelet's watch on the token Secret volume) | 60 | met |
-| Per-row conversion cost (ENG-07) | measured, no target | 296 to 4540 B and 0.4 to 5.1 us per row; the histogram row was 5464 B and 5.6 us before the change | see "Per-row conversion and batching" |
-| Pipelined batches (design 6.3) | needed only if `skippedRuns` > 0 | `skippedRuns` 0 | not needed |
+| Per-row conversion cost | measured, no target | 296 to 4540 B and 0.4 to 5.1 us per row; the histogram row was 5464 B and 5.6 us before the change | see "Per-row conversion and batching" |
+| Pipelined batches | needed only if `skippedRuns` > 0 | `skippedRuns` 0 | not needed |
 
 ## How the numbers are taken
 
@@ -68,7 +68,7 @@ The sidecar sets `GOMEMLIMIT` to 80% of its limit (`internal/memlimit/memlimit.g
 
 ### Result at 96Mi: met
 
-The user raised the default `sidecarMemory` from 64Mi to 96Mi (100663296 B) after the two kills (the other option, a lower `maxSeriesTotal`, was not taken). `GOMEMLIMIT` is then 80530636 B (80.5 MB). Run: `bin/measure/series-v1.30.1.json`, 778 s, with the plugin image carrying the new default (the sidecar's init container showed a 96Mi limit).
+After the two kills the default `sidecarMemory` was raised from 64Mi to 96Mi (100663296 B) instead of lowering the default `maxSeriesTotal`. `GOMEMLIMIT` is then 80530636 B (80.5 MB). Run: `bin/measure/series-v1.30.1.json`, 778 s, with the plugin image carrying the new default (the sidecar's init container showed a 96Mi limit).
 
 | Quantity | Measured | Target |
 |---|---|---|
@@ -79,7 +79,7 @@ The user raised the default `sidecarMemory` from 64Mi to 96Mi (100663296 B) afte
 | Restarts, last termination reason | 0 before, 0 after, none | no restart, no `OOMKilled` |
 | Export errors | 0 | 0 |
 
-At 96Mi the working set is higher than at 64Mi (median 70.9 MB against 50.0 MB) because the collector runs later under the 80.5 MB soft limit; CPU is lower (11.6m against 31m) for the same reason. The highest reading is 74.0 MiB, so the 50000 default stays inside 96Mi with 22.0 MiB of room between readings.
+At 96Mi the working set is higher than at 64Mi (median 70.9 MB against 50.0 MB) because the collector runs later under the 80.5 MB soft limit; CPU is lower (11.6m against 31m) for the same reason. The highest reading is 74.0 MiB, so the 50000 default stays inside 96Mi with 22.0 MiB above the highest reading.
 
 ## Plugin replica with 1000 Clusters
 
@@ -150,7 +150,7 @@ The sixth watch per sidecar is the kubelet's. A single-Cluster check (the same s
 | `synthetic` | 698.5 | 664 | 14 | 2 | 332 |
 | `histogram` | 5629 | 5464 | 118 | 1 | 5464 |
 
-Decision 1, allocation: the sidecar's memory target (4.5.13) was missed, so the case with the largest B/op per sample picks the site. That is `histogram` (5464 B), where every array scan built a `pgtype.Map` (`pgtype.NewMap()`). `scanArray` now takes the map from a `sync.Pool` (`internal/queries/histogram.go`). After the change the histogram case is 5124 ns/op, 4540 B/op and 102 allocs/op (`bin/measure/bench-after.txt`). Nothing else changed. The other cases allocate about 300 B per sample, which is the sample and its labels; `dropped` and the sorted column names were not touched. The change cannot lower the 50000-series working set (see above); it lowers the garbage of histogram queries only.
+Decision 1, allocation: the sidecar's memory target at 64Mi was missed, so the case with the largest B/op per sample picks the site. That is `histogram` (5464 B), where every array scan built a `pgtype.Map` (`pgtype.NewMap()`). `scanArray` now takes the map from a `sync.Pool` (`internal/queries/histogram.go`). After the change the histogram case is 5124 ns/op, 4540 B/op and 102 allocs/op (`bin/measure/bench-after.txt`). Nothing else changed. The other cases allocate about 300 B per sample, which is the sample and its labels; `dropped` and the sorted column names were not touched. The change cannot lower the 50000-series working set (see above); it lowers the garbage of histogram queries only.
 
 Decision 2, batching: pipelined batches are not needed. `skippedRuns` is 0 in `sidecar-v1.30.1.json` (`cnpg_otel_query_runs_total{outcome="skipped"}` delta over the 10 minute window), and the sidecar's mean CPU is 0.6m against the 10m target. At 0.7 us per synthetic row, converting the 24200 rows of a 48417-series collection takes about 17 ms.
 
@@ -164,7 +164,7 @@ Decision 2, batching: pipelined batches are not needed. `skippedRuns` is 0 in `s
 | Docker server (`docker version --format '{{.Server.Version}}'`) | 29.2.1 |
 | kind node image | `kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5` (Kubernetes 1.37.0), kind v0.33.0 |
 | CloudNativePG, PostgreSQL | v1.30.1, 18.7 |
-| Commit | product code at a1ee3f7 (the 96Mi default); the sidecar, plugin and watch runs were taken on 360b671 and the 64Mi series rerun after the per-row change, and the test sources changed after some runs. The watches JSON's expectation fields (50 open watches, 200 renewals) were written before 360b671 corrected them to 60 and 240; the measured values are unaffected |
+| Commit | a1ee3f7 for the 96Mi run. The earlier runs used earlier commits of this branch; the product changes since the first run are fb3579b (the plugin lists Clusters without deep copies, in place for the plugin run), 9add9b1 (the per-row change, in place for the 64Mi rerun) and a1ee3f7 (the 96Mi default). The watches JSON's expectation fields (50 open watches, 200 renewals) predate the correction to 60 and 240; its measured values are unaffected |
 
 ## Reproducing
 

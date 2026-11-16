@@ -347,6 +347,7 @@ var _ = Describe("instance tools in Kubernetes mode", func() {
 			Expect(strings.Count(out+err.Error(), "kubernetes snapshot:")).To(Equal(1), sub)
 			Expect(hasDeadline).To(BeTrue(), sub)
 			Expect(time.Until(deadline)).To(BeNumerically("<=", cli.SnapshotTimeout), sub)
+			Expect(time.Until(deadline)).To(BeNumerically(">", 10*time.Second), sub)
 		}
 	})
 

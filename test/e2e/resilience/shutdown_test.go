@@ -23,7 +23,7 @@ import (
 const (
 	shutdownCluster = "smart-shutdown"
 	// maxSmartShutdown is far below CNPG's 180 s smartShutdownTimeout, which pooled sessions used to run out, and
-	// above one plan interval plus the queries in flight, the pool's hold.
+	// above the pool's hold: the 10 s shutdown probe plus the queries in flight.
 	maxSmartShutdown = time.Minute
 	exportWait       = 3 * time.Minute
 	shutdownPoll     = time.Second

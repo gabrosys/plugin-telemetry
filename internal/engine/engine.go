@@ -42,6 +42,9 @@ const (
 	Debounce = time.Second
 	// watchRetry is the wait before a Watch that returned early is started again.
 	watchRetry = 5 * time.Second
+	// shutdownProbe is how often the pool probes whether PostgreSQL is shutting down, which bounds how long
+	// the sidecar's sessions hold a smart shutdown open.
+	shutdownProbe = 10 * time.Second
 	// earlyFactsGap is the shortest time between the end of a facts round and the start of the next.
 	earlyFactsGap = time.Second
 	// shutdownTimeout bounds each shutdown step that can block.
@@ -94,7 +97,7 @@ type runner struct {
 	exec   *executor.Executor
 }
 
-// poolSpec is what a pool is built from besides the limits.
+// poolSpec is what a pool is built from besides the limits and the idle timeout.
 type poolSpec struct {
 	postgres   settings.Postgres
 	maxBackoff time.Duration // the planning cycle
@@ -144,6 +147,7 @@ type engine struct {
 	loop          *loopRun
 	factsTimer    clock.Timer
 	earlyTimer    clock.Timer
+	probeTimer    clock.Timer
 	lastFacts     time.Time
 	factsFailures int    // consecutive failed facts rounds the timer drove
 	factsFailing  bool   // a failed facts round was logged and no round has succeeded since
@@ -247,6 +251,7 @@ func (e *engine) run(ctx context.Context) {
 	safe.Call(plain, "reload", func() { e.onChange(ctx) })
 	var debounce clock.Timer // armed by the first change of a burst
 	defer stopTimer(&debounce)
+	e.setProbeTimer()
 	for {
 		select {
 		case <-ctx.Done():
@@ -264,7 +269,17 @@ func (e *engine) run(ctx context.Context) {
 			safe.Call(plain, "early facts request", func() { e.onEarlyFacts(ctx) })
 		case <-timerC(e.earlyTimer):
 			e.factsRound(ctx, false)
+		case <-timerC(e.probeTimer):
+			safe.Call(plain, "shutdown probe", func() { e.probe(ctx) })
+			e.setProbeTimer()
 		}
+	}
+}
+
+// probe lets the pool check whether PostgreSQL is shutting down. Call it on the control goroutine.
+func (e *engine) probe(ctx context.Context) {
+	if r := e.currentRunner(); r != nil {
+		r.pool.Probe(ctx, r.spec.postgres.Database)
 	}
 }
 
@@ -324,6 +339,7 @@ func watchKind(err error) int {
 func (e *engine) shutdown(ctx context.Context, stopSched context.CancelFunc, schedDone, watchDone <-chan struct{}) {
 	logger := log.FromContext(ctx)
 	ctx = context.WithoutCancel(ctx)
+	stopTimer(&e.probeTimer)
 	stopTimer(&e.factsTimer)
 	stopTimer(&e.earlyTimer)
 
@@ -373,7 +389,7 @@ func (e *engine) onChange(ctx context.Context) {
 
 // apply sets up next in place of prev, which is nil the first time: it builds the exporter when its
 // settings, its files or the resource changed, swaps the pool when the connection settings, the limits
-// or the planning cycle changed, and hands the
+// or the planning cycle changed (a new idle timeout alone goes to the pool in place), and hands the
 // exporter to a new export loop. On error nothing has changed.
 func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 	s := next.settings
@@ -393,7 +409,9 @@ func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 	e.store.SetMaxSeriesTotal(s.Limits.MaxSeriesTotal)
 	newPool := e.runner == nil || e.runner.spec != newPoolSpec(s) || e.runner.limits != s.Limits
 	if newPool {
-		e.swapPool(ctx, s)
+		e.swapPool(ctx, s, next.idleTimeout)
+	} else {
+		e.runner.pool.SetIdleTimeout(next.idleTimeout)
 	}
 	if exp != nil {
 		e.startLoop(ctx, export.Resource(s, e.getenv, e.instance), exp, s.Exporter)
@@ -407,10 +425,10 @@ func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 
 // swapPool makes a pool and an executor for s the runner and closes the old pool at once: its idle
 // connections now, its busy ones when their runs release them.
-func (e *engine) swapPool(ctx context.Context, s settings.Settings) {
+func (e *engine) swapPool(ctx context.Context, s settings.Settings, idle time.Duration) {
 	pc := PostgresConfig(s)
 	pc.ReadFile = e.cfg.ReadFile
-	pool := pg.NewPool(pc, s.Postgres.MaxConnections, e.clk,
+	pool := pg.NewPool(pc, s.Postgres.MaxConnections, idle, e.clk,
 		log.FromContext(ctx).GetLogger(), s.PlanInterval)
 	next := &runner{
 		spec:   newPoolSpec(s),
@@ -727,7 +745,7 @@ func (e *engine) refuse(ctx context.Context, cur *configuration, checks map[stri
 	e.stats.SetChecks(checks)
 	if !e.setRefused(true) {
 		e.plan.refuse(ctx)
-		e.swapPool(ctx, s)
+		e.swapPool(ctx, s, cur.idleTimeout)
 	}
 	e.factsFailures = 0
 	e.setFactsTimer(s.PlanInterval)
@@ -799,6 +817,11 @@ func factsWait(failures int, planInterval time.Duration) time.Duration {
 		return planInterval
 	}
 	return pg.BackoffDelay(failures-1, planInterval)
+}
+
+func (e *engine) setProbeTimer() {
+	stopTimer(&e.probeTimer)
+	e.probeTimer = e.clk.NewTimer(shutdownProbe)
 }
 
 func (e *engine) setFactsTimer(d time.Duration) {

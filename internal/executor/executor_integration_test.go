@@ -69,7 +69,7 @@ func newPoolOf(l settings.Limits, maxConns int) *pg.Pool {
 	cfg := server.MonitorConfig(GinkgoT().TempDir())
 	cfg.QueryTimeout = l.QueryTimeout
 	cfg.LockTimeout = l.LockTimeout
-	pool := pg.NewPool(cfg, maxConns, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
+	pool := pg.NewPool(cfg, maxConns, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 	DeferCleanup(pool.Close)
 	return pool
 }
@@ -507,7 +507,7 @@ var _ = Describe("Executor", func() {
 		cfg := server.MonitorConfig(GinkgoT().TempDir())
 		cfg.Host, cfg.Port = "127.0.0.1", addr.AddrPort().Port()
 		cfg.ConnectTimeout = time.Second
-		slow := pg.NewPool(cfg, 1, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
+		slow := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(slow.Close)
 
 		job := jobFor("SELECT 'a' AS datname, 1 AS value")
@@ -527,7 +527,7 @@ var _ = Describe("Executor", func() {
 		l.QueryTimeout = 500 * time.Millisecond
 		cfg := server.MonitorConfig(GinkgoT().TempDir())
 		cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout
-		one := pg.NewPool(cfg, 1, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
+		one := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(one.Close)
 
 		_, release, err := one.AcquireWithin(ctx, "postgres", 0)
@@ -544,7 +544,7 @@ var _ = Describe("Executor", func() {
 	It("gives up waiting for a connection after one interval and counts the run as skipped", func(ctx SpecContext) {
 		cfg := server.MonitorConfig(GinkgoT().TempDir())
 		cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout
-		one := pg.NewPool(cfg, 1, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
+		one := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(one.Close)
 
 		holder, release, err := one.AcquireWithin(ctx, "postgres", 0)
@@ -572,7 +572,7 @@ var _ = Describe("Executor", func() {
 		l.QueryTimeout = 500 * time.Millisecond
 		cfg := server.MonitorConfig(GinkgoT().TempDir())
 		cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout
-		one := pg.NewPool(cfg, 1, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
+		one := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(one.Close)
 
 		_, release, err := one.AcquireWithin(ctx, "postgres", 0)
@@ -600,7 +600,7 @@ var _ = Describe("Executor", func() {
 			cfg := server.MonitorConfig(GinkgoT().TempDir())
 			cfg.User = role
 			cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout
-			superPool = pg.NewPool(cfg, 2, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
+			superPool = pg.NewPool(cfg, 2, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 			DeferCleanup(superPool.Close)
 		})
 
@@ -733,7 +733,7 @@ var _ = Describe("Result.ConnectionLost", func() {
 		cfg := server.MonitorConfig(GinkgoT().TempDir())
 		Expect(os.WriteFile(cfg.PasswordFile, []byte("wrong\n"), 0o600)).To(Succeed())
 		cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout
-		pool := pg.NewPool(cfg, 4, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
+		pool := pg.NewPool(cfg, 4, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(pool.Close)
 		wrong := newExecutor(pool, l)
 
@@ -767,7 +767,7 @@ var _ = Describe("Result.ConnectionLost", func() {
 	It("is not set when the caller's context is cancelled while the run waits for a pool slot", func(ctx SpecContext) {
 		cfg := server.MonitorConfig(GinkgoT().TempDir())
 		cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout
-		one := pg.NewPool(cfg, 1, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
+		one := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(one.Close)
 
 		_, release, err := one.AcquireWithin(ctx, "postgres", 0)

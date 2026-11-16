@@ -594,6 +594,20 @@ var _ = Describe("Run when PostgreSQL stops", func() {
 	}, SpecTimeout(2*time.Minute))
 })
 
+var _ = Describe("Run on a smart shutdown of PostgreSQL", func() {
+	It("lets the postmaster exit within 10 s (the shutdown probe) plus a run although jobs keep running", func(ctx SpecContext) {
+		f := newFixture(time.Hour)
+		writeFile(f.config, f.valid)
+		f.run()
+		Eventually(expectUp(f.srv, 1)).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+
+		DeferCleanup(server.StartServer)
+		Expect(server.StopServerSmart(ctx)).To(Succeed())
+		Eventually(func() bool { return server.Running(ctx) }).
+			WithTimeout(15 * time.Second).WithPolling(250 * time.Millisecond).Should(BeFalse())
+	}, SpecTimeout(2*time.Minute))
+})
+
 var _ = Describe("Run when PostgreSQL comes back after an outage", func() {
 	It("reports cnpg_collector_up 1 within a planning cycle although the runs drove the reconnect backoff up", func(ctx SpecContext) {
 		// The runs on the default database fail every second during the 17s outage: with a 30s cap their

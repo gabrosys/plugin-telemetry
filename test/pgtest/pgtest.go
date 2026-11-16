@@ -139,6 +139,20 @@ func (p *Postgres) StopServer(ctx context.Context) error {
 	return p.run(ctx, "pg_ctl", "-D", dataDir, "stop", "-m", "fast")
 }
 
+// StopServerSmart starts a smart shutdown and keeps the server stopped once it is down: the postmaster
+// waits for the open sessions to end, and the call returns without waiting.
+func (p *Postgres) StopServerSmart(ctx context.Context) error {
+	if err := p.run(ctx, "touch", holdFile); err != nil {
+		return err
+	}
+	return p.run(ctx, "pg_ctl", "-D", dataDir, "stop", "-m", "smart", "-W")
+}
+
+// Running reports whether the postmaster is alive, also while it only waits to shut down.
+func (p *Postgres) Running(ctx context.Context) bool {
+	return p.run(ctx, "pg_ctl", "-D", dataDir, "status") == nil
+}
+
 // StartServer starts PostgreSQL again and returns once it accepts connections on the same port.
 func (p *Postgres) StartServer(ctx context.Context) error {
 	if err := p.run(ctx, "rm", "-f", holdFile); err != nil {

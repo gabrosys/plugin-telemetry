@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/cloudnative-pg/machinery/pkg/log"
@@ -26,7 +27,8 @@ import (
 )
 
 const (
-	absent = "-"
+	poolIdle = 30 * time.Second
+	absent   = "-"
 )
 
 // config is a loaded configuration: the settings, the merged sources and their definitions.
@@ -155,7 +157,7 @@ func connect(ctx context.Context, c *config) (*pg.Pool, planner.Facts, error) {
 	s := c.settings
 	pc := engine.PostgresConfig(s)
 	pc.ReadFile = c.read
-	pool := pg.NewPool(pc, s.Postgres.MaxConnections, clock.RealClock{},
+	pool := pg.NewPool(pc, s.Postgres.MaxConnections, poolIdle, clock.RealClock{},
 		log.FromContext(ctx).GetLogger(), 0)
 	ctx, cancel := context.WithTimeout(ctx, engine.FactsTimeout(s.Limits))
 	defer cancel()

@@ -25,4 +25,5 @@ var _ = Describe("resilience", Ordered, ContinueOnFailure, func() {
 	}, SpecTimeout(time.Minute))
 
 	restartSpecs(s)
+	renewalSpecs(s)
 })

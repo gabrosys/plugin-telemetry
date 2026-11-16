@@ -9,6 +9,33 @@ spec:
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
+  name: plugin-telemetry-ca
+  namespace: cnpg-system
+spec:
+  secretName: plugin-telemetry-ca-tls
+  isCA: true
+  commonName: plugin-telemetry-ca
+  # The CA lives ten years and keeps its key at renewal, so a renewed leaf verifies against any CA certificate.
+  duration: 87600h
+  renewBefore: 8760h
+  privateKey:
+    rotationPolicy: Never
+  issuerRef:
+    name: plugin-telemetry-selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: plugin-telemetry-ca
+  namespace: cnpg-system
+spec:
+  ca:
+    secretName: plugin-telemetry-ca-tls
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
   name: plugin-telemetry-server
   namespace: cnpg-system
 spec:
@@ -16,12 +43,14 @@ spec:
   dnsNames:
     - plugin-telemetry
     - plugin-telemetry.cnpg-system.svc
+  privateKey:
+    rotationPolicy: Never
   usages:
     - server auth
   duration: 2160h
   renewBefore: 360h
   issuerRef:
-    name: plugin-telemetry-selfsigned
+    name: plugin-telemetry-ca
     kind: Issuer
 ---
 apiVersion: cert-manager.io/v1
@@ -32,10 +61,12 @@ metadata:
 spec:
   secretName: plugin-telemetry-client-tls
   commonName: plugin-telemetry-client
+  privateKey:
+    rotationPolicy: Never
   usages:
     - client auth
   duration: 2160h
   renewBefore: 360h
   issuerRef:
-    name: plugin-telemetry-selfsigned
+    name: plugin-telemetry-ca
     kind: Issuer

@@ -119,7 +119,7 @@ ginkgo-run = $(GO) run github.com/onsi/ginkgo/v2/ginkgo run --tags e2e -v --fail
 $(E2E_TARGETS): e2e-%: deploy
 	$(KUBECTL) --context kind-$(KIND_CLUSTER) rollout restart deployment/collector -n telemetry-e2e
 	$(KUBECTL) --context kind-$(KIND_CLUSTER) rollout status deployment/collector -n telemetry-e2e --timeout=180s
-	E2E_KUBE_CONTEXT=kind-$(KIND_CLUSTER) CNPG_VERSION=$(CNPG_VERSION) POSTGRES_IMAGE=$(POSTGRES_IMAGE) \
+	E2E_KUBE_CONTEXT=kind-$(KIND_CLUSTER) CNPG_VERSION=$(CNPG_VERSION) POSTGRES_IMAGE=$(POSTGRES_IMAGE) CMCTL=$(CMCTL) \
 		$(call ginkgo-run,$*,test/e2e/$*)
 
 .PHONY: e2e-engine

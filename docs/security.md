@@ -91,6 +91,10 @@ Two of them match a request only when the user is a ServiceAccount whose name is
 
 A Cluster name is a DNS-1035 label (CloudNativePG v1.30.1 `internal/webhook/v1/cluster_webhook.go` `validateName`) and `spec.serviceAccountName` matches `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` (v1.30.1 `api/v1/cluster_types.go`, `ClusterSpec.ServiceAccountName`). Neither can hold a dot, so a Cluster cannot be named, or run as an account named, like an identity object.
 
+## The plugin's certificates
+
+A self-signed CA Certificate (`plugin-telemetry-ca`, ten years) issues the server and client leaves; CloudNativePG trusts the CA Secret (`cnpg.io/pluginServerSecret`) and the plugin trusts the `ca.crt` of the client leaf Secret, so a renewed leaf verifies on both sides while kubelet updates the mounts. The CA and both leaves keep their keys at renewal (`privateKey.rotationPolicy: Never`); rotate a leaf key by deleting its Secret, and the CA key by deleting `plugin-telemetry-ca-tls` and then both leaf Secrets, which cert-manager reissues. Any certificate that the CA signs is accepted as a client certificate, so keep `plugin-telemetry-ca-tls` unreadable to anyone who may not call the plugin.
+
 ## Who chooses the Secrets the sidecar reads
 
 The plugin grants each sidecar read access to every Secret and ConfigMap that the exporter names: the headers Secret, the TLS CA, the client certificate, and the `envFrom` ConfigMap and Secret (`internal/clusterconfig/refs.go` `References`). The sidecar sends the headers to the endpoint that the exporter sets. Whoever may create or change a TelemetryExporter can therefore make the sidecar read those Secrets in the exporter's namespace and send the headers to an endpoint they choose. Grant that right only to those who may read those Secrets.

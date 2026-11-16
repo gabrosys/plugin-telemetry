@@ -26,6 +26,23 @@ var _ = Describe("Parse", func() {
 	})
 })
 
+var _ = DescribeTable("Parse rejects",
+	func(doc, want string) {
+		_, err := settings.Parse([]byte(doc), "/")
+		Expect(err).To(MatchError(ContainSubstring(want)))
+	},
+	Entry("a second document", "cluster: c\nexporter:\n  endpoint: http://x\n---\ncluster: d\n", "more than one YAML document"),
+	Entry("a list", "- cluster: c\n", "cannot"),
+	Entry("a negative interval", "cluster: c\nplanInterval: -1s\nexporter:\n  endpoint: http://x\n", "planInterval"),
+)
+
+var _ = Describe("Parse of an empty file", func() {
+	It("still reports the missing cluster", func() {
+		_, err := settings.Parse(nil, "/")
+		Expect(err).To(MatchError(ContainSubstring("cluster")))
+	})
+})
+
 var _ = Describe("Defaults", func() {
 	It("is what Load starts from", func() {
 		d := settings.Defaults()

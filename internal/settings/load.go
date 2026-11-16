@@ -47,7 +47,7 @@ func Defaults() Settings {
 		},
 		Exporter: Exporter{
 			Protocol:            ProtocolHTTP,
-			TLS:                 TLS{MinVersion: "1.2"},
+			TLS:                 TLS{MinVersion: defaultMinVersion},
 			Compression:         "gzip",
 			Interval:            30 * time.Second,
 			MaxPointsPerRequest: 2000,
@@ -64,15 +64,18 @@ func DefaultExporterTimeout(interval time.Duration) time.Duration {
 // against dir and validates.
 func Parse(data []byte, dir string) (Settings, error) {
 	s := Defaults()
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true)
-	if err := dec.Decode(&s); err != nil && !errors.Is(err, io.EOF) {
+	var seen presence
+	doc, err := composeOne(data)
+	if err != nil {
 		return Settings{}, fmt.Errorf("parse settings: %w", err)
 	}
-
-	var seen presence
-	if err := yaml.NewDecoder(bytes.NewReader(data)).Decode(&seen); err != nil && !errors.Is(err, io.EOF) {
-		return Settings{}, fmt.Errorf("parse settings: %w", err)
+	if doc != nil {
+		if err := doc.Load(&s, yaml.WithKnownFields()); err != nil {
+			return Settings{}, fmt.Errorf("parse settings: %w", err)
+		}
+		if err := doc.Load(&seen); err != nil {
+			return Settings{}, fmt.Errorf("parse settings: %w", err)
+		}
 	}
 	if seen.Exporter.Timeout == nil {
 		s.Exporter.Timeout = DefaultExporterTimeout(s.Exporter.Interval)
@@ -89,6 +92,28 @@ func Parse(data []byte, dir string) (Settings, error) {
 		return Settings{}, fmt.Errorf("invalid settings: %w", err)
 	}
 	return s, nil
+}
+
+// composeOne reads the single YAML document of data; an empty file gives nil.
+func composeOne(data []byte) (*yaml.Node, error) {
+	loader, err := yaml.NewLoader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("open loader: %w", err)
+	}
+	var doc yaml.Node
+	if err := loader.Load(&doc); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("compose document: %w", err)
+	}
+	switch err := loader.Load(&yaml.Node{}); {
+	case err == nil:
+		return nil, errors.New("more than one YAML document")
+	case !errors.Is(err, io.EOF):
+		return nil, fmt.Errorf("compose second document: %w", err)
+	}
+	return &doc, nil
 }
 
 func (s *Settings) resolvePaths(dir string) {

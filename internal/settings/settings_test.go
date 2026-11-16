@@ -247,6 +247,7 @@ var _ = Describe("Validate", func() {
 			s.Exporter.Endpoint = "https://x"
 			s.Exporter.TLS.KeyFile = "/k.pem"
 		}, "exporter.tls.certFile"),
+		Entry("tls minVersion 1.3 with an http endpoint", func(s *settings.Settings) { s.Exporter.TLS.MinVersion = "1.3" }, "exporter.tls"),
 		Entry("tls minVersion", func(s *settings.Settings) { s.Exporter.TLS.MinVersion = "1.1" }, "exporter.tls.minVersion"),
 		Entry("protocol", func(s *settings.Settings) { s.Exporter.Protocol = "http/json" }, "exporter.protocol"),
 		Entry("compression", func(s *settings.Settings) { s.Exporter.Compression = "zstd" }, "exporter.compression"),

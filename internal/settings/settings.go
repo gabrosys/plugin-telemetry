@@ -216,14 +216,10 @@ func (s Settings) validateExporter() []error {
 	var errs []error
 	e := s.Exporter
 
-	switch e.Protocol {
-	case ProtocolHTTP, ProtocolGRPC:
-	default:
+	if !slices.Contains([]string{ProtocolHTTP, ProtocolGRPC}, e.Protocol) {
 		errs = append(errs, fmt.Errorf("exporter.protocol: must be %q or %q, got %q", ProtocolHTTP, ProtocolGRPC, e.Protocol))
 	}
-	switch e.Compression {
-	case "gzip", "none":
-	default:
+	if !slices.Contains([]string{"gzip", "none"}, e.Compression) {
 		errs = append(errs, fmt.Errorf(`exporter.compression: must be "gzip" or "none", got %q`, e.Compression))
 	}
 	if e.Interval < minInterval {
@@ -236,9 +232,7 @@ func (s Settings) validateExporter() []error {
 		errs = append(errs, fmt.Errorf("exporter.maxPointsPerRequest: must be at least 1, got %d", e.MaxPointsPerRequest))
 	}
 
-	switch e.TLS.MinVersion {
-	case "1.2", "1.3":
-	default:
+	if !slices.Contains([]string{"1.2", "1.3"}, e.TLS.MinVersion) {
 		errs = append(errs, fmt.Errorf(`exporter.tls.minVersion: must be "1.2" or "1.3", got %q`, e.TLS.MinVersion))
 	}
 	if (e.TLS.CertFile == "") != (e.TLS.KeyFile == "") {
@@ -314,10 +308,15 @@ func RedactEndpoint(endpoint string) string {
 	return u.Redacted()
 }
 
-// tlsConfigured reports whether any TLS option other than the default minVersion is set.
+// defaultMinVersion is the TLS minimum version when the file sets none.
+const defaultMinVersion = "1.2"
+
+// tlsConfigured reports whether any TLS option is set; a minVersion equal to the default is not one.
 func (e Exporter) tlsConfigured() bool {
 	t := e.TLS
-	t.MinVersion = ""
+	if t.MinVersion == defaultMinVersion {
+		t.MinVersion = ""
+	}
 	return !t.isZero()
 }
 

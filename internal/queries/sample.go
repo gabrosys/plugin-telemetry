@@ -3,6 +3,8 @@ package queries
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"unicode/utf8"
 
@@ -75,7 +77,7 @@ func (d *Definition) RowSamples(
 		return nil, dropped
 	}
 
-	for _, name := range sortedKeys(d.Columns) {
+	for _, name := range slices.Sorted(maps.Keys(d.Columns)) {
 		column := d.Columns[name]
 		if column.Role != RoleValue {
 			continue

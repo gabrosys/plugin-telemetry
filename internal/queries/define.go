@@ -5,7 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -174,11 +175,7 @@ func Define(key string, q UserQuery, opts Options) Definition {
 		}
 	}
 
-	fingerprint, err := def.fingerprint(sources)
-	if err != nil {
-		def.Disabled = fmt.Sprintf("fingerprint: %v", err)
-	}
-	def.Fingerprint = fingerprint
+	def.Fingerprint = def.fingerprint(sources)
 
 	return def
 }
@@ -189,7 +186,7 @@ func (d *Definition) addColumns(key string, q UserQuery, sensitive bool) map[str
 	sources := make(map[string]string)
 
 	for _, item := range q.Metrics {
-		for _, columnName := range sortedKeys(item) {
+		for _, columnName := range slices.Sorted(maps.Keys(item)) {
 			cm := item[columnName]
 
 			var versions *semver.Constraints
@@ -274,30 +271,13 @@ func (d *Definition) mapping(columnName string, cm ColumnMapping) map[string]flo
 		}
 	}
 
-	out := make(map[string]float64, len(chosen))
-	for k, v := range chosen {
-		out[k] = v
-	}
-
-	return out
+	return maps.Clone(chosen)
 }
 
 // numberMap converts a decoded YAML mapping whose values are all numbers.
 func numberMap(v any) (map[string]float64, bool) {
-	var raw map[string]any
-	switch m := v.(type) {
-	case map[string]any:
-		raw = m
-	case map[any]any:
-		raw = make(map[string]any, len(m))
-		for k, val := range m {
-			key, ok := k.(string)
-			if !ok {
-				return nil, false
-			}
-			raw[key] = val
-		}
-	default:
+	raw, ok := v.(map[string]any)
+	if !ok {
 		return nil, false
 	}
 
@@ -325,7 +305,7 @@ func (d *Definition) labelColumns(q UserQuery) []string {
 	var labels []string
 	seen := make(map[string]struct{})
 	for _, item := range q.Metrics {
-		for _, columnName := range sortedKeys(item) {
+		for _, columnName := range slices.Sorted(maps.Keys(item)) {
 			if _, done := seen[columnName]; done {
 				continue
 			}
@@ -337,16 +317,6 @@ func (d *Definition) labelColumns(q UserQuery) []string {
 	}
 
 	return labels
-}
-
-func sortedKeys[V any](m map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	return keys
 }
 
 type canonicalColumn struct {
@@ -370,7 +340,7 @@ type canonicalDefinition struct {
 
 // fingerprint hashes what shapes samples: namespace, SQL, predicate, primary-only and the columns. Written from plain values
 // (version constraints by source text, sorted columns, mapping values as text) so it is stable across runs.
-func (d *Definition) fingerprint(versionSources map[string]string) (string, error) {
+func (d *Definition) fingerprint(versionSources map[string]string) string {
 	canonical := canonicalDefinition{
 		Namespace:   d.Namespace,
 		SQL:         d.SQL,
@@ -378,7 +348,7 @@ func (d *Definition) fingerprint(versionSources map[string]string) (string, erro
 		PrimaryOnly: d.PrimaryOnly,
 		Columns:     []canonicalColumn{},
 	}
-	for _, name := range sortedKeys(d.Columns) {
+	for _, name := range slices.Sorted(maps.Keys(d.Columns)) {
 		column := d.Columns[name]
 		mapping := make(map[string]string, len(column.Mapping))
 		for k, v := range column.Mapping {
@@ -396,11 +366,9 @@ func (d *Definition) fingerprint(versionSources map[string]string) (string, erro
 		})
 	}
 
-	encoded, err := json.Marshal(canonical)
-	if err != nil {
-		return "", fmt.Errorf("encode definition: %w", err)
-	}
+	// Strings, a bool and string maps always encode.
+	encoded, _ := json.Marshal(canonical)
 	sum := sha256.Sum256(encoded)
 
-	return hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(sum[:])
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	clocktesting "k8s.io/utils/clock/testing"
@@ -132,6 +133,43 @@ var _ = Describe("GatherFacts", func() {
 		_, err = planner.GatherFacts(cancelled, conn, pool.Guard())
 		Expect(err).To(MatchError(context.Canceled))
 	})
+
+	It("fails the round with the guard's error when the guard fails", func(ctx SpecContext) {
+		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1, time.Minute,
+			clocktesting.NewFakePassiveClock(time.Now()))
+		DeferCleanup(pool.Close)
+		conn, release, err := pool.Acquire(ctx, "postgres")
+		Expect(err).NotTo(HaveOccurred())
+		defer release(true)
+
+		_, err = planner.GatherFacts(ctx, conn, "SELECT pg_catalog.no_such_guard()")
+		Expect(err).To(MatchError(ContainSubstring("set the facts transaction limits")))
+		var pgErr *pgconn.PgError
+		Expect(errors.As(err, &pgErr)).To(BeTrue(), "error: %v", err)
+		Expect(pgErr.Code).To(Equal("42883"))
+	})
+
+	It("bounds the rollback when the server never sees it", func(ctx SpecContext) {
+		proxy, err := pgtest.StartProxy(ctx, server.Host, server.Port)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(proxy.Close)
+		cfg := server.MonitorConfig(GinkgoT().TempDir())
+		cfg.Host, cfg.Port = proxy.Host, proxy.Port
+		pool := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()))
+		DeferCleanup(pool.Close)
+		conn, release, err := pool.Acquire(ctx, "postgres")
+		Expect(err).NotTo(HaveOccurred())
+		defer release(true)
+
+		long, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		start := time.Now()
+		_, err = planner.GatherFacts(long, conn, "SELECT pg_catalog.no_such_guard()")
+		// The 2s rollback bound, then pgx's 2s socket deadline after its cancel request, plus a margin.
+		Expect(time.Since(start)).To(BeNumerically("<", 6*time.Second))
+		Expect(err).To(MatchError(ContainSubstring("set the facts transaction limits")))
+		Expect(err).To(MatchError(ContainSubstring("roll back facts transaction")))
+	}, SpecTimeout(20*time.Second))
 
 	// renameBad renames a database from a SQL_ASCII database, whose sessions pass bytes above 127 unchecked
 	// (PostgreSQL 18, "Character Set Support"); the docker exec API cannot carry such a byte in an argument.

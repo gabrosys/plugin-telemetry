@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"time"
 	"unicode/utf8"
 
 	"github.com/Masterminds/semver/v3"
@@ -37,6 +38,9 @@ func ParseVersionNum(s string) (semver.Version, error) {
 	}
 	return *semver.New(n/10000, (n/100)%100, n%100, "", ""), nil
 }
+
+// rollbackTimeout bounds the rollback of an unfinished facts transaction.
+const rollbackTimeout = 2 * time.Second
 
 // databasesQuery is CloudNativePG's (pkg/management/postgres/metrics/collector.go:286 at v1.30.1).
 const databasesQuery = `SELECT datname, pg_catalog.has_database_privilege(datname, 'CONNECT')
@@ -115,7 +119,9 @@ func gatherFacts(ctx context.Context, conn *pgx.Conn, guard string, settings map
 		return Facts{}, fmt.Errorf("begin facts transaction: %w", err)
 	}
 	defer func() {
-		if rbErr := tx.Rollback(context.WithoutCancel(ctx)); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
+		rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+		defer cancel()
+		if rbErr := tx.Rollback(rbCtx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
 			err = errors.Join(err, fmt.Errorf("roll back facts transaction: %w", rbErr))
 		}
 	}()

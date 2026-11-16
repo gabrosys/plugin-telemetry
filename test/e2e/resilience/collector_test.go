@@ -41,13 +41,6 @@ func perPod(readings []framework.Usage, pods int) (workingSets, rss [][]uint64) 
 	return workingSets, rss
 }
 
-// median returns the middle value of values, the upper one when their number is even.
-func median(values []uint64) uint64 {
-	sorted := slices.Sorted(slices.Values(values))
-
-	return sorted[len(sorted)/2]
-}
-
 // series formats SampleUsage readings, taken in pod order, as one line per tick: the offset from the first tick,
 // then each pod's working set and RSS in bytes.
 func series(readings []framework.Usage, pods int) string {
@@ -121,11 +114,11 @@ func collectorSpecs(s *suite) {
 		var breaches []string
 		soft := NewGomega(func(message string, _ ...int) { breaches = append(breaches, message) })
 		for i, pod := range pods {
-			steady, outage := median(steadyWS[i]), median(outageWS[i])
+			steady, outage := framework.StatOf(steadyWS[i]).Median, framework.StatOf(outageWS[i]).Median
 			AddReportEntry("working set "+pod.Name, fmt.Sprintf("steady median %d, outage median %d, min %d, max %d bytes",
 				steady, outage, slices.Min(outageWS[i]), slices.Max(outageWS[i])))
 			AddReportEntry("rssBytes "+pod.Name, fmt.Sprintf("steady %d, min %d, max %d bytes",
-				median(steadyRSS[i]), slices.Min(outageRSS[i]), slices.Max(outageRSS[i])))
+				framework.StatOf(steadyRSS[i]).Median, slices.Min(outageRSS[i]), slices.Max(outageRSS[i])))
 			soft.Expect(float64(outage)).To(BeNumerically("<=", growthLimit*float64(steady)), "median working set of %s", pod.Name)
 		}
 

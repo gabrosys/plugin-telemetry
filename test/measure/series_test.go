@@ -78,7 +78,7 @@ func sidecarTermination(pod *corev1.Pod) string {
 	return ""
 }
 
-var _ = Describe("the sidecar at maxSeriesTotal 50000", Ordered, func() {
+var _ = Describe("the telemetry container at maxSeriesTotal 50000", Ordered, func() {
 	It("holds 48000 to 50000 series within the default 64Mi limit", func(ctx SpecContext) {
 		Expect(settings.Defaults().Limits.MaxSeriesTotal).To(Equal(50000))
 		env, err := framework.LoadEnv(os.Getenv)

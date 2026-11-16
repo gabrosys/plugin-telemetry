@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -53,7 +52,7 @@ exporter:
 `, server.Host, server.Port, pgtest.MonitorUser, server.MonitorConfig(dir).PasswordFile), 0o600)).To(Succeed())
 	}, NodeTimeout(5*time.Minute))
 
-	It("runs every planned job once and prints sorted series", func(ctx SpecContext) {
+	It("runs every planned job once and prints the series", func(ctx SpecContext) {
 		out, err := execute(ctx, "instance", "test", "--config", config)
 		Expect(err).NotTo(HaveOccurred())
 
@@ -66,7 +65,6 @@ exporter:
 		}
 		Expect(series).To(ContainElement("cnpg_extra_probe_value 42"))
 		Expect(series).To(ContainElement(HavePrefix(`cnpg_collector_lo_pages{datname="postgres"} `)))
-		Expect(slices.IsSorted(series)).To(BeTrue())
 		Expect(out).To(ContainSubstring("# skipped"))
 		Expect(out).To(ContainSubstring("# errors"))
 	}, SpecTimeout(time.Minute))

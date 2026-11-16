@@ -107,7 +107,7 @@ func Snapshot(ctx context.Context, o Options) (*Source, error) {
 		return nil, err
 	}
 	if client == nil {
-		return nil, fmt.Errorf("wait for the sidecar token: %w", ctx.Err())
+		return nil, fmt.Errorf("sidecar token %s did not appear: %w", filepath.Join(s.o.TokenDir, "token"), ctx.Err())
 	}
 
 	return s.snapshot(ctx, client)

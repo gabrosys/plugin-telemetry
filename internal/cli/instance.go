@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
 	"github.com/go-logr/logr"
@@ -45,6 +46,9 @@ type kubeSource interface {
 	Start(ctx context.Context) error
 }
 
+// snapshotTimeout bounds the token wait and the reads of the tools.
+const snapshotTimeout = 15 * time.Second
+
 // newKubeSource and snapshotKubeSource build the Kubernetes source; specs replace them.
 var (
 	newKubeSource = func(o kubesource.Options) kubeSource {
@@ -53,7 +57,7 @@ var (
 	snapshotKubeSource = func(ctx context.Context, o kubesource.Options) (engine.Config, error) {
 		src, err := kubesource.Snapshot(ctx, o)
 		if err != nil {
-			return nil, fmt.Errorf("kubernetes snapshot: %w", err)
+			return nil, err //nolint:wrapcheck // open adds the context
 		}
 		return src, nil
 	}
@@ -76,7 +80,7 @@ func kubeOptions(getenv func(string) string) (kubesource.Options, error) {
 	}
 	host, port := value("KUBERNETES_SERVICE_HOST"), value("KUBERNETES_SERVICE_PORT")
 	if len(missing) > 0 {
-		return kubesource.Options{}, fmt.Errorf("environment variable not set: %s", strings.Join(missing, ", "))
+		return kubesource.Options{}, fmt.Errorf("environment variable not set: %s; outside the Pod pass --config", strings.Join(missing, ", "))
 	}
 	o.APIServer = "https://" + net.JoinHostPort(host, port)
 
@@ -94,7 +98,16 @@ func (f *instanceFlags) open() (func(context.Context) (engine.Config, error), er
 		return nil, err
 	}
 
-	return func(ctx context.Context) (engine.Config, error) { return snapshotKubeSource(ctx, o) }, nil
+	return func(ctx context.Context) (engine.Config, error) {
+		ctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
+		defer cancel()
+		cfg, err := snapshotKubeSource(ctx, o)
+		if err != nil {
+			return nil, fmt.Errorf("kubernetes snapshot: %w", err)
+		}
+
+		return cfg, nil
+	}, nil
 }
 
 // setMemoryLimit applies the memory limit; specs replace it.
@@ -121,7 +134,7 @@ func newInstanceCommand() *cobra.Command {
 			// In Kubernetes mode the sidecar logs its own problems and idles; exiting would restart the container.
 			o, err := kubeOptions(os.Getenv)
 			if err != nil {
-				logger.Info("the Kubernetes source is not configured", "error", err.Error())
+				logger.Error(err, "the Kubernetes source is not configured")
 				<-ctx.Done()
 
 				return nil

@@ -50,7 +50,7 @@ var _ = Describe("instance --config", func() {
 			_, err := execute(ctx, "instance", "--config", testdata("engine-valid.yaml"))
 			done <- err
 		}()
-		time.Sleep(200 * time.Millisecond)
+		Consistently(done, 200*time.Millisecond).ShouldNot(Receive())
 		cancel()
 		Eventually(done, 20*time.Second).Should(Receive(BeNil()))
 		Expect(calls).To(Equal(1))

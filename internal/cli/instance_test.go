@@ -26,14 +26,14 @@ var _ = Describe("instance command", func() {
 		done := make(chan error, 1)
 		go func() { done <- cmd.ExecuteContext(ctx) }()
 
-		time.Sleep(100 * time.Millisecond)
+		Consistently(done, 100*time.Millisecond).ShouldNot(Receive())
 		cancel()
 		Eventually(done, time.Second).Should(Receive(BeNil()))
 	})
 })
 
 var _ = Describe("instance preflight command", func() {
-	It("prints one JSON line with the pg part even when it cannot connect", func() {
+	It("prints one JSON line with the postgres and kube parts when neither can be reached", func() {
 		GinkgoT().Setenv("KUBERNETES_SERVICE_HOST", "")
 		var out bytes.Buffer
 		cmd := cli.NewRootCommand()

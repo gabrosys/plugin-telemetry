@@ -179,7 +179,7 @@ var _ = Describe("instance in Kubernetes mode", func() {
 		Eventually(done, 20*time.Second).Should(Receive(BeNil()))
 	})
 
-	DescribeTable("logs the variable and idles instead of exiting when the environment is incomplete",
+	DescribeTable("logs the variable at error level and idles when the environment is incomplete",
 		func(unset string) {
 			setKubeEnv()
 			GinkgoT().Setenv(unset, "")
@@ -195,7 +195,11 @@ var _ = Describe("instance in Kubernetes mode", func() {
 			Eventually(func(g Gomega) {
 				raw, err := os.ReadFile(logFile) //nolint:gosec // a file the spec created
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(string(raw)).To(ContainSubstring(unset))
+				g.Expect(string(raw)).To(And(
+					ContainSubstring(unset),
+					ContainSubstring(`"level":"error"`),
+					ContainSubstring("outside the Pod pass --config"),
+				))
 			}).WithTimeout(5 * time.Second).Should(Succeed())
 			Consistently(done, 300*time.Millisecond).ShouldNot(Receive())
 			cancel()
@@ -319,9 +323,31 @@ var _ = Describe("instance tools in Kubernetes mode", func() {
 		useSnapshot(newFakeKube("engine-valid.yaml", nil, nil))
 		for _, sub := range []string{"validate", "test", "print-config"} {
 			_, err := execute(context.Background(), "instance", sub)
-			Expect(err).To(MatchError(ContainSubstring("CLUSTER_NAME")), sub)
+			Expect(err).To(MatchError(And(ContainSubstring("CLUSTER_NAME"), HaveSuffix("; outside the Pod pass --config"))), sub)
 		}
 		Expect(gotOptions).To(BeEmpty())
+	})
+
+	It("names a snapshot failure once and gives the snapshot a deadline", func() {
+		var deadline time.Time
+		var hasDeadline bool
+		DeferCleanup(cli.SetKubeSources(
+			func(kubesource.Options) cli.KubeSource {
+				Fail("unexpected run")
+				return nil
+			},
+			func(ctx context.Context, _ kubesource.Options) (engine.Config, error) {
+				deadline, hasDeadline = ctx.Deadline()
+				return nil, errors.New("sidecar token /t/token did not appear: context deadline exceeded")
+			}))
+		for _, sub := range []string{"validate", "test", "print-config"} {
+			hasDeadline = false
+			out, err := execute(context.Background(), "instance", sub)
+			Expect(err).To(HaveOccurred(), sub)
+			Expect(strings.Count(out+err.Error(), "kubernetes snapshot:")).To(Equal(1), sub)
+			Expect(hasDeadline).To(BeTrue(), sub)
+			Expect(time.Until(deadline)).To(BeNumerically("<=", cli.SnapshotTimeout), sub)
+		}
 	})
 
 	It("never prints the content of a malformed Secret-backed source", func() {

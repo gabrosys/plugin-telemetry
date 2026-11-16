@@ -20,9 +20,6 @@ const (
 	IdentityReconciles = "cnpg_otel_plugin_identity_reconciles_total"
 )
 
-// contextForRecord is the context for histogram recordings; Export has no caller context.
-var contextForRecord = context.Background()
-
 // cardinalityLimit is the most series one instrument reports per collection (the SDK default is 2000).
 const cardinalityLimit = 10000
 
@@ -47,6 +44,15 @@ func Views() []sdkmetric.View {
 	}
 }
 
+// hasReader reports whether points knows the metric called name.
+func (s *Stats) hasReader(name string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.points(name)
+
+	return ok
+}
+
 type observed struct {
 	name    string
 	counter metric.Int64Observable
@@ -65,9 +71,9 @@ func register(m metric.Meter, s *Stats, ms []Metric) error {
 	var obs []observed
 	var instruments []metric.Observable
 	for _, def := range ms {
-		switch Instrument(def.Instrument) {
+		switch def.Instrument {
 		case InstrumentCounter:
-			if _, ok := s.points(def.Name); !ok {
+			if !s.hasReader(def.Name) {
 				return fmt.Errorf("metric %s: no reader", def.Name)
 			}
 			c, err := m.Int64ObservableCounter(def.Name, metric.WithUnit(def.Unit), metric.WithDescription(def.Description))
@@ -77,7 +83,7 @@ func register(m metric.Meter, s *Stats, ms []Metric) error {
 			obs = append(obs, observed{name: def.Name, counter: c})
 			instruments = append(instruments, c)
 		case InstrumentGauge:
-			if _, ok := s.points(def.Name); !ok {
+			if !s.hasReader(def.Name) {
 				return fmt.Errorf("metric %s: no reader", def.Name)
 			}
 			g, err := m.Float64ObservableGauge(def.Name, metric.WithUnit(def.Unit), metric.WithDescription(def.Description))
@@ -104,9 +110,12 @@ func register(m metric.Meter, s *Stats, ms []Metric) error {
 		}
 	}
 
+	// The callback lives as long as the MeterProvider.
 	_, err := m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
 		for _, ob := range obs {
-			pts, _ := s.points(ob.name)
+			pts, _ := s.points(ob.name) // register guarantees ok
 			for _, p := range pts {
 				opt := metric.WithAttributes(p.attrs...)
 				if ob.counter != nil {

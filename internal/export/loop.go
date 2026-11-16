@@ -56,12 +56,12 @@ func (l *Loop) Run(ctx context.Context) error {
 			rec := l.record(selfmetrics.OutcomeError)
 			rec.Duration = l.clk.Since(started)
 			rec.ErrorType = errorTypeOther
-			l.stats.Export(rec) //nolint:contextcheck // Stats.Export takes no context
+			l.stats.Export(ctx, rec)
 		}
 
 		next = at.Add(l.interval)
 		for end := l.clk.Now(); !next.After(end); next = next.Add(l.interval) {
-			l.stats.Export(l.record(selfmetrics.OutcomeSkipped)) //nolint:contextcheck // Stats.Export takes no context
+			l.stats.Export(ctx, l.record(selfmetrics.OutcomeSkipped))
 		}
 	}
 }
@@ -105,7 +105,7 @@ func (l *Loop) tick(ctx context.Context, at time.Time) {
 		rec := l.record(selfmetrics.OutcomeError)
 		rec.Duration = l.clk.Since(start)
 		rec.ErrorType = errorTypeOther
-		l.stats.Export(rec) //nolint:contextcheck // Stats.Export takes no context
+		l.stats.Export(ctx, rec)
 		return
 	}
 	rm.Resource = l.res
@@ -148,7 +148,7 @@ func (l *Loop) send(ctx context.Context, b *metricdata.ResourceMetrics) {
 			l.failed(errorType, func() { logger.Error(err, "export metrics", "error.type", errorType) })
 		}
 	}
-	l.stats.Export(rec) //nolint:contextcheck // Stats.Export takes no context
+	l.stats.Export(ctx, rec)
 }
 
 // failed marks the tick failed and calls logFn unless the last failed export was of the same kind.

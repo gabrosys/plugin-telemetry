@@ -33,12 +33,12 @@ const (
 
 // Metric describes one self-metric.
 type Metric struct {
-	Component   Component `yaml:"component"`
-	Name        string    `yaml:"name"`
-	Instrument  string    `yaml:"instrument"`
-	Unit        string    `yaml:"unit"`
-	Description string    `yaml:"description"`
-	Attributes  []string  `yaml:"attributes"`
+	Component   Component  `yaml:"component"`
+	Name        string     `yaml:"name"`
+	Instrument  Instrument `yaml:"instrument"`
+	Unit        string     `yaml:"unit"`
+	Description string     `yaml:"description"`
+	Attributes  []string   `yaml:"attributes"`
 }
 
 //go:embed catalogue.yaml

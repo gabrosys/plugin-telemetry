@@ -77,7 +77,7 @@ test-integration: ## Run the tests that need Docker (PostgreSQL in a container)
 
 .PHONY: generate
 generate: ## Regenerate docs/self-metrics.md, the deepcopy code and the CRDs
-	$(GO) run ./internal/selfmetrics/gen > docs/self-metrics.md
+	@mkdir -p $(BIN) && $(GO) run ./internal/selfmetrics/gen > $(BIN)/self-metrics.md && mv $(BIN)/self-metrics.md docs/self-metrics.md
 	$(GO) run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION) object crd:allowDangerousTypes=true paths=./api/... output:crd:dir=config/crd
 
 .PHONY: image

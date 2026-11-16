@@ -53,7 +53,7 @@ var _ = Describe("Catalogue", func() {
 		got := make([]row, 0, len(want))
 		seen := map[string]bool{}
 		for _, m := range selfmetrics.ByComponent(selfmetrics.ComponentEngine) {
-			got = append(got, row{m.Name, m.Instrument, m.Unit, m.Attributes})
+			got = append(got, row{m.Name, string(m.Instrument), m.Unit, m.Attributes})
 			Expect(seen).NotTo(HaveKey(m.Name))
 			seen[m.Name] = true
 			Expect(m.Description).NotTo(BeEmpty(), m.Name)
@@ -68,7 +68,7 @@ var _ = Describe("Catalogue", func() {
 		}
 		var got []row
 		for _, m := range selfmetrics.ByComponent(selfmetrics.ComponentPlugin) {
-			got = append(got, row{m.Name, m.Instrument, m.Unit, m.Attributes})
+			got = append(got, row{m.Name, string(m.Instrument), m.Unit, m.Attributes})
 			Expect(m.Description).NotTo(BeEmpty(), m.Name)
 		}
 		Expect(got).To(Equal([]row{
@@ -76,6 +76,13 @@ var _ = Describe("Catalogue", func() {
 			{"cnpg_otel_plugin_hook_duration_seconds", "histogram", "s", []string{"service", "operation"}},
 			{"cnpg_otel_plugin_identity_reconciles_total", "counter", "{reconcile}", []string{"outcome", "reason"}},
 		}))
+	})
+
+	It("gives every metric a known instrument", func() {
+		for _, m := range selfmetrics.Catalogue() {
+			Expect(m.Instrument).To(BeElementOf(
+				selfmetrics.InstrumentCounter, selfmetrics.InstrumentGauge, selfmetrics.InstrumentHistogram), m.Name)
+		}
 	})
 
 	It("gives every metric a known component", func() {
@@ -109,7 +116,7 @@ var _ = Describe("Catalogue", func() {
 
 	It("leaves the unit cell empty for a metric without a unit", func() {
 		var buf bytes.Buffer
-		Expect(selfmetrics.Render(&buf, []selfmetrics.Metric{{Name: "m", Component: selfmetrics.ComponentEngine, Instrument: "gauge", Description: "d"}})).To(Succeed())
+		Expect(selfmetrics.Render(&buf, []selfmetrics.Metric{{Name: "m", Component: selfmetrics.ComponentEngine, Instrument: selfmetrics.InstrumentGauge, Description: "d"}})).To(Succeed())
 		Expect(buf.String()).To(HaveSuffix("| `m` | gauge |  |  | d |\n"))
 	})
 

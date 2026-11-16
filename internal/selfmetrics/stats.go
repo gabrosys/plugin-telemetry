@@ -1,6 +1,7 @@
 package selfmetrics
 
 import (
+	"context"
 	"maps"
 	"strconv"
 	"sync"
@@ -205,7 +206,7 @@ func (s *Stats) ConfigGeneration(generation uint64, hash string) {
 
 // Export records one export operation. Skipped exports only count in the export total. The last
 // success time moves only when the backend accepted at least one point.
-func (s *Stats) Export(r ExportRecord) {
+func (s *Stats) Export(ctx context.Context, r ExportRecord) {
 	s.mu.Lock()
 	s.exports[r.Outcome]++
 	if r.Outcome == OutcomeSkipped {
@@ -230,7 +231,7 @@ func (s *Stats) Export(r ExportRecord) {
 	s.mu.Unlock()
 
 	if hist != nil {
-		hist.Record(contextForRecord, seconds(r.Duration), metric.WithAttributes(exportAttributes(r)...))
+		hist.Record(ctx, seconds(r.Duration), metric.WithAttributes(exportAttributes(r)...))
 	}
 }
 
@@ -290,10 +291,8 @@ func exportAttributes(r ExportRecord) []attribute.KeyValue {
 	return attrs
 }
 
-// points returns the current points of the catalogue metric called name.
+// points returns the current points of the catalogue metric called name. The caller holds s.mu.
 func (s *Stats) points(name string) ([]point, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	var out []point
 	qd := func(k queryDB) []attribute.KeyValue {
 		return []attribute.KeyValue{attribute.String("query", k.query), attribute.String("database", k.database)}

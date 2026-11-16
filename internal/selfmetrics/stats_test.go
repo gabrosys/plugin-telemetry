@@ -80,10 +80,10 @@ var _ = Describe("Stats", func() {
 			Outcome: selfmetrics.OutcomeOK, Duration: 20 * time.Millisecond, At: at, Points: 10,
 			ComponentType: "otlp_grpc_metric_exporter", ServerAddress: "collector", ServerPort: 4317,
 		}
-		stats.Export(export)
+		stats.Export(context.Background(), export)
 		export.Outcome = selfmetrics.OutcomeError
 		export.ErrorType = "timeout"
-		stats.Export(export)
+		stats.Export(context.Background(), export)
 		stats.Collection(true, time.Second)
 
 		got := collect()
@@ -245,14 +245,14 @@ var _ = Describe("Stats", func() {
 		ok := base
 		ok.Outcome = selfmetrics.OutcomeOK
 		ok.Rejected = 4
-		stats.Export(ok)
+		stats.Export(context.Background(), ok)
 		failed := base
 		failed.Outcome = selfmetrics.OutcomeError
 		failed.ErrorType = "unavailable"
-		stats.Export(failed)
+		stats.Export(context.Background(), failed)
 		skipped := base
 		skipped.Outcome = selfmetrics.OutcomeSkipped
-		stats.Export(skipped)
+		stats.Export(context.Background(), skipped)
 
 		got := collect()
 		Expect(points(got["cnpg_otel_exports_total"])).To(Equal(map[string]float64{
@@ -290,7 +290,7 @@ var _ = Describe("Stats", func() {
 			return points(m)
 		}
 		export := func(at time.Time, pts, rejected int) {
-			stats.Export(selfmetrics.ExportRecord{
+			stats.Export(context.Background(), selfmetrics.ExportRecord{
 				Outcome: selfmetrics.OutcomeOK, At: at, Points: pts, Rejected: rejected,
 				ComponentType: "otlp_http_metric_exporter", ServerAddress: "collector", ServerPort: 4318,
 			})
@@ -345,8 +345,8 @@ var _ = Describe("Stats", func() {
 		}
 		withCode := base
 		withCode.HTTPStatusCode = 200
-		stats.Export(base)
-		stats.Export(withCode)
+		stats.Export(context.Background(), base)
+		stats.Export(context.Background(), withCode)
 
 		hist, isHist := collect()["otel.sdk.exporter.operation.duration"].Data.(metricdata.Histogram[float64])
 		Expect(isHist).To(BeTrue())
@@ -422,6 +422,38 @@ var _ = Describe("Stats", func() {
 		Expect(points(got["cnpg_otel_query_interval_seconds"])).To(Equal(map[string]float64{"query=q": 60}))
 	})
 
+	It("reads every metric from one snapshot", func() {
+		const perExport = 10
+		ok := selfmetrics.ExportRecord{Outcome: selfmetrics.OutcomeOK, Points: perExport}
+
+		stats.Export(context.Background(), ok) // both metrics exist from the first collection on
+
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 5000 {
+				stats.Export(context.Background(), ok)
+			}
+		}()
+
+		sum := func(m metricdata.Metrics) float64 {
+			total := 0.0
+			for _, v := range points(m) {
+				total += v
+			}
+
+			return total
+		}
+		for range 500 {
+			got := collect()
+			exported := sum(got["otel.sdk.exporter.metric_data_point.exported"])
+			exports := points(got["cnpg_otel_exports_total"])["outcome=ok"]
+			Expect(exported).To(Equal(perExport*exports), "exported points and export count come from different moments")
+		}
+		wg.Wait()
+	})
+
 	It("is safe for concurrent use", func() {
 		var wg sync.WaitGroup
 		for i := range 8 {
@@ -431,7 +463,7 @@ var _ = Describe("Stats", func() {
 				defer GinkgoRecover()
 				for range 100 {
 					stats.QueryRun("q", "app", selfmetrics.OutcomeOK, time.Millisecond, at)
-					stats.Export(selfmetrics.ExportRecord{Outcome: selfmetrics.OutcomeOK, Duration: time.Millisecond, Points: i})
+					stats.Export(context.Background(), selfmetrics.ExportRecord{Outcome: selfmetrics.OutcomeOK, Duration: time.Millisecond, Points: i})
 					stats.Retain(map[selfmetrics.QueryDatabase]bool{{Query: "q", Database: "app"}: true})
 					collect()
 				}
@@ -458,7 +490,7 @@ var _ = Describe("Register", func() {
 		ms := append(selfmetrics.ByComponent(selfmetrics.ComponentEngine), selfmetrics.Metric{
 			Component:  selfmetrics.ComponentEngine,
 			Name:       "cnpg_otel_test_orphan",
-			Instrument: string(selfmetrics.InstrumentCounter),
+			Instrument: selfmetrics.InstrumentCounter,
 		})
 
 		err := selfmetrics.RegisterMetrics(provider.Meter("test"), selfmetrics.NewStats(), ms)

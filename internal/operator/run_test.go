@@ -10,12 +10,14 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cloudnative-pg/cnpg-i/pkg/identity"
@@ -192,6 +194,7 @@ func canDial(addr string) bool {
 var _ = Describe("Run", func() {
 	var (
 		pki    *testPKI
+		addrMu sync.Mutex // guards addr
 		addr   string
 		waiter *fakeWaiter
 		images operator.ImageWaiter
@@ -204,22 +207,42 @@ var _ = Describe("Run", func() {
 		return operator.Deps{Cache: caches, Status: &operator.Status{}}
 	}
 
+	address := func() string {
+		addrMu.Lock()
+		defer addrMu.Unlock()
+
+		return addr
+	}
+
+	// start runs Run on a new address when freeAddress was taken in the meantime.
 	start := func() {
 		var ctx context.Context
 		ctx, cancel = context.WithCancel(context.Background())
 		done = make(chan error, 1)
 		go func() {
-			done <- operator.Run(ctx, operator.Options{
-				ServerAddress:  addr,
-				ServerCertPath: pki.serverCert,
-				ServerKeyPath:  pki.serverKey,
-				ClientCAPath:   pki.clientCert,
-			}, images, deps())
+			defer GinkgoRecover()
+			for {
+				err := operator.Run(ctx, operator.Options{
+					ServerAddress:  address(),
+					ServerCertPath: pki.serverCert,
+					ServerKeyPath:  pki.serverKey,
+					ClientCAPath:   pki.clientCert,
+				}, images, deps())
+				if !errors.Is(err, syscall.EADDRINUSE) {
+					done <- err
+
+					return
+				}
+				next := freeAddress()
+				addrMu.Lock()
+				addr = next
+				addrMu.Unlock()
+			}
 		}()
 	}
 
 	dial := func(cfg *tls.Config) (*grpc.ClientConn, error) {
-		return grpc.NewClient(addr, grpc.WithTransportCredentials(credentials.NewTLS(cfg)))
+		return grpc.NewClient(address(), grpc.WithTransportCredentials(credentials.NewTLS(cfg)))
 	}
 
 	goodTLS := func() *tls.Config {
@@ -234,7 +257,9 @@ var _ = Describe("Run", func() {
 	BeforeEach(func() {
 		cancel, done = nil, nil
 		pki = newTestPKI()
+		addrMu.Lock()
 		addr = freeAddress()
+		addrMu.Unlock()
 		waiter = &fakeWaiter{ready: make(chan struct{})}
 		images = waiter
 		caches = &fakeCache{synced: make(chan struct{})}
@@ -245,15 +270,15 @@ var _ = Describe("Run", func() {
 			return
 		}
 		cancel()
-		Eventually(done, 5*time.Second).Should(Receive())
+		Eventually(done, 5*time.Second).Should(Receive(BeNil()))
 	})
 
 	It("does not listen before the sidecar image is known", func() {
 		start()
-		Consistently(func() bool { return canDial(addr) }, 500*time.Millisecond, 50*time.Millisecond).Should(BeFalse())
+		Consistently(func() bool { return canDial(address()) }, 500*time.Millisecond, 50*time.Millisecond).Should(BeFalse())
 		close(waiter.ready)
 		close(caches.synced)
-		Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
+		Eventually(func() bool { return canDial(address()) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
 	})
 
 	It("registers an informer for all seven cached kinds before it listens", func() {
@@ -263,15 +288,15 @@ var _ = Describe("Run", func() {
 			"*v1.Cluster", "*v1alpha1.TelemetryExporter",
 			"*v1.ServiceAccount", "*v1.Role", "*v1.RoleBinding", "*v1.Secret", "*v1.ConfigMap",
 		))
-		Expect(canDial(addr)).To(BeFalse())
+		Expect(canDial(address())).To(BeFalse())
 	})
 
 	It("does not listen before the caches have synced", func() {
 		close(waiter.ready)
 		start()
-		Consistently(func() bool { return canDial(addr) }, 500*time.Millisecond, 50*time.Millisecond).Should(BeFalse())
+		Consistently(func() bool { return canDial(address()) }, 500*time.Millisecond, 50*time.Millisecond).Should(BeFalse())
 		close(caches.synced)
-		Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
+		Eventually(func() bool { return canDial(address()) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
 	})
 
 	Context("once the image is known", func() {
@@ -279,7 +304,7 @@ var _ = Describe("Run", func() {
 			close(waiter.ready)
 			close(caches.synced)
 			start()
-			Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
+			Eventually(func() bool { return canDial(address()) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
 		})
 
 		It("serves identity over mTLS", func() {
@@ -395,7 +420,7 @@ var _ = Describe("Run", func() {
 			DeferCleanup(release)
 			close(caches.synced)
 			start()
-			Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
+			Eventually(func() bool { return canDial(address()) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
 
 			conn, err := dial(goodTLS())
 			Expect(err).NotTo(HaveOccurred())
@@ -416,7 +441,7 @@ var _ = Describe("Run", func() {
 		It("lets a call in flight finish after its context ends", func() {
 			cancel()
 			By("accepts no new connection once its context ends")
-			Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeFalse())
+			Eventually(func() bool { return canDial(address()) }, 5*time.Second, 50*time.Millisecond).Should(BeFalse())
 			By("finishing the call in flight after the dial is refused")
 			release()
 			Eventually(result, 5*time.Second).Should(Receive(BeNil()))
@@ -440,7 +465,7 @@ var _ = Describe("Run", func() {
 		close(waiter.ready)
 		close(caches.synced)
 		start()
-		Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
+		Eventually(func() bool { return canDial(address()) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
 		cancel()
 		Eventually(done, 5*time.Second).Should(Receive(BeNil()))
 		done <- nil
@@ -474,7 +499,7 @@ var _ = Describe("Run", func() {
 		done = make(chan error, 1)
 		go func() {
 			done <- operator.Run(ctx, operator.Options{
-				ServerAddress:  addr,
+				ServerAddress:  address(),
 				ServerCertPath: pki.serverCert,
 				ServerKeyPath:  pki.serverKey,
 				ClientCAPath:   pki.clientCert,
@@ -485,6 +510,15 @@ var _ = Describe("Run", func() {
 		close(waiter.ready)
 		close(caches.synced)
 		Eventually(logged, 5*time.Second).Should(ContainElement("sidecar image loaded, serving"))
+	})
+
+	It("returns nil when the context ends while it waits for the caches", func() {
+		close(waiter.ready)
+		start()
+		Eventually(caches.kinds, 5*time.Second).ShouldNot(BeEmpty())
+		cancel()
+		Eventually(done, 5*time.Second).Should(Receive(BeNil()))
+		done <- nil
 	})
 
 	It("returns nil when the context ends before the image is known", func() {

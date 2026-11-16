@@ -12,15 +12,10 @@ import (
 	"github.com/cloudnative-pg/machinery/pkg/log"
 	"google.golang.org/grpc"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-var (
-	// ErrCacheNotSynced is returned when the cache stops without syncing while ctx is still live.
-	ErrCacheNotSynced = errors.New("cache did not sync")
-	// ErrServerStopped is returned when the server stops while ctx is still live.
-	ErrServerStopped = errors.New("server stopped unexpectedly")
-)
+// ErrServerStopped is returned when the server stops while ctx is still live.
+var ErrServerStopped = errors.New("server stopped unexpectedly")
 
 // drainTimeout bounds how long a stop waits for the calls in flight; a variable so tests can shorten it.
 var drainTimeout = 10 * time.Second
@@ -42,7 +37,6 @@ type ImageWaiter interface {
 // Deps are the collaborators the services share.
 type Deps struct {
 	Cache  cache.Cache
-	Client client.Client
 	Status *Status
 	// Metrics records the lifecycle hook calls; nil records nothing.
 	Metrics *PluginMetrics
@@ -72,13 +66,8 @@ func Run(ctx context.Context, opts Options, images ImageWaiter, deps Deps) error
 			return err
 		}
 	}
-	if !deps.Cache.WaitForCacheSync(ctx) {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-			return ErrCacheNotSynced
-		}
+	if !deps.Cache.WaitForCacheSync(ctx) { // false only once ctx is done
+		return nil
 	}
 
 	logger.Info("sidecar image loaded, serving")

@@ -89,7 +89,6 @@ func newOperatorCommand() *cobra.Command {
 			g.Go(func() error {
 				return operator.Run(gctx, opts, store, operator.Deps{
 					Cache:   mgr.GetCache(),
-					Client:  mgr.GetClient(),
 					Status:  &operator.Status{Reader: mgr.GetCache(), Identity: ensurer, Metrics: metrics},
 					Metrics: metrics,
 				})

@@ -10,6 +10,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
@@ -101,12 +102,14 @@ var _ = Describe("Status.SetStatusInCluster", func() {
 	It("reports the exporter invalid with the first error", func() {
 		e := newExporterWithEndpoint()
 		e.Spec.Exporter.Endpoint = "ftp://c"
+		e.Spec.Metrics.Limits.MaxRowsPerQuery = ptr.To[int32](0)
 		objs = append([]client.Object{e}, identityObjects(true)...)
 
 		st := decode(call(status(), cluster))
 
 		Expect(st.ExporterState).To(Equal("invalid"))
-		Expect(st.Message).To(ContainSubstring("endpoint"))
+		Expect(st.Message).To(ContainSubstring("maxRowsPerQuery"))
+		Expect(st.Message).NotTo(ContainSubstring("endpoint"))
 	})
 
 	It("reports the exporter named by the parameters", func() {
@@ -287,10 +290,15 @@ var _ = Describe("Status.SetStatusInCluster", func() {
 
 	It("never returns an error, for undecodable input too", func() {
 		s := status()
+		ctx, all := captureAll(ctx, 2)
 
 		resp, err := s.SetStatusInCluster(ctx, &cnpgoperator.SetStatusInClusterRequest{Cluster: []byte("{")})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(resp.GetJsonStatus()).To(BeEmpty())
+		Expect(all()).To(ContainElement(SatisfyAll(
+			HaveKeyWithValue("msg", "decode set status request"),
+			HaveKey("error"),
+		)))
 
 		resp, err = s.SetStatusInCluster(ctx, &cnpgoperator.SetStatusInClusterRequest{})
 		Expect(err).NotTo(HaveOccurred())

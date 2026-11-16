@@ -76,6 +76,18 @@ func readManifests(file string) ([]manifest, error) {
 	}
 }
 
+// findAll returns every manifest of kind.
+func findAll(manifests []manifest, kind string) []manifest {
+	var out []manifest
+	for _, m := range manifests {
+		if m.Kind == kind {
+			out = append(out, m)
+		}
+	}
+
+	return out
+}
+
 func find(manifests []manifest, kind string) manifest {
 	GinkgoHelper()
 
@@ -88,6 +100,17 @@ func find(manifests []manifest, kind string) manifest {
 
 	return manifest{}
 }
+
+var _ = Describe("findAll", func() {
+	It("returns every manifest of the kind, in order", func() {
+		a, b := manifest{Kind: "Role"}, manifest{Kind: "Role"}
+		a.Metadata.Name, b.Metadata.Name = "a", "b"
+		in := []manifest{a, {Kind: "ClusterRole"}, b}
+
+		Expect(findAll(in, "Role")).To(Equal([]manifest{a, b}))
+		Expect(findAll(in, "Secret")).To(BeEmpty())
+	})
+})
 
 var _ = Describe("the plugin ClusterRole", func() {
 	var (
@@ -128,6 +151,20 @@ var _ = Describe("the plugin ClusterRole", func() {
 			Expect(r.Verbs).NotTo(ContainElements("bind"))
 			Expect(r.Verbs).NotTo(ContainElements("*"))
 			Expect(r.Resources).NotTo(ContainElements("*"))
+		}
+	})
+
+	It("holds one ClusterRole, and none grants serviceaccounts/token, escalate, bind or *", func() {
+		rbac, err := readManifests(rbacFile)
+		Expect(err).NotTo(HaveOccurred())
+
+		roles := findAll(rbac, "ClusterRole")
+		Expect(roles).To(HaveLen(1))
+		for _, r := range roles[0].Rules {
+			for _, banned := range []string{"serviceaccounts/token", "escalate", "bind", "*"} {
+				Expect(r.Resources).NotTo(ContainElement(banned))
+				Expect(r.Verbs).NotTo(ContainElement(banned))
+			}
 		}
 	})
 

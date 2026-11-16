@@ -25,13 +25,14 @@ import (
 
 // States in ClusterStatus.
 const (
-	exporterOK       = "ok"
-	exporterMissing  = "missing"
-	exporterInvalid  = "invalid"
-	identityReady    = "ready"
-	identityPending  = "pending"
-	statusLogMessage = "set status"
+	exporterOK      = "ok"
+	exporterMissing = "missing"
+	exporterInvalid = "invalid"
+	identityReady   = "ready"
+	identityPending = "pending"
 )
+
+const statusLogMessage = "set status"
 
 // ClusterStatus is what the plugin stores in the Cluster's status.pluginStatus. Its JSON is
 // deterministic: fixed field order, sorted problems, no timestamps.

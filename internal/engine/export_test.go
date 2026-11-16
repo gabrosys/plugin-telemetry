@@ -112,6 +112,19 @@ func RecordResult(ctx context.Context, res executor.Result) (kept bool, runs int
 	return kept, runs, errors.Join(err, e.mp.Shutdown(ctx))
 }
 
+// RecordAll records results in order for their planned jobs on one engine.
+func RecordAll(ctx context.Context, results ...executor.Result) error {
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, nil)
+	if err != nil {
+		return err
+	}
+	for _, res := range results {
+		e.plan.planned = map[snapshot.Key]string{{Query: res.Job.Query, Database: res.Job.Database}: res.Job.Fingerprint}
+		e.record(ctx, res)
+	}
+	return e.mp.Shutdown(ctx)
+}
+
 // RecordFailureBetweenSuccesses records an ok run of a counter at t0, then failed, then an ok run at t0+1m
 // with a higher value. It reports whether the job's series were exported after failed and the Start of
 // the series after the last run.

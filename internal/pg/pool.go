@@ -22,6 +22,9 @@ const (
 // ErrPoolClosed is returned by Acquire once the pool is closed.
 var ErrPoolClosed = errors.New("connection pool is closed")
 
+// ErrSlotWait is wrapped in the error of an Acquire whose context ended while it waited for a slot.
+var ErrSlotWait = errors.New("wait for a connection slot ended")
+
 // Pool hands out connections to databases of one server, with at most maxConns open in total.
 type Pool struct {
 	cfg        Config
@@ -145,7 +148,7 @@ func (p *Pool) acquire(ctx context.Context, database string, withBackoff bool) (
 			case <-wait:
 				continue
 			case <-ctx.Done():
-				return nil, nil, fmt.Errorf("wait for a connection slot: %w", ctx.Err())
+				return nil, nil, fmt.Errorf("%w: %w", ErrSlotWait, ctx.Err())
 			}
 		}
 		p.mu.Unlock()

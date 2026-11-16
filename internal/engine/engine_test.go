@@ -259,6 +259,24 @@ var _ = Describe("A run caught in a pool swap", func() {
 	})
 })
 
+var _ = Describe("A run that cannot get a connection", func() {
+	It("is logged once when it starts and once when it recovers", func(ctx SpecContext) {
+		var lines []string
+		logger := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{})
+		job := planner.Job{Query: "backends", Database: "app", Fingerprint: "f", Interval: 30 * time.Second}
+		noSlot := executor.Result{
+			Job: job, Outcome: selfmetrics.OutcomeSkipped,
+			Err: fmt.Errorf("query backends on database app could not get a connection within its interval 30s: %w", executor.ErrNoSlot),
+		}
+		ok := executor.Result{Job: job, Outcome: selfmetrics.OutcomeOK}
+
+		Expect(engine.RecordAll(ctrllog.IntoContext(ctx, logger), noSlot, noSlot, noSlot, ok)).To(Succeed())
+		Expect(lines).To(HaveLen(2), "%v", lines)
+		Expect(lines[0]).To(And(ContainSubstring("could not get a connection within its interval 30s"), ContainSubstring(`"outcome"="skipped"`)))
+		Expect(lines[1]).To(ContainSubstring("query recovered"))
+	})
+})
+
 var _ = DescribeTable("A failed run",
 	func(ctx SpecContext, outcome selfmetrics.Outcome) {
 		res := executor.Result{Job: planner.Job{Query: "backends", Database: "app", Fingerprint: "f"}, Outcome: outcome, WouldBe: 5}

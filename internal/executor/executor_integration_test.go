@@ -485,8 +485,37 @@ var _ = Describe("Executor", func() {
 		held := time.AfterFunc(3*time.Second, func() { release(false) })
 		DeferCleanup(held.Stop)
 
-		res := newExecutor(one, l).Run(ctx, jobFor("SELECT 'a' AS datname, 1 AS value"))
+		job := jobFor("SELECT 'a' AS datname, 1 AS value")
+		job.Interval = 10 * time.Second
+		res := newExecutor(one, l).Run(ctx, job)
 		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeOK), "error: %v", res.Err)
+	})
+
+	It("gives up waiting for a connection after one interval and counts the run as skipped", func(ctx SpecContext) {
+		cfg := server.MonitorConfig(GinkgoT().TempDir())
+		cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout
+		one := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()))
+		DeferCleanup(one.Close)
+
+		holder, release, err := one.Acquire(ctx, "postgres")
+		Expect(err).NotTo(HaveOccurred())
+
+		job := jobFor("SELECT 'a' AS datname, 1 AS value")
+		job.Interval = 200 * time.Millisecond
+		start := time.Now()
+		res := newExecutor(one, l).Run(ctx, job)
+
+		Expect(time.Since(start)).To(BeNumerically("<", time.Second))
+		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeSkipped))
+		Expect(res.Err).To(MatchError(executor.ErrNoSlot))
+		Expect(res.Err).To(MatchError(ContainSubstring("query probe on database postgres could not get a connection within its interval 200ms")))
+		Expect(res.ConnectionLost).To(BeFalse())
+		Expect(res.Samples).To(BeNil())
+
+		Expect(holder.IsClosed()).To(BeFalse(), "the slot holder is unaffected")
+		release(false)
+		again := newExecutor(one, l).Run(ctx, job)
+		Expect(again.Outcome).To(Equal(selfmetrics.OutcomeOK), "error: %v", again.Err)
 	})
 
 	It("hands a broken connection back so the pool replaces it", func(ctx SpecContext) {

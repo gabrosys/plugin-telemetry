@@ -595,7 +595,10 @@ func (e *engine) record(ctx context.Context, res executor.Result) {
 			e.store.Fail(key)
 			e.stats.QueryCapped(job.Query, job.Database, res.WouldBe)
 		case selfmetrics.OutcomeSkipped:
-			// A run caught in a pool swap keeps the entry of the run before it.
+			// A skipped run keeps the entry of the run before it; only one without a slot in time is logged.
+			if errors.Is(res.Err, executor.ErrNoSlot) {
+				e.errs.Failed(logger, job.Query, job.Database, outcome, res.Err)
+			}
 		case selfmetrics.OutcomeError, selfmetrics.OutcomeTimeout, selfmetrics.OutcomeDenied:
 			e.store.Fail(key)
 			if res.Err != nil {

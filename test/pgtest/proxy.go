@@ -25,7 +25,7 @@ type Proxy struct {
 	mu     sync.Mutex
 	conns  []net.Conn
 	closed bool
-	errs   error // close errors of connections the accept loop dropped
+	errs   error // close errors of dropped connections, and forwarding errors other than a close or EOF
 }
 
 // StartProxy listens on a free local port and forwards each connection to the server at host:port.
@@ -72,16 +72,26 @@ func (p *Proxy) accept(ctx context.Context) {
 		p.conns = append(p.conns, client, server)
 		p.mu.Unlock()
 		p.wg.Go(func() {
-			if _, err := io.Copy(client, server); err != nil {
-				return
-			}
+			_, err := io.Copy(client, server)
+			p.record(err)
 		})
-		p.wg.Go(func() { forwardUntilRollback(server, client) })
+		p.wg.Go(func() { p.record(forwardUntilRollback(server, client)) })
 	}
 }
 
+// record keeps err unless it only says that a connection was closed, which is how forwarding ends.
+func (p *Proxy) record(err error) {
+	if err == nil || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return
+	}
+	p.mu.Lock()
+	p.errs = errors.Join(p.errs, err)
+	p.mu.Unlock()
+}
+
 // forwardUntilRollback copies client to server until a chunk contains ROLLBACK, then drops what follows.
-func forwardUntilRollback(server, client net.Conn) {
+// It returns the error that ended the copy.
+func forwardUntilRollback(server, client net.Conn) error {
 	rollback := []byte("ROLLBACK")
 	buf := make([]byte, 32*1024)
 	forward := true
@@ -91,11 +101,11 @@ func forwardUntilRollback(server, client net.Conn) {
 			if bytes.Contains(bytes.ToUpper(buf[:n]), rollback) {
 				forward = false
 			} else if _, werr := server.Write(buf[:n]); werr != nil {
-				return
+				return fmt.Errorf("write to the server: %w", werr)
 			}
 		}
 		if err != nil {
-			return
+			return fmt.Errorf("read from the client: %w", err)
 		}
 	}
 }

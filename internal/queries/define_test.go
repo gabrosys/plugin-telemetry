@@ -344,6 +344,9 @@ q:
 		Entry("a line comment", "SELECT 1 AS v -- pg_stat_activity", "[a, b]", false),
 		Entry("a block comment", "SELECT /* pg_stat_activity */ 1 AS v", "[a, b]", false),
 		Entry("a string literal", "SELECT 1 AS v FROM pg_class WHERE relname = 'pg_stat_activity'", "[a, b]", false),
+		Entry("after a quoted name with a quote", `SELECT 1 AS \"a'b\" FROM pg_stat_activity`, "[a, b]", true),
+		Entry("after a quoted name with dashes", `SELECT 1 AS \"--c\" FROM pg_stat_activity`, "[a, b]", true),
+		Entry("a literal after a quoted name with a quote", `SELECT 1 AS \"x'\", 'pg_stat_activity'`, "[a, b]", false),
 	)
 
 	DescribeTable("ReadsSettings",
@@ -371,6 +374,11 @@ q:
 		Entry("a tagged dollar-quoted string", "SELECT $q$ $$ pg_settings $q$", "", false),
 		Entry("after a dollar-quoted string", "SELECT $q$x$q$, name FROM pg_settings", "", true),
 		Entry("after a positional parameter", "SELECT $1, name FROM pg_settings", "", true),
+		Entry("after a quoted name with a quote", `SELECT "a'b" FROM pg_settings`, "", true),
+		Entry("after a quoted name with dashes", `SELECT "--c", name FROM pg_settings`, "", true),
+		Entry("after a quoted name with a doubled quote", `SELECT "a""--", name FROM pg_settings`, "", true),
+		Entry("a literal after a quoted name with a quote", `SELECT "x'" , 'pg_settings'`, "", false),
+		Entry("a quoted pg_settings", `SELECT name FROM "pg_settings"`, "", true),
 		Entry("after a comment", "SELECT name /* x */ FROM pg_settings -- y", "", true),
 	)
 

@@ -127,7 +127,8 @@ func catalogNames(sql string, match func(string) bool) []string {
 
 // blankCommentsAndStrings replaces each comment and string constant with a space, following PostgreSQL 18
 // "Lexical Structure" (sql-syntax-lexical.html): -- to the end of the line, nesting /* */ blocks, a
-// doubled quote inside '...', backslash escapes inside E'...', and $tag$...$tag$.
+// doubled quote inside '...', backslash escapes inside E'...', and $tag$...$tag$. Quoted names ("...",
+// with "" inside) are kept.
 func blankCommentsAndStrings(sql string) string {
 	var b strings.Builder
 	for i := 0; i < len(sql); {
@@ -145,6 +146,12 @@ func blankCommentsAndStrings(sql string) string {
 		case rest[0] == '\'':
 			escapes := afterIdentifier && (sql[i-1] == 'e' || sql[i-1] == 'E') && (i < 2 || !isIdentifierChar(sql[i-2]))
 			i += quotedLen(rest, escapes)
+		case rest[0] == '"':
+			// A quoted name is kept as written, so a quote or dashes inside it start nothing.
+			n := quotedNameLen(rest)
+			b.WriteString(rest[:n])
+			i += n
+			continue
 		case rest[0] == '$' && !afterIdentifier && dollarTag.MatchString(rest):
 			tag := dollarTag.FindString(rest)
 			end := strings.Index(rest[len(tag):], tag)
@@ -196,6 +203,22 @@ func quotedLen(s string, escapes bool) int {
 		case s[i] == '\'':
 			return i + 1
 		}
+	}
+	return len(s)
+}
+
+// quotedNameLen returns the length of the quoted name that starts s, "" counting as one quote, or len(s)
+// if it never ends.
+func quotedNameLen(s string) int {
+	for i := 1; i < len(s); i++ {
+		if s[i] != '"' {
+			continue
+		}
+		if i+1 < len(s) && s[i+1] == '"' {
+			i++
+			continue
+		}
+		return i + 1
 	}
 	return len(s)
 }

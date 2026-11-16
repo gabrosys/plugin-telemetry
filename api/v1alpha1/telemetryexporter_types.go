@@ -319,8 +319,8 @@ type Limits struct {
 	// +optional
 	MaxLabelsPerSeries *int32 `json:"maxLabelsPerSeries,omitempty"`
 
-	// QueryTimeout is the time one query may run. At least 100ms, at most 1073741823ms (twice it must fit
-	// PostgreSQL's idle_in_transaction_session_timeout).
+	// QueryTimeout is the time one query may run. At least 100ms. At most 1073741823ms, so twice it fits
+	// PostgreSQL's idle_in_transaction_session_timeout.
 	//
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MaxLength=32

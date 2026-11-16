@@ -617,7 +617,12 @@ var _ = Describe("An engine on an in-memory Config", func() {
 			h.cfg.Notify()
 		}
 		Eventually(h.debounceTimers).Should(Equal(armed + 1))
-		h.clk.Step(engine.Debounce - time.Millisecond)
+		h.clk.Step(engine.Debounce / 2)
+		Consistently(h.cfg.settingsCalls, 50*time.Millisecond).Should(Equal(n))
+		// A change inside the window must not postpone the reload past Debounce after the first one.
+		h.cfg.Notify()
+		Consistently(h.cfg.settingsCalls, 50*time.Millisecond).Should(Equal(n))
+		h.clk.Step(engine.Debounce/2 - time.Millisecond)
 		Consistently(h.cfg.settingsCalls, 50*time.Millisecond).Should(Equal(n))
 		h.clk.Step(time.Millisecond)
 

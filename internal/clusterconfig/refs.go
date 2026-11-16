@@ -1,5 +1,3 @@
-// Package clusterconfig turns a CloudNativePG Cluster, its plugin parameters and its TelemetryExporter
-// into engine settings and into the list of Kubernetes objects the sidecar reads.
 package clusterconfig
 
 import (

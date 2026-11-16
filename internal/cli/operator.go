@@ -110,7 +110,7 @@ func newOperatorCommand() *cobra.Command {
 	f.DurationVar(&metricsInterval, "metrics-interval", settings.Defaults().Exporter.Interval,
 		"export interval of the plugin's self-metrics")
 	f.StringVar(&namespace, "namespace", os.Getenv("POD_NAMESPACE"),
-		"namespace of the ConfigMap (default $POD_NAMESPACE)")
+		"namespace of the ConfigMap; defaults to $POD_NAMESPACE")
 
 	for _, name := range []string{"server-address", "server-cert", "server-key", "client-cert", "sidecar-image-configmap"} {
 		if err := cmd.MarkFlagRequired(name); err != nil {

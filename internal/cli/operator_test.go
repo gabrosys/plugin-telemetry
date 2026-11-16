@@ -1,7 +1,9 @@
 package cli_test
 
 import (
+	"bytes"
 	"io"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -45,5 +47,25 @@ var _ = Describe("operator command", func() {
 			"--metrics-endpoint=ftp://collector",
 		})
 		Expect(cmd.Execute()).To(MatchError(ContainSubstring("exporter.endpoint: must be an http or https URL with a host")))
+	})
+
+	It("names the namespace default once in its help", func() {
+		GinkgoT().Setenv("POD_NAMESPACE", "cnpg-system")
+		var out bytes.Buffer
+		cmd := cli.NewRootCommand()
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs([]string{"operator", "--help"})
+		Expect(cmd.Execute()).To(Succeed())
+
+		var line string
+		for _, l := range strings.Split(out.String(), "\n") {
+			if strings.Contains(l, "--namespace") {
+				line = l
+			}
+		}
+		Expect(line).NotTo(BeEmpty())
+		Expect(strings.Count(line, "cnpg-system")).To(Equal(1))
+		Expect(strings.Count(line, "(default")).To(Equal(1))
 	})
 })

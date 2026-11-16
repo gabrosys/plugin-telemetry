@@ -15,7 +15,7 @@ type TelemetryExporter struct {
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	// Spec holds the exporter settings. It sets exporter.endpoint, or envFrom with an
-	// OTEL_EXPORTER_OTLP_ENDPOINT key.
+	// OTEL_EXPORTER_OTLP_METRICS_ENDPOINT or OTEL_EXPORTER_OTLP_ENDPOINT key.
 	Spec TelemetryExporterSpec `json:"spec"`
 }
 
@@ -39,7 +39,8 @@ type TelemetryExporterSpec struct {
 	Exporter OTLPExporter `json:"exporter,omitempty"`
 
 	// EnvFrom names a ConfigMap and a Secret whose OTEL_EXPORTER_OTLP_* and OTEL_RESOURCE_ATTRIBUTES
-	// keys are read as settings.
+	// keys are read as settings. The endpoint comes from OTEL_EXPORTER_OTLP_METRICS_ENDPOINT or
+	// OTEL_EXPORTER_OTLP_ENDPOINT.
 	//
 	// +optional
 	EnvFrom *EnvFromSource `json:"envFrom,omitempty"`

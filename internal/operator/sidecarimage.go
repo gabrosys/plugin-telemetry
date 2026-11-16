@@ -93,8 +93,7 @@ func WatchSidecarImage(ctx context.Context, informers cache.Informers, store *Im
 	return nil
 }
 
-// imageEventHandler feeds ConfigMap events to store. An invalid ConfigMap or a delete (including a
-// DeletedFinalStateUnknown tombstone) keeps the stored image; a delete is logged with namespace and name.
+// imageEventHandler feeds ConfigMap events to store; an invalid ConfigMap or a delete keeps the stored image.
 func imageEventHandler(logger log.Logger, store *ImageStore, namespace, name string) toolscache.ResourceEventHandlerFuncs {
 	set := func(obj any) {
 		cm, ok := obj.(*corev1.ConfigMap)

@@ -51,12 +51,13 @@ spec:
           spec:
             description: |-
               Spec holds the exporter settings. It sets exporter.endpoint, or envFrom with an
-              OTEL_EXPORTER_OTLP_ENDPOINT key.
+              OTEL_EXPORTER_OTLP_METRICS_ENDPOINT or OTEL_EXPORTER_OTLP_ENDPOINT key.
             properties:
               envFrom:
                 description: |-
                   EnvFrom names a ConfigMap and a Secret whose OTEL_EXPORTER_OTLP_* and OTEL_RESOURCE_ATTRIBUTES
-                  keys are read as settings.
+                  keys are read as settings. The endpoint comes from OTEL_EXPORTER_OTLP_METRICS_ENDPOINT or
+                  OTEL_EXPORTER_OTLP_ENDPOINT.
                 properties:
                   configMap:
                     description: ConfigMap is a ConfigMap in this namespace.

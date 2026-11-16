@@ -24,15 +24,5 @@ var _ = Describe("resilience", Ordered, ContinueOnFailure, func() {
 		Expect(framework.MatchesCNPGVersion(img, s.env.CNPGVersion)).To(BeTrue(), img)
 	}, SpecTimeout(time.Minute))
 
-	It("steady traffic produces no failed hook call", func(ctx SpecContext) {
-		s.healthy(ctx)
-
-		start := time.Now()
-		stop := s.traffic(ctx)
-		defer stop()
-		Expect(framework.WaitUntil(ctx, start.Add(20*time.Second))).To(Succeed())
-		stop()
-
-		s.expectNoFailedHookCall(ctx, "steady traffic", start)
-	}, SpecTimeout(5*time.Minute))
+	restartSpecs(s)
 })

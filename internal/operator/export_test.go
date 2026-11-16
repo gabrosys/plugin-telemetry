@@ -1,5 +1,7 @@
 package operator
 
+import "time"
+
 // ImageEventHandler exposes imageEventHandler to the external test package.
 var ImageEventHandler = imageEventHandler
 
@@ -21,3 +23,11 @@ var CollectMetrics = (*PluginMetrics).collect
 
 // MissingInstruments exposes missingInstruments to metrics_test.go.
 func (m *PluginMetrics) MissingInstruments() error { return m.missingInstruments() }
+
+// SetDrainTimeout sets drainTimeout for run_test.go and returns a func that restores it.
+func SetDrainTimeout(d time.Duration) (restore func()) {
+	previous := drainTimeout
+	drainTimeout = d
+
+	return func() { drainTimeout = previous }
+}

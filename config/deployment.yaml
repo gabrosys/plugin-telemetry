@@ -21,6 +21,8 @@ spec:
         app.kubernetes.io/name: plugin-telemetry
     spec:
       serviceAccountName: plugin-telemetry
+      # Covers the preStop sleep (5 s), the gRPC drain (10 s) and 5 s to exit.
+      terminationGracePeriodSeconds: 20
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -58,6 +60,11 @@ spec:
           readinessProbe:
             tcpSocket:
               port: grpc
+          # Keeps serving while the endpoint removal reaches kube-proxy and CNPG.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
           resources:
             requests:
               cpu: 10m

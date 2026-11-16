@@ -52,6 +52,26 @@ func (f *fakeWaiter) Wait(ctx context.Context) error {
 	}
 }
 
+// blockingWaiter is ready at once; Image signals entered, then blocks until release is closed.
+type blockingWaiter struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingWaiter() *blockingWaiter {
+	return &blockingWaiter{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (b *blockingWaiter) Image() string {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+
+	return "registry.example/sidecar:1"
+}
+
+func (*blockingWaiter) Wait(context.Context) error { return nil }
+
 type fakeCache struct {
 	cache.Cache
 	synced chan struct{}
@@ -174,6 +194,7 @@ var _ = Describe("Run", func() {
 		pki    *testPKI
 		addr   string
 		waiter *fakeWaiter
+		images operator.ImageWaiter
 		caches *fakeCache
 		cancel context.CancelFunc
 		done   chan error
@@ -193,7 +214,7 @@ var _ = Describe("Run", func() {
 				ServerCertPath: pki.serverCert,
 				ServerKeyPath:  pki.serverKey,
 				ClientCAPath:   pki.clientCert,
-			}, waiter, deps())
+			}, images, deps())
 		}()
 	}
 
@@ -215,6 +236,7 @@ var _ = Describe("Run", func() {
 		pki = newTestPKI()
 		addr = freeAddress()
 		waiter = &fakeWaiter{ready: make(chan struct{})}
+		images = waiter
 		caches = &fakeCache{synced: make(chan struct{})}
 	})
 
@@ -355,6 +377,66 @@ var _ = Describe("Run", func() {
 			defer c()
 			_, err = identity.NewIdentityClient(conn).GetPluginMetadata(ctx, &identity.GetPluginMetadataRequest{})
 			Expect(err).To(HaveOccurred())
+		})
+	})
+
+	Context("with an EVALUATE call in flight", func() {
+		var (
+			blocking *blockingWaiter
+			release  func()
+			result   chan error
+			patch    chan []byte
+		)
+
+		BeforeEach(func() {
+			blocking = newBlockingWaiter()
+			images = blocking
+			release = sync.OnceFunc(func() { close(blocking.release) })
+			DeferCleanup(release)
+			close(caches.synced)
+			start()
+			Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
+
+			conn, err := dial(goodTLS())
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(conn.Close)
+			result = make(chan error, 1)
+			patch = make(chan []byte, 1)
+			go func() {
+				ctx, c := context.WithTimeout(context.Background(), 10*time.Second)
+				defer c()
+				resp, err := lifecycle.NewOperatorLifecycleClient(conn).LifecycleHook(ctx,
+					request(lifecycle.OperatorOperationType_TYPE_EVALUATE, clusterJSON(ours(nil)), fixturePod("pod-main")))
+				patch <- resp.GetJsonPatch()
+				result <- err
+			}()
+			Eventually(blocking.entered, 5*time.Second).Should(BeClosed())
+		})
+
+		It("lets a call in flight finish after its context ends", func() {
+			cancel()
+			Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeFalse())
+			release()
+			Eventually(result, 5*time.Second).Should(Receive(BeNil()))
+			Expect(<-patch).NotTo(BeEmpty())
+			Eventually(done, 5*time.Second).Should(Receive(BeNil()))
+			done <- nil
+		})
+
+		It("accepts no new connection once its context ends", func() {
+			cancel()
+			Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeFalse())
+			release()
+		})
+
+		It("ends a call still running when the drain timeout has passed", func() {
+			DeferCleanup(operator.SetDrainTimeout(200 * time.Millisecond))
+			cancel()
+			var err error
+			Eventually(result, 2*time.Second).Should(Receive(&err))
+			Expect(status.Code(err)).To(Equal(codes.Unavailable))
+			Eventually(done, 2*time.Second).Should(Receive(BeNil()))
+			done <- nil
 		})
 	})
 

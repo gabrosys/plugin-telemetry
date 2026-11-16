@@ -341,6 +341,9 @@ q:
 		Entry("another schema", "SELECT 1 AS v FROM app.pg_stat_activity", "[a, b]", false),
 		Entry("a longer identifier", "SELECT 1 AS v FROM pg_stat_activity_copy", "[a, b]", false),
 		Entry("a column of that name", "SELECT 1 AS v FROM t WHERE x_pg_locks = 1", "[a, b]", false),
+		Entry("a line comment", "SELECT 1 AS v -- pg_stat_activity", "[a, b]", false),
+		Entry("a block comment", "SELECT /* pg_stat_activity */ 1 AS v", "[a, b]", false),
+		Entry("a string literal", "SELECT 1 AS v FROM pg_class WHERE relname = 'pg_stat_activity'", "[a, b]", false),
 	)
 
 	DescribeTable("ReadsSettings",
@@ -356,6 +359,19 @@ q:
 		Entry("a longer identifier", "SELECT my_pg_settings FROM t", "", false),
 		Entry("another schema", "SELECT * FROM other.pg_settings", "", false),
 		Entry("current_setting", "SELECT current_setting('jit')", "", false),
+		Entry("a line comment", "SELECT 1 -- pg_settings", "", false),
+		Entry("a block comment", "SELECT /* pg_settings */ 1", "", false),
+		Entry("a nested block comment", "SELECT /* a /* b */ pg_settings */ 1", "", false),
+		Entry("a string literal", "SELECT 1 FROM pg_class WHERE relname = 'pg_settings'", "", false),
+		Entry("a comment in the predicate", "SELECT 1", "SELECT true -- pg_settings", false),
+		Entry("after a literal with a quote", "SELECT 'it''s', name FROM pg_settings", "", true),
+		Entry("an escape string", `SELECT E'\' pg_settings '`, "", false),
+		Entry("after an escape string", `SELECT E'a\'b', name FROM pg_settings`, "", true),
+		Entry("a dollar-quoted string", "SELECT $$ pg_settings $$", "", false),
+		Entry("a tagged dollar-quoted string", "SELECT $q$ $$ pg_settings $q$", "", false),
+		Entry("after a dollar-quoted string", "SELECT $q$x$q$, name FROM pg_settings", "", true),
+		Entry("after a positional parameter", "SELECT $1, name FROM pg_settings", "", true),
+		Entry("after a comment", "SELECT name /* x */ FROM pg_settings -- y", "", true),
 	)
 
 	Describe("fingerprint", func() {

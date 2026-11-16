@@ -52,6 +52,7 @@ var (
 	globChars  = regexp.MustCompile(`[][*?]`)
 	schemaDot  = regexp.MustCompile(`(?i)\bpg_catalog\s*\.\s*$`)
 	anyDot     = regexp.MustCompile(`\.\s*$`)
+	dollarTag  = regexp.MustCompile(`^\$([A-Za-z_][A-Za-z0-9_]*)?\$`)
 )
 
 func isClusterWide(name string) bool {
@@ -93,6 +94,7 @@ func readsSettings(sql string) bool {
 // catalogNames returns, sorted and unique, the lower-cased whole identifiers in the SQL that match,
 // unqualified or prefixed by pg_catalog.
 func catalogNames(sql string, match func(string) bool) []string {
+	sql = blankCommentsAndStrings(sql)
 	found := map[string]struct{}{}
 	for _, loc := range identifier.FindAllStringIndex(sql, -1) {
 		name := strings.ToLower(sql[loc[0]:loc[1]])
@@ -121,4 +123,83 @@ func catalogNames(sql string, match func(string) bool) []string {
 	sort.Strings(names)
 
 	return names
+}
+
+// blankCommentsAndStrings replaces each comment and string constant with a space, following PostgreSQL 18
+// "Lexical Structure" (sql-syntax-lexical.html): -- to the end of the line, nesting /* */ blocks, a
+// doubled quote inside '...', backslash escapes inside E'...', and $tag$...$tag$.
+func blankCommentsAndStrings(sql string) string {
+	var b strings.Builder
+	for i := 0; i < len(sql); {
+		rest := sql[i:]
+		afterIdentifier := i > 0 && isIdentifierChar(sql[i-1])
+		switch {
+		case strings.HasPrefix(rest, "--"):
+			end := strings.IndexAny(rest, "\r\n")
+			if end < 0 {
+				end = len(rest)
+			}
+			i += end
+		case strings.HasPrefix(rest, "/*"):
+			i += blockCommentLen(rest)
+		case rest[0] == '\'':
+			escapes := afterIdentifier && (sql[i-1] == 'e' || sql[i-1] == 'E') && (i < 2 || !isIdentifierChar(sql[i-2]))
+			i += quotedLen(rest, escapes)
+		case rest[0] == '$' && !afterIdentifier && dollarTag.MatchString(rest):
+			tag := dollarTag.FindString(rest)
+			end := strings.Index(rest[len(tag):], tag)
+			if end < 0 {
+				i = len(sql)
+			} else {
+				i += len(tag) + end + len(tag)
+			}
+		default:
+			b.WriteByte(sql[i])
+			i++
+			continue
+		}
+		b.WriteByte(' ')
+	}
+	return b.String()
+}
+
+// blockCommentLen returns the length of the nesting block comment that starts s, or len(s) if it never ends.
+func blockCommentLen(s string) int {
+	depth := 0
+	for i := 0; i < len(s); {
+		switch {
+		case strings.HasPrefix(s[i:], "/*"):
+			depth++
+			i += 2
+		case strings.HasPrefix(s[i:], "*/"):
+			depth--
+			i += 2
+			if depth == 0 {
+				return i
+			}
+		default:
+			i++
+		}
+	}
+	return len(s)
+}
+
+// quotedLen returns the length of the string constant that starts s, or len(s) if it never ends. escapes
+// makes a backslash take the next byte, as in E'...'.
+func quotedLen(s string, escapes bool) int {
+	for i := 1; i < len(s); i++ {
+		switch {
+		case escapes && s[i] == '\\':
+			i++
+		case s[i] == '\'' && i+1 < len(s) && s[i+1] == '\'':
+			i++
+		case s[i] == '\'':
+			return i + 1
+		}
+	}
+	return len(s)
+}
+
+func isIdentifierChar(c byte) bool {
+	return c == '_' || c == '$' || '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
 }

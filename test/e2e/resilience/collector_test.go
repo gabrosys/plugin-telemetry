@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -47,6 +48,20 @@ func median(values []uint64) uint64 {
 	return sorted[len(sorted)/2]
 }
 
+// series formats SampleUsage readings, taken in pod order, as one line per tick: the offset from the first tick,
+// then each pod's working set and RSS in bytes.
+func series(readings []framework.Usage, pods int) string {
+	var b strings.Builder
+	for i, u := range readings {
+		if i%pods == 0 {
+			fmt.Fprintf(&b, "\nt+%s", time.Duration(i/pods)*usageEvery)
+		}
+		fmt.Fprintf(&b, " ws=%d rss=%d", u.WorkingSet, u.RSS)
+	}
+
+	return b.String()
+}
+
 // readyCollector reports whether the collector Service has a ready endpoint.
 func (s *suite) readyCollector(ctx context.Context) (bool, error) {
 	ready, err := framework.ReadyEndpoints(ctx, s.c, collectorNamespace, collectorService)
@@ -76,6 +91,7 @@ func collectorSpecs(s *suite) {
 		readings, err := framework.SampleUsage(ctx, s.cfg, pods, metadata.SidecarContainerName, usageEvery, steadyWindow)
 		Expect(err).NotTo(HaveOccurred())
 		steadyWS, steadyRSS := perPod(readings, len(pods))
+		AddReportEntry("steady usage series", series(readings, len(pods)))
 
 		DeferCleanup(func(ctx SpecContext) {
 			Expect(framework.ScaleCollector(ctx, s.c, 1)).To(Succeed())
@@ -88,6 +104,7 @@ func collectorSpecs(s *suite) {
 		readings, err = framework.SampleUsage(ctx, s.cfg, pods, metadata.SidecarContainerName, usageEvery, outageWindow)
 		Expect(err).NotTo(HaveOccurred())
 		outageWS, outageRSS := perPod(readings, len(pods))
+		AddReportEntry("outage usage series", series(readings, len(pods)))
 
 		Expect(framework.ScaleCollector(ctx, s.c, 1)).To(Succeed())
 		var tReady time.Time

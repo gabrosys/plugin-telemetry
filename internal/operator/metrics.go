@@ -12,7 +12,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -170,16 +169,6 @@ func failureReason(err error) string {
 	}
 
 	return reasonUnknown
-}
-
-// collect reads the current metrics.
-func (m *PluginMetrics) collect(ctx context.Context) (*metricdata.ResourceMetrics, error) {
-	rm := &metricdata.ResourceMetrics{}
-	if err := m.reader.Collect(ctx, rm); err != nil {
-		return nil, fmt.Errorf("collect plugin metrics: %w", err)
-	}
-
-	return rm, nil
 }
 
 // Run exports the metrics over OTLP with s until ctx ends. The resource is service.name

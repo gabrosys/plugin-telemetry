@@ -28,7 +28,7 @@ import (
 func metricByName(m *operator.PluginMetrics, name string) (metricdata.Metrics, bool) {
 	GinkgoHelper()
 
-	rm, err := operator.CollectMetrics(m, context.Background())
+	rm, err := operator.CollectMetrics(context.Background(), m)
 	Expect(err).NotTo(HaveOccurred())
 	for _, sm := range rm.ScopeMetrics {
 		for _, got := range sm.Metrics {

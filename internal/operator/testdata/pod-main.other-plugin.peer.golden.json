@@ -1,0 +1,412 @@
+{
+  "kind": "Pod",
+  "apiVersion": "v1",
+  "metadata": {
+    "name": "fixture-1",
+    "namespace": "fixture",
+    "labels": {
+      "app.kubernetes.io/component": "database",
+      "app.kubernetes.io/instance": "fixture",
+      "app.kubernetes.io/managed-by": "cloudnative-pg",
+      "app.kubernetes.io/name": "postgresql",
+      "app.kubernetes.io/version": "18",
+      "cnpg.io/cluster": "fixture",
+      "cnpg.io/instanceName": "fixture-1",
+      "cnpg.io/instanceRole": "primary",
+      "cnpg.io/podRole": "instance",
+      "role": "primary"
+    }
+  },
+  "spec": {
+    "volumes": [
+      {
+        "name": "pgdata",
+        "persistentVolumeClaim": {
+          "claimName": "fixture-1"
+        }
+      },
+      {
+        "name": "scratch-data",
+        "emptyDir": {}
+      },
+      {
+        "name": "shm",
+        "emptyDir": {
+          "medium": "Memory"
+        }
+      },
+      {
+        "name": "kube-api-access",
+        "projected": {
+          "sources": [
+            {
+              "serviceAccountToken": {
+                "expirationSeconds": 3607,
+                "path": "token"
+              }
+            },
+            {
+              "configMap": {
+                "name": "kube-root-ca.crt",
+                "items": [
+                  {
+                    "key": "ca.crt",
+                    "path": "ca.crt"
+                  }
+                ]
+              }
+            },
+            {
+              "downwardAPI": {
+                "items": [
+                  {
+                    "path": "namespace",
+                    "fieldRef": {
+                      "apiVersion": "v1",
+                      "fieldPath": "metadata.namespace"
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "defaultMode": 420
+        }
+      },
+      {
+        "name": "other-plugin-data",
+        "emptyDir": {}
+      },
+      {
+        "name": "telemetry-token",
+        "secret": {
+          "secretName": "fixture.telemetry-token",
+          "optional": true
+        }
+      },
+      {
+        "name": "telemetry-sa-mask",
+        "emptyDir": {}
+      }
+    ],
+    "initContainers": [
+      {
+        "name": "bootstrap-controller",
+        "image": "ghcr.io/cloudnative-pg/cloudnative-pg-testing:main@sha256:3ba7cb95518eaac2c29e060f2d4f8bf2418ebdf36ffe82e7a1854c06be58bf86",
+        "command": [
+          "/manager",
+          "bootstrap",
+          "/controller/manager",
+          "--log-level=info"
+        ],
+        "resources": {},
+        "volumeMounts": [
+          {
+            "name": "pgdata",
+            "mountPath": "/var/lib/postgresql/data"
+          },
+          {
+            "name": "scratch-data",
+            "mountPath": "/run"
+          },
+          {
+            "name": "scratch-data",
+            "mountPath": "/controller"
+          },
+          {
+            "name": "shm",
+            "mountPath": "/dev/shm"
+          }
+        ],
+        "securityContext": {
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "privileged": false,
+          "runAsNonRoot": true,
+          "readOnlyRootFilesystem": true,
+          "allowPrivilegeEscalation": false,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        }
+      },
+      {
+        "name": "other-plugin",
+        "image": "example.com/other-plugin:1",
+        "resources": {},
+        "restartPolicy": "Always",
+        "volumeMounts": [
+          {
+            "name": "other-plugin-data",
+            "mountPath": "/other-plugin"
+          }
+        ]
+      },
+      {
+        "name": "otel-metrics",
+        "image": "ghcr.io/gabrosys/plugin-telemetry@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "args": [
+          "instance"
+        ],
+        "env": [
+          {
+            "name": "POD_NAME",
+            "valueFrom": {
+              "fieldRef": {
+                "fieldPath": "metadata.name"
+              }
+            }
+          },
+          {
+            "name": "POD_UID",
+            "valueFrom": {
+              "fieldRef": {
+                "fieldPath": "metadata.uid"
+              }
+            }
+          },
+          {
+            "name": "NODE_NAME",
+            "valueFrom": {
+              "fieldRef": {
+                "fieldPath": "spec.nodeName"
+              }
+            }
+          },
+          {
+            "name": "NAMESPACE",
+            "valueFrom": {
+              "fieldRef": {
+                "fieldPath": "metadata.namespace"
+              }
+            }
+          },
+          {
+            "name": "CLUSTER_NAME",
+            "value": "fixture"
+          }
+        ],
+        "resources": {
+          "limits": {
+            "cpu": "50m",
+            "memory": "64Mi"
+          },
+          "requests": {
+            "cpu": "50m",
+            "memory": "64Mi"
+          }
+        },
+        "restartPolicy": "Always",
+        "volumeMounts": [
+          {
+            "name": "scratch-data",
+            "readOnly": true,
+            "mountPath": "/controller/run",
+            "subPath": "run"
+          },
+          {
+            "name": "telemetry-token",
+            "readOnly": true,
+            "mountPath": "/var/run/secrets/telemetry.gabrosys.github.io/serviceaccount"
+          },
+          {
+            "name": "telemetry-sa-mask",
+            "readOnly": true,
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount"
+          }
+        ],
+        "imagePullPolicy": "IfNotPresent",
+        "securityContext": {
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "runAsUser": 65534,
+          "runAsNonRoot": true,
+          "readOnlyRootFilesystem": true,
+          "allowPrivilegeEscalation": false,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        }
+      }
+    ],
+    "containers": [
+      {
+        "name": "postgres",
+        "image": "ghcr.io/cloudnative-pg/postgresql:18.7-system-trixie@sha256:5a5dfbde88d5909fd4938189c141f53fb153f53c519f14907dce9e7c04baa153",
+        "command": [
+          "/controller/manager",
+          "instance",
+          "run",
+          "--log-level=info"
+        ],
+        "ports": [
+          {
+            "name": "postgresql",
+            "containerPort": 5432,
+            "protocol": "TCP"
+          },
+          {
+            "name": "metrics",
+            "containerPort": 9187,
+            "protocol": "TCP"
+          },
+          {
+            "name": "status",
+            "containerPort": 8000,
+            "protocol": "TCP"
+          }
+        ],
+        "env": [
+          {
+            "name": "PGDATA",
+            "value": "/var/lib/postgresql/data/pgdata"
+          },
+          {
+            "name": "POD_NAME",
+            "value": "fixture-1"
+          },
+          {
+            "name": "NAMESPACE",
+            "value": "fixture"
+          },
+          {
+            "name": "CLUSTER_NAME",
+            "value": "fixture"
+          },
+          {
+            "name": "PSQL_HISTORY",
+            "value": "/controller/tmp/.psql_history"
+          },
+          {
+            "name": "PGPORT",
+            "value": "5432"
+          },
+          {
+            "name": "PGHOST",
+            "value": "/controller/run"
+          },
+          {
+            "name": "TMPDIR",
+            "value": "/controller/tmp"
+          }
+        ],
+        "resources": {},
+        "volumeMounts": [
+          {
+            "name": "pgdata",
+            "mountPath": "/var/lib/postgresql/data"
+          },
+          {
+            "name": "scratch-data",
+            "mountPath": "/run"
+          },
+          {
+            "name": "scratch-data",
+            "mountPath": "/controller"
+          },
+          {
+            "name": "shm",
+            "mountPath": "/dev/shm"
+          },
+          {
+            "name": "kube-api-access",
+            "readOnly": true,
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount"
+          }
+        ],
+        "livenessProbe": {
+          "httpGet": {
+            "path": "/healthz",
+            "port": 8000,
+            "scheme": "HTTPS"
+          },
+          "timeoutSeconds": 5,
+          "periodSeconds": 10
+        },
+        "readinessProbe": {
+          "httpGet": {
+            "path": "/readyz",
+            "port": 8000,
+            "scheme": "HTTPS"
+          },
+          "timeoutSeconds": 5,
+          "periodSeconds": 10
+        },
+        "startupProbe": {
+          "httpGet": {
+            "path": "/startupz",
+            "port": 8000,
+            "scheme": "HTTPS"
+          },
+          "timeoutSeconds": 5,
+          "periodSeconds": 10,
+          "failureThreshold": 360
+        },
+        "securityContext": {
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "privileged": false,
+          "runAsNonRoot": true,
+          "readOnlyRootFilesystem": true,
+          "allowPrivilegeEscalation": false,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        }
+      }
+    ],
+    "terminationGracePeriodSeconds": 1800,
+    "serviceAccountName": "fixture",
+    "automountServiceAccountToken": false,
+    "securityContext": {
+      "runAsUser": 26,
+      "runAsGroup": 26,
+      "runAsNonRoot": true,
+      "fsGroup": 26,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    },
+    "hostname": "fixture-1",
+    "affinity": {
+      "podAntiAffinity": {
+        "preferredDuringSchedulingIgnoredDuringExecution": [
+          {
+            "weight": 100,
+            "podAffinityTerm": {
+              "labelSelector": {
+                "matchExpressions": [
+                  {
+                    "key": "cnpg.io/cluster",
+                    "operator": "In",
+                    "values": [
+                      "fixture"
+                    ]
+                  },
+                  {
+                    "key": "cnpg.io/podRole",
+                    "operator": "In",
+                    "values": [
+                      "instance"
+                    ]
+                  }
+                ]
+              },
+              "topologyKey": "kubernetes.io/hostname"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "status": {}
+}

@@ -1,6 +1,7 @@
 package operator_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -30,10 +31,15 @@ type fakeImages string
 
 func (f fakeImages) Image() string { return string(f) }
 
-func fixturePod(name string) []byte {
+const (
+	podpatchData = "../podpatch/testdata"
+	operatorData = "testdata"
+)
+
+func readData(dir, name string) []byte {
 	GinkgoHelper()
 
-	root, err := os.OpenRoot("../podpatch/testdata")
+	root, err := os.OpenRoot(dir)
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(root.Close)
 
@@ -41,6 +47,40 @@ func fixturePod(name string) []byte {
 	Expect(err).NotTo(HaveOccurred())
 
 	return data
+}
+
+// fixturePod reads an input shared with the podpatch goldens.
+func fixturePod(name string) []byte { return readData(podpatchData, name) }
+
+// matchGolden compares a Pod with a golden in internal/operator/testdata; UPDATE_GOLDEN=1 rewrites it.
+func matchGolden(name string, pod []byte) {
+	GinkgoHelper()
+
+	if os.Getenv("UPDATE_GOLDEN") != "" {
+		var out bytes.Buffer
+		Expect(json.Indent(&out, canonical(pod), "", "  ")).To(Succeed())
+		out.WriteByte('\n')
+
+		root, err := os.OpenRoot(operatorData)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(root.Close)
+		Expect(root.WriteFile(name+".json", out.Bytes(), 0o600)).To(Succeed())
+	}
+
+	Expect(canonical(pod)).To(MatchJSON(readData(operatorData, name)))
+}
+
+func initContainerNames(raw []byte) []string {
+	GinkgoHelper()
+
+	pod := &corev1.Pod{}
+	Expect(json.Unmarshal(raw, pod)).To(Succeed())
+	names := make([]string, 0, len(pod.Spec.InitContainers))
+	for _, c := range pod.Spec.InitContainers {
+		names = append(names, c.Name)
+	}
+
+	return names
 }
 
 func clusterJSON(plugins ...apiv1.PluginConfiguration) []byte {
@@ -183,37 +223,46 @@ var _ = Describe("Lifecycle", func() {
 
 				resp, err = srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_CREATE, cluster, evaluated))
 				Expect(err).NotTo(HaveOccurred())
-
-				if len(resp.GetJsonPatch()) == 0 {
-					return
-				}
-				Expect(applyPatch(evaluated, resp.GetJsonPatch())).To(Equal(evaluated))
+				Expect(resp.GetJsonPatch()).To(BeEmpty())
 			})
 
-			for name, c := range map[string]struct {
-				images  string
-				cluster func() []byte
-			}{
-				"for a Cluster without the plugin": {testImage, func() []byte {
-					return clusterJSON(apiv1.PluginConfiguration{Name: "other.example.com"})
-				}},
-				"for a Cluster with no plugins": {testImage, func() []byte { return clusterJSON() }},
-				"when the plugin is disabled": {testImage, func() []byte {
-					return clusterJSON(apiv1.PluginConfiguration{Name: metadata.PluginName, Enabled: ptr.To(false)})
-				}},
-				"for an unsupported auth mode": {testImage, func() []byte {
-					return clusterJSON(ours(map[string]string{"auth": "ldap"}))
-				}},
-				"when the store has no image": {"", func() []byte { return clusterJSON(ours(nil)) }},
-			} {
-				It("returns no patch "+name, func(ctx context.Context) {
-					srv := &operator.Lifecycle{Images: fakeImages(c.images)}
-					resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, c.cluster(), pod))
+			It("is idempotent: a second EVALUATE of the same Pod gives the same result, of its own output nothing", func(ctx context.Context) {
+				cluster := clusterJSON(ours(nil))
+				first, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, cluster, pod))
+				Expect(err).NotTo(HaveOccurred())
+				again, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, cluster, pod))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(applyPatch(pod, again.GetJsonPatch())).To(MatchJSON(applyPatch(pod, first.GetJsonPatch())))
+
+				second, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, cluster,
+					applyPatch(pod, first.GetJsonPatch())))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(second.GetJsonPatch()).To(BeEmpty())
+			})
+
+			It("patches when the plugin is explicitly enabled", func(ctx context.Context) {
+				resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
+					clusterJSON(apiv1.PluginConfiguration{Name: metadata.PluginName, Enabled: ptr.To(true)}), pod))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resp.GetJsonPatch()).NotTo(BeEmpty())
+			})
+
+			DescribeTable("returns no patch",
+				func(ctx context.Context, images string, cluster []byte) {
+					srv := &operator.Lifecycle{Images: fakeImages(images)}
+					resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, cluster, pod))
 					Expect(err).NotTo(HaveOccurred())
 					Expect(resp).NotTo(BeNil())
 					Expect(resp.GetJsonPatch()).To(BeEmpty())
-				})
-			}
+				},
+				Entry("for a Cluster without the plugin", testImage,
+					clusterJSON(apiv1.PluginConfiguration{Name: "other.example.com"})),
+				Entry("for a Cluster with no plugins", testImage, clusterJSON()),
+				Entry("when the plugin is disabled", testImage,
+					clusterJSON(apiv1.PluginConfiguration{Name: metadata.PluginName, Enabled: ptr.To(false)})),
+				Entry("for an unsupported auth mode", testImage, clusterJSON(ours(map[string]string{"auth": "ldap"}))),
+				Entry("when the store has no image", "", clusterJSON(ours(nil))),
+			)
 		})
 	}
 
@@ -248,6 +297,44 @@ var _ = Describe("Lifecycle", func() {
 		)))
 	})
 
+	It("keeps another plugin's sidecar and volume and adds ours after them", func(ctx context.Context) {
+		pod := readData(operatorData, "pod-main.other-plugin")
+		resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
+			clusterJSON(ours(nil)), pod))
+		Expect(err).NotTo(HaveOccurred())
+		patched := applyPatch(pod, resp.GetJsonPatch())
+
+		Expect(initContainerNames(patched)).To(Equal([]string{"bootstrap-controller", "other-plugin", metadata.SidecarContainerName}))
+		Expect(string(patched)).To(ContainSubstring("other-plugin-data"))
+		matchGolden("pod-main.other-plugin.peer.golden", patched)
+	})
+
+	It("adds the sidecar on CREATE without moving the bootstrap init containers", func(ctx context.Context) {
+		pod := readData(operatorData, "pod-main.create")
+		resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_CREATE,
+			clusterJSON(ours(nil)), pod))
+		Expect(err).NotTo(HaveOccurred())
+		patched := applyPatch(pod, resp.GetJsonPatch())
+
+		Expect(initContainerNames(patched)).To(Equal([]string{"bootstrap-controller", "bootstrap-instance", metadata.SidecarContainerName}))
+		matchGolden("pod-main.create.peer.golden", patched)
+	})
+
+	It("warns about an unknown plugin parameter and still patches", func(ctx context.Context) {
+		ctx, all := captureAll(ctx, 2)
+		resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
+			clusterJSON(ours(map[string]string{"sidecarCpu": "1"})), fixturePod("pod-main")))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.GetJsonPatch()).NotTo(BeEmpty())
+
+		Expect(all()).To(ContainElement(SatisfyAll(
+			HaveKeyWithValue("msg", "ignoring unknown plugin parameters"),
+			HaveKeyWithValue("keys", ConsistOf("sidecarCpu")),
+			HaveKeyWithValue("namespace", "fixture"),
+			HaveKeyWithValue("cluster", "fixture"),
+		)))
+	})
+
 	It("returns no patch for a Pod with no scratch volume in peer mode", func(ctx context.Context) {
 		pod := &corev1.Pod{}
 		Expect(json.Unmarshal(fixturePod("pod-main"), pod)).To(Succeed())
@@ -258,6 +345,7 @@ var _ = Describe("Lifecycle", func() {
 		resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
 			clusterJSON(ours(nil)), raw))
 		Expect(err).NotTo(HaveOccurred())
+		Expect(resp).NotTo(BeNil())
 		Expect(resp.GetJsonPatch()).To(BeEmpty())
 	})
 
@@ -372,11 +460,7 @@ var _ = Describe("Lifecycle logging", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(resp.GetJsonPatch()).To(BeEmpty())
 
-			Expect(hookLines()).To(HaveExactElements(SatisfyAll(
-				HaveKeyWithValue("operation", "EVALUATE"),
-				HaveKeyWithValue("outcome", "skipped"),
-				HaveKeyWithValue("level", BeEquivalentTo(2)),
-			)))
+			Expect(hookLines()).To(HaveExactElements(hookLine("EVALUATE", "skipped")))
 		},
 		Entry("for a Cluster without the plugin", clusterJSON(), func() []byte { return fixturePod("pod-main") }),
 		Entry("for an object that is not a Pod", clusterJSON(ours(nil)), func() []byte {
@@ -413,6 +497,8 @@ var _ = Describe("Lifecycle logging", func() {
 		},
 		Entry("a malformed Cluster", []byte(`{"spec":`), []byte(`{"kind":"Pod"}`), "decode cluster"),
 		Entry("a malformed object", clusterJSON(ours(nil)), []byte(`{"kind":`), "get object kind"),
+		Entry("an object whose metadata does not decode", clusterJSON(ours(nil)),
+			[]byte(`{"kind":"Pod","metadata":"x"}`), "decode object metadata"),
 		Entry("a Pod that does not decode", clusterJSON(ours(nil)), []byte(`{"kind":"Pod","spec":"x"}`), "decode pod"),
 	)
 

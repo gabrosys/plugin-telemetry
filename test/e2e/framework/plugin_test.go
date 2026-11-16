@@ -188,7 +188,7 @@ var _ = Describe("ParseHookCalls", func() {
 	DescribeTable("rejects",
 		func(line string) {
 			_, err := framework.ParseHookCalls(line, since)
-			Expect(err).To(HaveOccurred())
+			Expect(err).To(MatchError(framework.ErrInvalidHookLine))
 		},
 		Entry("a truncated JSON line", `{"msg":"lifecycle hook","ts":`),
 		Entry("a hook line without a timestamp", `{"msg":"lifecycle hook","operation":"EVALUATE"}`),

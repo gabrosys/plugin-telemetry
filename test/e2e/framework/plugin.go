@@ -219,7 +219,7 @@ func ParseHookCalls(logs string, since time.Time) ([]HookCall, error) {
 			Msg string `json:"msg"`
 		}
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			return nil, fmt.Errorf("decode log line %q: %w", line, err)
+			return nil, fmt.Errorf("%w: decode log line %q: %w", ErrInvalidHookLine, line, err)
 		}
 		if entry.Msg != hookMessage {
 			continue

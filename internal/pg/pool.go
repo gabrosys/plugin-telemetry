@@ -17,6 +17,8 @@ const (
 	initialBackoff    = time.Second
 	defaultMaxBackoff = 30 * time.Second
 	closeTimeout      = 2 * time.Second
+	// maxConnAge is how long a connection lives, measured from its dial.
+	maxConnAge = 10 * time.Second
 )
 
 // ErrPoolClosed is returned by AcquireWithin once the pool is closed.
@@ -51,6 +53,7 @@ type Pool struct {
 type idleConn struct {
 	conn     *pgx.Conn
 	database string
+	dialed   time.Time // when the connection was opened; a reuse keeps it
 	since    time.Time
 }
 
@@ -112,9 +115,9 @@ func (p *Pool) acquire(ctx context.Context, database string, withBackoff bool, m
 			return nil, nil, ErrPoolClosed
 		}
 
-		if conn := p.takeIdleLocked(database); conn != nil {
+		if ic := p.takeIdleLocked(database); ic != nil {
 			p.mu.Unlock()
-			return conn, p.releaser(ctx, conn, database), nil
+			return ic.conn, p.releaser(ctx, ic.conn, database, ic.dialed), nil
 		}
 
 		if b := p.failed[database]; withBackoff && b != nil && p.clk.Now().Before(b.retryAt) {
@@ -156,7 +159,7 @@ func (p *Pool) acquire(ctx context.Context, database string, withBackoff bool, m
 }
 
 // takeIdleLocked removes and returns the most recently released live connection to database.
-func (p *Pool) takeIdleLocked(database string) *pgx.Conn {
+func (p *Pool) takeIdleLocked(database string) *idleConn {
 	for i := len(p.idle) - 1; i >= 0; i-- {
 		ic := p.idle[i]
 		if ic.database != database {
@@ -168,7 +171,7 @@ func (p *Pool) takeIdleLocked(database string) *pgx.Conn {
 			p.notifyLocked()
 			continue
 		}
-		return ic.conn
+		return ic
 	}
 	return nil
 }
@@ -211,7 +214,7 @@ func (p *Pool) dial(ctx context.Context, database string) (*pgx.Conn, func(bool)
 		p.closeConn(ctx, conn, database)
 		return nil, nil, ErrPoolClosed
 	}
-	return conn, p.releaser(ctx, conn, database), nil
+	return conn, p.releaser(ctx, conn, database, p.clk.Now()), nil
 }
 
 func (p *Pool) connect(ctx context.Context, database string) (*pgx.Conn, error) {
@@ -240,24 +243,26 @@ func BackoffDelay(failures int, maxBackoff time.Duration) time.Duration {
 
 // releaser returns the function that hands conn back; only its first call has an effect. ctx is
 // accepted for contextcheck; closing conn uses WithoutCancel(ctx) and the 2 s closeTimeout.
-func (p *Pool) releaser(ctx context.Context, conn *pgx.Conn, database string) func(bool) {
+func (p *Pool) releaser(ctx context.Context, conn *pgx.Conn, database string, dialed time.Time) func(bool) {
 	var once sync.Once
 	return func(broken bool) {
-		once.Do(func() { p.release(ctx, conn, database, broken) })
+		once.Do(func() { p.release(ctx, conn, database, dialed, broken) })
 	}
 }
 
-func (p *Pool) release(ctx context.Context, conn *pgx.Conn, database string, broken bool) {
+// release hands conn back to the idle list, or closes it when it is broken, mid-transaction or older than
+// maxConnAge: a native sidecar must not hold PostgreSQL's smart shutdown open with pooled sessions.
+func (p *Pool) release(ctx context.Context, conn *pgx.Conn, database string, dialed time.Time, broken bool) {
 	p.mu.Lock()
 	// A connection left inside a transaction, open or failed, would carry it into the next run.
-	if broken || conn.IsClosed() || conn.PgConn().TxStatus() != 'I' || p.closed {
+	if broken || conn.IsClosed() || conn.PgConn().TxStatus() != 'I' || p.closed || p.clk.Since(dialed) >= maxConnAge {
 		p.total--
 		p.notifyLocked()
 		p.mu.Unlock()
 		p.closeConn(ctx, conn, database)
 		return
 	}
-	p.idle = append(p.idle, &idleConn{conn: conn, database: database, since: p.clk.Now()})
+	p.idle = append(p.idle, &idleConn{conn: conn, database: database, dialed: dialed, since: p.clk.Now()})
 	p.notifyLocked()
 	p.mu.Unlock()
 }

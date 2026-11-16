@@ -586,6 +586,47 @@ var _ = Describe("Pool", func() {
 		Eventually(conn.IsClosed).WithTimeout(time.Second).Should(BeTrue())
 	})
 
+	It("keeps a connection released before the maximum age and closes one released at it", func(ctx SpecContext) {
+		newPool(2, time.Hour)
+		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
+		Expect(err).NotTo(HaveOccurred())
+		clk.SetTime(start.Add(9 * time.Second))
+		release(false)
+		Expect(conn.IsClosed()).To(BeFalse())
+
+		again, release, err := pool.AcquireWithin(ctx, "app", 0)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(again).To(BeIdenticalTo(conn))
+		clk.SetTime(start.Add(10 * time.Second))
+		release(false)
+
+		Expect(conn.IsClosed()).To(BeTrue())
+		fresh, release, err := pool.AcquireWithin(ctx, "app", 0)
+		Expect(err).NotTo(HaveOccurred())
+		defer release(false)
+		Expect(fresh).NotTo(BeIdenticalTo(conn))
+	})
+
+	It("counts the age from the dial, not from the last reuse", func(ctx SpecContext) {
+		newPool(1, time.Hour)
+		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
+		Expect(err).NotTo(HaveOccurred())
+		clk.SetTime(start.Add(6 * time.Second))
+		release(false)
+
+		again, release, err := pool.AcquireWithin(ctx, "app", 0)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(again).To(BeIdenticalTo(conn))
+		clk.SetTime(start.Add(12 * time.Second))
+		release(false)
+
+		Expect(conn.IsClosed()).To(BeTrue())
+		next, release, err := pool.AcquireWithin(ctx, "app", time.Second)
+		Expect(err).NotTo(HaveOccurred(), "the closed connection freed its slot")
+		release(false)
+		Expect(next).NotTo(BeIdenticalTo(conn))
+	})
+
 	It("fails AcquireWithin after Close", func(ctx SpecContext) {
 		newPool(2, time.Minute)
 		pool.Close(ctx)

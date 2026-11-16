@@ -105,9 +105,12 @@ func newOperatorCommand() *cobra.Command {
 	f.StringVar(&opts.ClientCAPath, "client-cert", "", "path to the client CA certificate")
 	f.StringVar(&configMap, "sidecar-image-configmap", "", "name of the ConfigMap holding the sidecar image")
 	f.StringVar(&metricsEndpoint, "metrics-endpoint", "",
-		"base URL of the OTLP/HTTP collector for the plugin's self-metrics, like exporter.endpoint; none are exported when empty")
-	f.DurationVar(&metricsInterval, "metrics-interval", settings.Defaults().Exporter.Interval, "export interval of the plugin's self-metrics")
-	f.StringVar(&namespace, "namespace", os.Getenv("POD_NAMESPACE"), "namespace of the ConfigMap (default $POD_NAMESPACE)")
+		"base URL of the OTLP/HTTP collector for the plugin's self-metrics, "+
+			"like exporter.endpoint; none are exported when empty")
+	f.DurationVar(&metricsInterval, "metrics-interval", settings.Defaults().Exporter.Interval,
+		"export interval of the plugin's self-metrics")
+	f.StringVar(&namespace, "namespace", os.Getenv("POD_NAMESPACE"),
+		"namespace of the ConfigMap (default $POD_NAMESPACE)")
 
 	for _, name := range []string{"server-address", "server-cert", "server-key", "client-cert", "sidecar-image-configmap"} {
 		if err := cmd.MarkFlagRequired(name); err != nil {

@@ -109,7 +109,7 @@ func (c *IdentityController) reconcile(ctx context.Context, req ctrl.Request) er
 func (c *IdentityController) remove(ctx context.Context, logger log.Logger, cluster *apiv1.Cluster) error {
 	removed, err := c.Identity.Remove(ctx, cluster.Namespace, cluster.Name)
 	if removed > 0 {
-		logger.Info("identity controller", "outcome", "removed")
+		logger.Info("identity controller", "outcome", outcomeRemoved)
 	}
 	if err != nil {
 		return fmt.Errorf("remove identity of %s/%s: %w", cluster.Namespace, cluster.Name, err)
@@ -179,8 +179,7 @@ func referencesFor(ctx context.Context, r client.Reader, c *apiv1.Cluster) (clus
 
 	parsed, err := podpatch.ParseParams(plugin.Parameters)
 	if err != nil {
-		log.FromContext(ctx).Error(err, "invalid plugin parameters, no identity ensured",
-			"namespace", c.Namespace, "cluster", c.Name)
+		log.FromContext(ctx).Error(err, "invalid plugin parameters, no identity ensured")
 
 		return clusterconfig.Refs{}, false, nil
 	}

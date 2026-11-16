@@ -31,6 +31,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
 	"github.com/gabrosys/plugin-telemetry/internal/preflight"
+	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/framework"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/otlp"
 )
@@ -298,6 +299,27 @@ func describeMode(m mode) {
 				}
 			}
 			g.Expect(plugin).NotTo(BeEmpty(), "the collector received nothing from the plugin since %s", since)
+		}
+
+		// identityReconciles sums, over the plugin pods, the latest value of every
+		// cnpg_otel_plugin_identity_reconciles_total series the collector holds.
+		identityReconciles := func(g Gomega, ctx SpecContext) float64 {
+			pluginPods, err := framework.PluginPods(ctx, c)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			recent := lines(g, ctx, time.Now().Add(-time.Minute))
+			var total float64
+			for _, pod := range pluginPods {
+				latest := map[string]float64{}
+				for _, p := range otlp.Points(otlp.ForResource(recent, "k8s.pod.name", pod), selfmetrics.IdentityReconciles) {
+					latest[fmt.Sprint(p.Attrs)] = p.Value
+				}
+				for _, v := range latest {
+					total += v
+				}
+			}
+
+			return total
 		}
 
 		awaitPluginExport := func(ctx SpecContext, since time.Time) {
@@ -932,6 +954,11 @@ func describeMode(m mode) {
 					}
 				}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(specPoll).Should(Succeed())
 
+				var reconcilesBefore float64
+				Eventually(func(g Gomega, ctx SpecContext) {
+					reconcilesBefore = identityReconciles(g, ctx)
+				}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(specPoll).Should(Succeed())
+
 				edits := time.Now()
 				var lastWrite string
 				for i := range 10 {
@@ -959,8 +986,33 @@ func describeMode(m mode) {
 					Expect(after[pod].Series).To(ContainElements(e.Series), "series of %s disappeared", pod)
 				}
 
+				// Annotation edits don't change the generation, so the identity controller has nothing to reconcile.
+				Eventually(func(g Gomega, ctx SpecContext) {
+					pluginExported(g, ctx, edits.Add(2*exportInterval))
+					g.Expect(identityReconciles(g, ctx)).To(Equal(reconcilesBefore))
+				}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(specPoll).Should(Succeed())
+
 				noRollout(ctx)
 			}, SpecTimeout(6*time.Minute))
+
+		It("identity controller: a deleted RoleBinding comes back with the same Cluster generation and no rollout",
+			func(ctx SpecContext) {
+				objects, err := framework.Identity(ctx, c, ns, cname)
+				Expect(err).NotTo(HaveOccurred())
+				oldUID := objects.RoleBinding.UID
+				generation := getCluster(Default, ctx).Generation
+
+				Expect(c.Delete(ctx, objects.RoleBinding)).To(Succeed())
+
+				Eventually(func(g Gomega, ctx SpecContext) {
+					recreated, err := framework.Identity(ctx, c, ns, cname)
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(recreated.RoleBinding.UID).NotTo(Equal(oldUID))
+				}).WithContext(ctx).WithTimeout(30 * time.Second).WithPolling(time.Second).Should(Succeed())
+
+				Expect(getCluster(Default, ctx).Generation).To(Equal(generation))
+				noRollout(ctx)
+			}, SpecTimeout(2*time.Minute))
 
 		It("AC2: removing a ConfigMap and a query set revokes them, stops their metrics and ignores later edits", func(ctx SpecContext) {
 			var exporter v1alpha1.TelemetryExporter

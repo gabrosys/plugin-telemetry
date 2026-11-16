@@ -41,6 +41,7 @@ const (
 	outcomeStatus   = "status"
 	outcomeOK       = "ok"
 	outcomeApplied  = "applied"
+	outcomeRemoved  = "removed"
 	outcomeError    = "error"
 	outcomeInTheWay = "in the way"
 )

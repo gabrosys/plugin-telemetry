@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/gabrosys/plugin-telemetry/api/v1alpha1"
 	"github.com/gabrosys/plugin-telemetry/internal/identity"
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
@@ -294,6 +295,52 @@ var _ = Describe("IdentityController", func() {
 		res, err := ctrl.Reconcile(ctx, requestFor("ns", "pg"))
 		Expect(err).To(MatchError(errCreate))
 		Expect(res).To(Equal(reconcile.Result{}))
+	})
+
+	It("returns a Forbidden delete", func(ctx context.Context) {
+		forbidden := newClient([]client.Object{
+			newCluster("ns", "pg"),
+			&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: metadata.ServiceAccountName("pg")}},
+		}, interceptor.Funcs{
+			Delete: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.DeleteOption) error {
+				return apierrors.NewForbidden(schema.GroupResource{Resource: "serviceaccounts"}, obj.GetName(), errors.New("denied"))
+			},
+		})
+		ctrl = &operator.IdentityController{Client: forbidden, Identity: &identity.Ensurer{Reader: forbidden, Writer: forbidden}}
+
+		_, err := ctrl.Reconcile(ctx, requestFor("ns", "pg"))
+		Expect(apierrors.IsForbidden(err)).To(BeTrue(), "%v", err)
+	})
+
+	It("returns an exporter read error", func(ctx context.Context) {
+		failing := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*v1alpha1.TelemetryExporter); ok {
+					return errGet
+				}
+
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		})
+		ctrl = &operator.IdentityController{Client: failing, Identity: &identity.Ensurer{Reader: failing, Writer: failing}}
+
+		_, err := ctrl.Reconcile(ctx, requestFor("ns", "pg"))
+		Expect(err).To(MatchError(errGet))
+	})
+
+	It("logs an invalid parameter without repeating the namespace the reconcile logger carries", func(ctx context.Context) {
+		var lines []string
+		sink := funcr.NewJSON(func(obj string) { lines = append(lines, obj) }, funcr.Options{})
+		ctx = logr.NewContext(ctx, sink.WithValues("namespace", "ns", "name", "pg"))
+		build(newCluster("ns", "pg", ours(map[string]string{"auth": "ldap"})))
+
+		reconcileOnce(ctx, "ns", "pg")
+
+		Expect(lines).To(ContainElement(ContainSubstring("invalid plugin parameters")))
+		for _, line := range lines {
+			Expect(strings.Count(line, `"namespace"`)).To(Equal(1), line)
+			Expect(line).NotTo(ContainSubstring(`"cluster"`))
+		}
 	})
 
 	Describe("identity reconcile metrics", func() {

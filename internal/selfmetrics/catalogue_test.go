@@ -138,3 +138,13 @@ var _ = Describe("Catalogue", func() {
 		Expect(buf.String()).To(Equal(string(want)))
 	})
 })
+
+var _ = Describe("Render", func() {
+	It("fails for a component without a section and writes nothing", func() {
+		var out bytes.Buffer
+		err := selfmetrics.Render(&out, append(selfmetrics.Catalogue(), selfmetrics.Metric{Name: "m", Component: "other"}))
+
+		Expect(err).To(MatchError(And(ContainSubstring(`"m"`), ContainSubstring(`"other"`))))
+		Expect(out.Len()).To(BeZero())
+	})
+})

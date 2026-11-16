@@ -151,7 +151,7 @@ func gatherFacts(ctx context.Context, conn *pgx.Conn, guard string, settings map
 	}()
 	superuser, err := pg.ApplyGuard(ctx, tx, guard)
 	if err != nil {
-		return Facts{}, fmt.Errorf("set the facts transaction limits: %w", err)
+		return Facts{}, fmt.Errorf("facts transaction: %w", err)
 	}
 	if superuser {
 		return Facts{Checks: map[string]bool{"superuser": true}}, ErrSuperuser

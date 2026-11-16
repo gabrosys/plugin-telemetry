@@ -165,7 +165,7 @@ var _ = Describe("GatherFacts", func() {
 		defer release(true)
 
 		_, err = planner.GatherFacts(ctx, conn, "SELECT pg_catalog.no_such_guard()")
-		Expect(err).To(MatchError(ContainSubstring("set the facts transaction limits")))
+		Expect(err).To(MatchError(ContainSubstring("set the transaction limits")))
 		var pgErr *pgconn.PgError
 		Expect(errors.As(err, &pgErr)).To(BeTrue(), "error: %v", err)
 		Expect(pgErr.Code).To(Equal("42883"))
@@ -189,7 +189,7 @@ var _ = Describe("GatherFacts", func() {
 		_, err = planner.GatherFacts(long, conn, "SELECT pg_catalog.no_such_guard()")
 		// The 2s rollback bound, then pgx's 2s socket deadline after its cancel request, plus a margin.
 		Expect(time.Since(start)).To(BeNumerically("<", 6*time.Second))
-		Expect(err).To(MatchError(ContainSubstring("set the facts transaction limits")))
+		Expect(err).To(MatchError(ContainSubstring("set the transaction limits")))
 		Expect(err).To(MatchError(ContainSubstring("roll back facts transaction")))
 	}, SpecTimeout(20*time.Second))
 

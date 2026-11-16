@@ -134,9 +134,28 @@ func GuardSQL(c Config) string {
 
 // ApplyGuard runs guard (GuardSQL, Pool.Guard) in tx and reports whether the session role is a superuser.
 func ApplyGuard(ctx context.Context, tx pgx.Tx, guard string) (superuser bool, err error) {
-	var limits [5]string
-	if err := tx.QueryRow(ctx, guard).Scan(&limits[0], &limits[1], &limits[2], &limits[3], &limits[4], &superuser); err != nil {
-		return false, fmt.Errorf("run the guard: %w", err)
+	rows, err := tx.Query(ctx, guard)
+	if err != nil {
+		return false, fmt.Errorf("set the transaction limits: %w", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return false, fmt.Errorf("set the transaction limits: %w", err)
+		}
+		return false, errors.New("set the transaction limits: the guard returned no row")
+	}
+	values, err := rows.Values()
+	if err != nil {
+		return false, fmt.Errorf("set the transaction limits: %w", err)
+	}
+	superuser, ok := values[len(values)-1].(bool)
+	if !ok {
+		return false, errors.New("set the transaction limits: the guard's last column is not a boolean")
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("set the transaction limits: %w", err)
 	}
 	return superuser, nil
 }

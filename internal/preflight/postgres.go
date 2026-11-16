@@ -105,7 +105,7 @@ func readOnly(ctx context.Context, conn *pgx.Conn, guard string, rep *PostgresRe
 	}()
 	superuser, err := pg.ApplyGuard(ctx, tx, guard)
 	if err != nil {
-		return fmt.Errorf("set the transaction limits: %w", err)
+		return fmt.Errorf("check transaction: %w", err)
 	}
 	if superuser {
 		return fmt.Errorf("%w: %s", planner.ErrSuperuser, rep.User)

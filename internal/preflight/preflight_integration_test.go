@@ -76,6 +76,8 @@ var _ = Describe("Run against PostgreSQL", func() {
 		Expect(rep.Postgres).NotTo(BeNil())
 		Expect(rep.Postgres.Connected).To(BeTrue())
 		Expect(rep.Postgres.Error).To(ContainSubstring("the session role is a superuser"))
+		Expect(rep.Postgres.Error).To(ContainSubstring(role))
+		Expect(rep.Postgres.Error).NotTo(ContainSubstring(pgtest.MonitorPassword))
 		Expect(rep.Postgres.CurrentUser).To(BeEmpty())
 	})
 })

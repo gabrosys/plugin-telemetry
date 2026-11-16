@@ -601,7 +601,7 @@ var _ = Describe("Executor", func() {
 		})
 
 		// A query that ran would give samples or its own division error; ErrSuperuser proves it never left the sidecar.
-		DescribeTable("runs neither the predicate nor the query and asks for a facts round",
+		DescribeTable("runs neither the predicate nor the query and gives ErrSuperuser",
 			func(ctx SpecContext, mutate func(*queries.Definition)) {
 				job := jobFor("SELECT 'a' AS datname, 1/0 AS value", mutate)
 				res := newExecutor(superPool, l).Run(ctx, job)

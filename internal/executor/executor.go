@@ -172,7 +172,7 @@ func (e *Executor) inTransaction(ctx context.Context, conn *pgx.Conn, job planne
 			return false, fmt.Errorf("read rolsuper of the session role: %w", err)
 		}
 	} else if superuser, err = pg.ApplyGuard(ctx, tx, e.pool.Guard()); err != nil {
-		return false, fmt.Errorf("set the transaction limits: %w", err)
+		return false, fmt.Errorf("query transaction: %w", err)
 	}
 	if superuser {
 		return false, planner.ErrSuperuser

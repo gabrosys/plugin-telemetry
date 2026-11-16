@@ -199,30 +199,34 @@ var _ = Describe("Source", func() {
 		Consistently(fw.active, "100ms").Should(ContainElement("secrets/h1"))
 	})
 
-	It("logs each Build warning once while the settings bytes stay the same", func() {
+	It("logs each Build warning once while the warning set stays the same", func() {
 		start()
 		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
-		spec := func(endpoint string) map[string]any {
+		spec := func(endpoint string, labels ...any) map[string]any {
 			return map[string]any{
 				"exporter":       map[string]any{"endpoint": endpoint},
-				"resourceLabels": []any{"cnpg.io/instanceRole"},
+				"resourceLabels": labels,
 			}
 		}
-		fw.set("telemetryexporters", "default", exporter(spec("http://c:4318")))
 		const warning = "spec.resourceLabels: cnpg.io/instanceRole is ignored"
+		fw.set("telemetryexporters", "default", exporter(spec("http://c:4318", "app")))
+		_, plain, err := src.Settings()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(logs.String()).NotTo(ContainSubstring(warning))
+
+		fw.set("telemetryexporters", "default", exporter(spec("http://c:4318", "app", "cnpg.io/instanceRole")))
 		for range 3 {
-			_, _, err := src.Settings()
+			_, data, err := src.Settings()
 			Expect(err).NotTo(HaveOccurred())
+			Expect(data).To(Equal(plain), "the ignored label leaves the bytes unchanged")
 		}
-		Expect(strings.Count(logs.String(), warning)).To(Equal(1))
+		Expect(strings.Count(logs.String(), warning)).To(Equal(1), "a warning that only the warning set shows is logged")
 		Expect(logs.String()).To(MatchRegexp(`(?i)warn.*` + warning))
 
-		fw.set("telemetryexporters", "default", exporter(spec("http://other:4318")))
-		for range 2 {
-			_, _, err := src.Settings()
-			Expect(err).NotTo(HaveOccurred())
-		}
-		Expect(strings.Count(logs.String(), warning)).To(Equal(2), "changed bytes log the warnings again")
+		fw.set("telemetryexporters", "default", exporter(spec("http://other:4318", "app", "cnpg.io/instanceRole")))
+		_, _, err = src.Settings()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.Count(logs.String(), warning)).To(Equal(1), "the same warning is not logged again")
 	})
 
 	It("starts watches for exactly References and stops those no longer referenced", func() {

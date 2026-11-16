@@ -635,6 +635,7 @@ var _ = Describe("An engine on an in-memory Config", func() {
 		}
 		Expect(h.loggedAll("configuration not ready, waiting", "reason one")).To(Equal(2))
 		Expect(h.loggedAll("configuration not ready, waiting", "reason two")).To(Equal(1))
+		Expect(h.loggedAll("configuration not ready, waiting", `"level"=0`)).To(Equal(3), "logged at info")
 		Expect(h.logged("invalid configuration")).To(BeZero())
 		Expect(h.logged("no configuration")).To(BeZero())
 

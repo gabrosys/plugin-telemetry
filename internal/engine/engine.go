@@ -73,7 +73,8 @@ type Options struct {
 // Run blocks until ctx ends. An invalid configuration at start or on reload is logged;
 // at start the engine idles until the settings become valid, later it keeps the last good ones.
 // When the Config has nothing to run (ErrNoConfiguration) the engine stops everything and idles
-// until it has.
+// until it has. When an input is not available yet (ErrNotReady) it keeps the configuration in force
+// and waits.
 func Run(ctx context.Context, o Options) error {
 	return RunWith(ctx, o, nil)
 }

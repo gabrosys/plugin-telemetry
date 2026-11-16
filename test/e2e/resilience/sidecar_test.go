@@ -53,6 +53,7 @@ func (s *suite) killSidecar(ctx context.Context, primary string) time.Duration {
 	var (
 		longest time.Duration
 		outFrom time.Time
+		sawOut  bool
 	)
 	Eventually(func(ctx context.Context) (bool, error) {
 		var p corev1.Pod
@@ -71,10 +72,10 @@ func (s *suite) killSidecar(ctx context.Context, primary string) time.Duration {
 				outFrom = time.Time{}
 			}
 
-			return sidecarRestarts(&p) == before+1, nil
+			return sawOut && sidecarRestarts(&p) == before+1, nil
 		}
 		if outFrom.IsZero() {
-			outFrom = now
+			outFrom, sawOut = now, true
 		}
 
 		return false, nil

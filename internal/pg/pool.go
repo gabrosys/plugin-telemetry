@@ -263,6 +263,13 @@ func (p *Pool) SetIdleTimeout(d time.Duration) {
 	p.idleTimeout = d
 }
 
+// IdleTimeout returns the idle timeout in force.
+func (p *Pool) IdleTimeout() time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.idleTimeout
+}
+
 // CloseIdle closes the idle connections that have been unused for the idle timeout.
 func (p *Pool) CloseIdle() {
 	p.mu.Lock()

@@ -391,8 +391,8 @@ func (e *engine) onChange(ctx context.Context) {
 
 // apply sets up next in place of prev, which is nil the first time: it builds the exporter when its
 // settings, its files or the resource changed, swaps the pool when the connection settings, the limits
-// or the planning cycle changed (a new idle timeout alone goes to the pool in place), and hands the exporter to the export loop. On error
-// nothing has changed.
+// or the planning cycle changed (a new idle timeout alone goes to the pool in place), and hands the
+// exporter to the export loop. On error nothing has changed.
 func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 	s := next.settings
 	resourceChanged := prev == nil || prev.settings.Cluster != s.Cluster || prev.settings.Namespace != s.Namespace ||

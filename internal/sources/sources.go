@@ -211,7 +211,8 @@ func normalizeMappings(metrics []queries.Mapping) []queries.Mapping {
 	for i, m := range metrics {
 		out[i] = make(queries.Mapping, len(m))
 		for name, col := range m {
-			if len(col.MetricMapping) == 0 {
+			// An empty metric_mapping beside a metrics_mapping is not absent: Define warns and uses the empty one.
+			if len(col.MetricMapping) == 0 && col.MetricsMapping == nil {
 				col.MetricMapping = nil
 			}
 			out[i][name] = col

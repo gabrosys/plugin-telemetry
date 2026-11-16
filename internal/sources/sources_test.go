@@ -218,6 +218,18 @@ var _ = Describe("Loader", func() {
 		Expect(hash(emptyMetrics)).To(Equal(hash(noMetrics)))
 	})
 
+	It("hashes an empty metric_mapping beside a metrics_mapping differently from an absent one", func() {
+		const base = "a:\n  query: SELECT 1\n  metrics:\n    - v:\n        usage: MAPPEDMETRIC\n        description: V.\n"
+		const alt = "        metrics_mapping:\n          x: 1\n"
+		hash := func(content string) string {
+			write(f1, content)
+			return sources.NewLoader(os.ReadFile, []string{f1}).Load().Hash
+		}
+
+		Expect(hash(base + "        metric_mapping: {}\n" + alt)).NotTo(Equal(hash(base + alt)))
+		Expect(hash(base + "        metric_mapping: {}\n")).To(Equal(hash(base)))
+	})
+
 	It("revives the version from before a file went missing when it comes back invalid", func() {
 		write(f1, "a:\n  query: SELECT 1\n")
 		l := sources.NewLoader(os.ReadFile, []string{f1})

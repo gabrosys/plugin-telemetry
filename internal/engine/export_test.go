@@ -229,3 +229,32 @@ func FactsFailuresAfterPanicOnStop(ctx context.Context) int {
 	e.factsRound(ctx, true)
 	return e.factsFailures
 }
+
+// IdleTimeoutAfterIdleOnlyApply applies a configuration, then one that differs in the idle timeout only,
+// and reports whether the pool is the same and the idle timeout it has.
+func IdleTimeoutAfterIdleOnlyApply(ctx context.Context) (kept bool, idle time.Duration, err error) {
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, nil)
+	if err != nil {
+		return false, 0, err
+	}
+	s := settings.Settings{
+		Postgres: settings.Postgres{Host: "127.0.0.1", Port: 1, User: "u", Database: "app", MaxConnections: 2},
+		Limits:   settings.Limits{QueryTimeout: time.Second, LockTimeout: time.Second},
+		Exporter: settings.Exporter{
+			Protocol: "http/protobuf", Endpoint: "http://127.0.0.1:1/v1/metrics", Compression: "none",
+			Interval: time.Second, Timeout: time.Second / 2, MaxPointsPerRequest: 100,
+		},
+		PlanInterval: time.Minute,
+	}
+	first := &configuration{settings: s, idleTimeout: time.Minute}
+	second := &configuration{settings: s, idleTimeout: 2 * time.Minute}
+	defer e.teardown()
+	if err := e.apply(ctx, nil, first); err != nil {
+		return false, 0, errors.Join(err, e.mp.Shutdown(ctx))
+	}
+	pool := e.runner.pool
+	if err := e.apply(ctx, first, second); err != nil {
+		return false, 0, errors.Join(err, e.mp.Shutdown(ctx))
+	}
+	return e.runner.pool == pool, pool.IdleTimeout(), e.mp.Shutdown(ctx)
+}

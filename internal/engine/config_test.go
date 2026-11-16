@@ -550,6 +550,13 @@ func matches(attrs, want map[string]string) bool {
 }
 
 var _ = Describe("An engine on an in-memory Config", func() {
+	It("hands a new idle timeout to the kept pool", func(ctx SpecContext) {
+		kept, idle, err := engine.IdleTimeoutAfterIdleOnlyApply(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(kept).To(BeTrue())
+		Expect(idle).To(Equal(2 * time.Minute))
+	})
+
 	generation := func(g string) map[string]string { return map[string]string{"generation": g} }
 
 	It("reloads on a settings or sources change and not on identical bytes", func() {

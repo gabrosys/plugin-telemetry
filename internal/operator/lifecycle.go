@@ -13,6 +13,7 @@ import (
 	"github.com/cloudnative-pg/cnpg-i-machinery/pkg/pluginhelper/object"
 	"github.com/cloudnative-pg/cnpg-i/pkg/lifecycle"
 	"github.com/cloudnative-pg/machinery/pkg/log"
+	"gomodules.xyz/jsonpatch/v2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
@@ -183,9 +184,39 @@ func (l *Lifecycle) patch(
 		return nil, fmt.Errorf("apply sidecar patch: %w", err)
 	}
 
-	patch, err := object.CreatePatch(mutated, original)
+	patch, err := podJSONPatch(original, mutated)
 	if err != nil {
 		return nil, fmt.Errorf("create json patch: %w", err)
+	}
+
+	return patch, nil
+}
+
+// podJSONPatch returns the JSON patch from original to mutated, or nil when
+// both marshal to the same document. It diffs the documents, not the structs,
+// so a changed resource.Quantity is not missed.
+func podJSONPatch(original, mutated *corev1.Pod) ([]byte, error) {
+	originalJSON, err := json.Marshal(original)
+	if err != nil {
+		return nil, fmt.Errorf("marshal original pod: %w", err)
+	}
+
+	mutatedJSON, err := json.Marshal(mutated)
+	if err != nil {
+		return nil, fmt.Errorf("marshal mutated pod: %w", err)
+	}
+
+	operations, err := jsonpatch.CreatePatch(originalJSON, mutatedJSON)
+	if err != nil {
+		return nil, fmt.Errorf("diff pods: %w", err)
+	}
+	if len(operations) == 0 {
+		return nil, nil
+	}
+
+	patch, err := json.Marshal(operations)
+	if err != nil {
+		return nil, fmt.Errorf("marshal patch: %w", err)
 	}
 
 	return patch, nil

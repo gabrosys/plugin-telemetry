@@ -138,6 +138,32 @@ var _ = Describe("Lifecycle", func() {
 				Expect(canonical(applyPatch(pod, resp.GetJsonPatch()))).To(MatchJSON(wantJSON))
 			})
 
+			It("updates the resources of an injected sidecar on EVALUATE", func(ctx context.Context) {
+				resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
+					clusterJSON(ours(nil)), pod))
+				Expect(err).NotTo(HaveOccurred())
+				injected := applyPatch(pod, resp.GetJsonPatch())
+
+				resp, err = srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
+					clusterJSON(ours(map[string]string{"sidecarCPU": "100m", "sidecarMemory": "128Mi"})), injected))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resp.GetJsonPatch()).NotTo(BeEmpty())
+
+				patched := &corev1.Pod{}
+				Expect(json.Unmarshal(applyPatch(injected, resp.GetJsonPatch()), patched)).To(Succeed())
+				var sidecar corev1.Container
+				for _, c := range patched.Spec.InitContainers {
+					if c.Name == metadata.SidecarContainerName {
+						sidecar = c
+					}
+				}
+				for _, list := range []corev1.ResourceList{sidecar.Resources.Requests, sidecar.Resources.Limits} {
+					cpu, memory := list[corev1.ResourceCPU], list[corev1.ResourceMemory]
+					Expect(cpu.String()).To(Equal("100m"))
+					Expect(memory.String()).To(Equal("128Mi"))
+				}
+			})
+
 			It("changes nothing on CREATE after EVALUATE", func(ctx context.Context) {
 				cluster := clusterJSON(ours(nil))
 				resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, cluster, pod))

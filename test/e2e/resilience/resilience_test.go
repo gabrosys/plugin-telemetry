@@ -26,4 +26,5 @@ var _ = Describe("resilience", Ordered, ContinueOnFailure, func() {
 
 	restartSpecs(s)
 	renewalSpecs(s)
+	failoverSpecs(s)
 })

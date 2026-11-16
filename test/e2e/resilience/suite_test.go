@@ -5,6 +5,7 @@ package resilience_test
 import (
 	"context"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -92,7 +93,7 @@ func (s *suite) setUp(ctx SpecContext) {
 	}).WithContext(ctx).WithTimeout(clusterTimeout).WithPolling(statePoll).Should(BeTrue(), "cluster ready")
 }
 
-// healthy waits until the Cluster is ready, the plugin is rolled out and the collector is ready.
+// healthy waits until the Cluster is ready, the plugin is rolled out, the collector is ready and the primary is in -rw.
 func (s *suite) healthy(ctx context.Context) {
 	GinkgoHelper()
 
@@ -104,6 +105,15 @@ func (s *suite) healthy(ctx context.Context) {
 	Eventually(func(ctx context.Context) error {
 		return framework.CollectorReady(ctx, s.c)
 	}).WithContext(ctx).WithTimeout(3*time.Minute).WithPolling(statePoll).Should(Succeed(), "collector ready")
+	Eventually(func(ctx context.Context) (bool, error) {
+		var cluster apiv1.Cluster
+		if err := s.c.Get(ctx, s.cluster, &cluster); err != nil {
+			return false, err
+		}
+		ready, err := framework.ReadyEndpoints(ctx, s.c, s.ns, clusterName+"-rw")
+
+		return slices.Contains(ready, cluster.Status.CurrentPrimary), err
+	}).WithContext(ctx).WithTimeout(clusterTimeout).WithPolling(statePoll).Should(BeTrue(), "primary in -rw")
 }
 
 // traffic touches the Cluster every 2 s so CNPG calls the plugin's hooks; stop ends it and waits for it.

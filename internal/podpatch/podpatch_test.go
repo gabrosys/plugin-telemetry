@@ -43,7 +43,7 @@ func loadPod(fixture string) *corev1.Pod {
 }
 
 func params(auth podpatch.AuthMode) podpatch.Params {
-	return podpatch.Params{Auth: auth, CPU: resource.MustParse("50m"), Memory: resource.MustParse("64Mi")}
+	return podpatch.Params{Auth: auth, CPU: resource.MustParse("50m"), Memory: resource.MustParse("96Mi")}
 }
 
 func marshal(pod *corev1.Pod) []byte {
@@ -106,7 +106,7 @@ var _ = Describe("Apply", func() {
 				for _, list := range []corev1.ResourceList{c.Resources.Requests, c.Resources.Limits} {
 					cpu, mem := list[corev1.ResourceCPU], list[corev1.ResourceMemory]
 					Expect(cpu.Cmp(resource.MustParse("50m"))).To(BeZero())
-					Expect(mem.Cmp(resource.MustParse("64Mi"))).To(BeZero())
+					Expect(mem.Cmp(resource.MustParse("96Mi"))).To(BeZero())
 				}
 
 				Expect(c.SecurityContext).To(Equal(&corev1.SecurityContext{

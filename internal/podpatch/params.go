@@ -24,7 +24,7 @@ const DefaultExporter = "default"
 
 const (
 	defaultCPU    = "50m"
-	defaultMemory = "64Mi"
+	defaultMemory = "96Mi"
 	minCPU        = "10m"
 	minMemory     = "32Mi"
 )

@@ -234,7 +234,7 @@ var _ = Describe("Lifecycle", func() {
 			}
 		}
 		mem := sidecar.Resources.Limits[corev1.ResourceMemory]
-		Expect(mem.String()).To(Equal("64Mi"))
+		Expect(mem.String()).To(Equal("96Mi"))
 
 		Expect(all()).To(ContainElement(SatisfyAll(
 			HaveKeyWithValue("msg", "invalid sidecar resource, using the default"),

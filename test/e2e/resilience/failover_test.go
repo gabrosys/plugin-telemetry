@@ -5,7 +5,6 @@ package resilience_test
 import (
 	"context"
 	"fmt"
-	"slices"
 	"time"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
@@ -22,7 +21,6 @@ const (
 	failoverTimeout = 3 * time.Minute
 	failoverPoll    = 250 * time.Millisecond
 	failoverSlack   = 30 * time.Second
-	hookLookback    = time.Minute
 	pluginContainer = "plugin-telemetry"
 )
 
@@ -67,10 +65,11 @@ func (s *suite) failover(
 
 	var hit string
 	Eventually(func(ctx context.Context) (string, error) {
-		return s.newestPluginPod(ctx, time.Now().Add(-hookLookback))
+		var err error
+		hit, err = s.newestPluginPod(ctx, start)
+
+		return hit, err
 	}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(statePoll).ShouldNot(BeEmpty(), "no hook call for %s", s.ns)
-	hit, err := s.newestPluginPod(ctx, time.Now().Add(-hookLookback))
-	Expect(err).NotTo(HaveOccurred())
 
 	if fault != nil {
 		var plugin corev1.Pod
@@ -85,21 +84,20 @@ func (s *suite) failover(
 	Expect(s.c.Delete(ctx, &primary, client.GracePeriodSeconds(1))).To(Succeed())
 	deleted := time.Now()
 
-	Eventually(func(ctx context.Context) ([]string, error) {
+	Eventually(func(ctx context.Context) (string, error) {
 		ready, err := framework.ReadyEndpoints(ctx, s.c, s.ns, clusterName+"-rw")
 		if err != nil {
-			return nil, err
+			return "", err
+		}
+		for _, name := range ready {
+			if name != oldPrimary {
+				newPrimary = name
+			}
 		}
 
-		return slices.DeleteFunc(ready, func(name string) bool { return name == oldPrimary }), nil
+		return newPrimary, nil
 	}).WithContext(ctx).WithTimeout(failoverTimeout).WithPolling(failoverPoll).ShouldNot(BeEmpty(), "no new primary in -rw")
 	took = time.Since(deleted)
-
-	ready, err := framework.ReadyEndpoints(ctx, s.c, s.ns, clusterName+"-rw")
-	Expect(err).NotTo(HaveOccurred())
-	ready = slices.DeleteFunc(ready, func(name string) bool { return name == oldPrimary })
-	Expect(ready).NotTo(BeEmpty())
-	newPrimary = ready[0]
 
 	stop()
 	AddReportEntry("failover", fmt.Sprintf("plugin replica hit: %s, old: %s, new: %s, took: %s", hit, oldPrimary, newPrimary, took))

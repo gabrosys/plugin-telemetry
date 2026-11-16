@@ -109,7 +109,7 @@ func (s *Scheduler) Update(p planner.Plan) {
 }
 
 // Run starts one worker per database in the plan and blocks until ctx is done.
-// It returns after every running job has returned.
+// It returns after every running job has returned. Call it once: a second call starts a second worker per database.
 func (s *Scheduler) Run(ctx context.Context) error {
 	s.mu.Lock()
 	s.started = true

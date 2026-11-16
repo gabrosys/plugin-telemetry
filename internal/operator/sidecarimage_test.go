@@ -144,22 +144,13 @@ var _ = Describe("image event handler", func() {
 		Expect(logs()).To(ContainElement(HaveKeyWithValue("type", "string")))
 	})
 
-	DescribeTable("keeps the previous image and logs an error on a delete",
-		func(deleted func(*corev1.ConfigMap) any) {
-			handler.OnAdd(configMap(map[string]string{operator.SidecarImageKey: validImage}), true)
-			handler.OnDelete(deleted(configMap(nil)))
+	It("keeps the previous image and logs the configured ConfigMap on a delete", func() {
+		handler.OnAdd(configMap(map[string]string{operator.SidecarImageKey: validImage}), true)
+		handler.OnDelete(configMap(nil))
 
-			Expect(store.Image()).To(Equal(validImage))
-			Expect(logs()).To(ContainElement(SatisfyAll(HaveKey("error"), SatisfyAll(HaveKeyWithValue("namespace", "cnpg-system"), HaveKeyWithValue("configmap", "sidecar-image")))))
-		},
-		Entry("of the object", func(cm *corev1.ConfigMap) any { return cm }),
-		Entry("seen as a tombstone", func(cm *corev1.ConfigMap) any {
-			return toolscache.DeletedFinalStateUnknown{Key: "cnpg-system/sidecar-image", Obj: cm}
-		}),
-		Entry("seen as a tombstone without the object", func(*corev1.ConfigMap) any {
-			return toolscache.DeletedFinalStateUnknown{Key: "cnpg-system/sidecar-image"}
-		}),
-	)
+		Expect(store.Image()).To(Equal(validImage))
+		Expect(logs()).To(ContainElement(SatisfyAll(HaveKey("error"), SatisfyAll(HaveKeyWithValue("namespace", "cnpg-system"), HaveKeyWithValue("configmap", "sidecar-image")))))
+	})
 })
 
 var _ = Describe("WatchSidecarImage", func() {

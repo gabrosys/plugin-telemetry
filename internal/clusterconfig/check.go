@@ -31,7 +31,7 @@ func Check(c *apiv1.Cluster, p podpatch.Params, e *v1alpha1.TelemetryExporter) e
 			in.Params.PasswordSecret = placeholderUser
 		}
 	}
-	if e != nil && e.Spec.EnvFrom != nil {
+	if e.Spec.EnvFrom != nil {
 		in.EnvConfigMap = map[string]string{endpointKey: placeholderEndpoint}
 	}
 

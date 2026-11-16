@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
+	"slices"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -113,17 +115,27 @@ func (m *PluginMetrics) register(meter metric.Meter) error {
 			return fmt.Errorf("metric %s: unknown instrument %q", def.Name, def.Instrument)
 		}
 	}
-	for name, missing := range map[string]bool{
+	return m.missingInstruments()
+}
+
+// missingInstruments fails naming, sorted, each plugin metric that has no instrument.
+func (m *PluginMetrics) missingInstruments() error {
+	var missing []string
+	for name, absent := range map[string]bool{
 		selfmetrics.HookCalls:          m.hookCalls == nil,
 		selfmetrics.HookDuration:       m.duration == nil,
 		selfmetrics.IdentityReconciles: m.reconciles == nil,
 	} {
-		if missing {
-			return fmt.Errorf("the catalogue has no plugin metric %s", name)
+		if absent {
+			missing = append(missing, name)
 		}
 	}
+	if len(missing) == 0 {
+		return nil
+	}
+	slices.Sort(missing)
 
-	return nil
+	return fmt.Errorf("the catalogue has no plugin metric %s", strings.Join(missing, ", "))
 }
 
 // Hook records one hook call and its duration. A nil receiver records nothing.

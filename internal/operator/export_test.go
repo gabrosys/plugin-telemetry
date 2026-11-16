@@ -18,3 +18,6 @@ var (
 
 // Exposed for metrics_test.go.
 var CollectMetrics = (*PluginMetrics).collect
+
+// MissingInstruments exposes missingInstruments to metrics_test.go.
+func (m *PluginMetrics) MissingInstruments() error { return m.missingInstruments() }

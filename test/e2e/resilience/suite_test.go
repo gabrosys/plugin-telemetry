@@ -109,7 +109,11 @@ func (s *suite) healthy(ctx context.Context) {
 // traffic touches the Cluster every 2 s so CNPG calls the plugin's hooks; stop ends it and waits for it.
 func (s *suite) traffic(ctx context.Context) (stop func()) {
 	ctx, cancel := context.WithCancel(ctx)
-	var wg sync.WaitGroup
+	var (
+		wg       sync.WaitGroup
+		failures int
+		first    error
+	)
 	wg.Add(1)
 	go func() {
 		defer GinkgoRecover()
@@ -122,18 +126,22 @@ func (s *suite) traffic(ctx context.Context) (stop func()) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				// A failed touch is retried by the next tick.
+				// A failed touch is retried by the next tick; stop reports the count.
 				if _, err := framework.Touch(ctx, s.c, s.cluster, time.Now().Format(time.RFC3339Nano)); err != nil && ctx.Err() == nil {
-					AddReportEntry("touch error", err.Error())
+					failures++
+					if first == nil {
+						first = err
+					}
 				}
 			}
 		}
 	}()
 
-	return func() {
+	return sync.OnceFunc(func() {
 		cancel()
 		wg.Wait()
-	}
+		Expect(first).NotTo(HaveOccurred(), "%d touches failed; the first error", failures)
+	})
 }
 
 // expectNoFailedHookCall fails when the operator logged a failed plugin call for the suite's namespace after since.
@@ -151,7 +159,7 @@ func readTestdata(name string) []byte {
 
 	root, err := os.OpenRoot("testdata")
 	Expect(err).NotTo(HaveOccurred())
-	DeferCleanup(root.Close)
+	defer func() { Expect(root.Close()).To(Succeed()) }()
 
 	data, err := root.ReadFile(name)
 	Expect(err).NotTo(HaveOccurred())

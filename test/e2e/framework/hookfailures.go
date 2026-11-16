@@ -3,6 +3,7 @@ package framework
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -49,7 +50,11 @@ func FailedHookCalls(ctx context.Context, cfg *rest.Config, namespace string, si
 	// SinceTime has second precision; ParseFailedHookCalls drops the earlier lines.
 	sinceTime := metav1.NewTime(since)
 	var calls []string
-	for _, pod := range pods.Items {
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if err := CheckOperatorRestart(pod, since); err != nil {
+			return nil, err
+		}
 		key := types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}
 		logs, err := ContainerLogs(ctx, cfg, key, operatorContainer, &corev1.PodLogOptions{SinceTime: &sinceTime})
 		if err != nil {
@@ -59,6 +64,27 @@ func FailedHookCalls(ctx context.Context, cfg *rest.Config, namespace string, si
 	}
 
 	return calls, nil
+}
+
+// ErrOperatorRestarted is returned when the operator container terminated after the window started.
+var ErrOperatorRestarted = errors.New("operator container restarted")
+
+// CheckOperatorRestart fails when pod's manager container terminated after since: the log of its earlier
+// container is gone, so a failed hook call in the window could be missing.
+func CheckOperatorRestart(pod *corev1.Pod, since time.Time) error {
+	for _, st := range pod.Status.ContainerStatuses {
+		if st.Name != operatorContainer {
+			continue
+		}
+		for _, term := range []*corev1.ContainerStateTerminated{st.LastTerminationState.Terminated, st.State.Terminated} {
+			if term != nil && term.FinishedAt.After(since) {
+				return fmt.Errorf("%w: the CNPG operator container %s restarted at %s; its earlier log is gone",
+					ErrOperatorRestarted, pod.Name, term.FinishedAt.Format(time.RFC3339))
+			}
+		}
+	}
+
+	return nil
 }
 
 // ParseFailedHookCalls returns the JSON lines of logs with a ts after since, namespace equal to namespace and

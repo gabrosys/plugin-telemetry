@@ -85,7 +85,6 @@ var _ = Describe("Build", func() {
 		p = planner.Build(defs, baseSettings(), f)
 		Expect(p.Jobs).To(BeEmpty())
 		Expect(p.Skips).To(Equal([]planner.Skip{{Query: "q", Reason: planner.ReasonPrimaryOnly}}))
-		Expect(planner.ReasonPrimaryOnly).To(Equal("primary only"))
 	})
 
 	It("checks runonserver against the server version", func() {
@@ -135,6 +134,34 @@ var _ = Describe("Build", func() {
 			{Query: "q", Database: "bpp", Reason: "excluded database"},
 			{Query: "q", Database: "postgres", Reason: "maxDatabases"},
 		}))
+	})
+
+	It("skips an excluded literal database", func() {
+		s := baseSettings()
+		s.Exclude.Databases = []string{"ghost"}
+		defs := []queries.Definition{def("q", func(d *queries.Definition) { d.TargetDatabases = []string{"ghost", "app"} })}
+		p := planner.Build(defs, s, facts("app"))
+		Expect(jobDBs(p)).To(Equal([]string{"q@app"}))
+		Expect(p.Skips).To(Equal([]planner.Skip{{Query: "q", Database: "ghost", Reason: planner.ReasonExcludedDatabase}}))
+	})
+
+	It("doesn't count excluded databases against MaxDatabases", func() {
+		s := baseSettings()
+		s.Exclude.Databases = []string{"bpp"}
+		s.Limits.MaxDatabases = 3
+		defs := []queries.Definition{def("q", func(d *queries.Definition) { d.TargetDatabases = []string{"*"} })}
+		p := planner.Build(defs, s, facts("app", "apple", "bpp", "postgres"))
+		Expect(jobDBs(p)).To(Equal([]string{"q@app", "q@apple", "q@postgres"}))
+		Expect(p.Skips).To(Equal([]planner.Skip{{Query: "q", Database: "bpp", Reason: planner.ReasonExcludedDatabase}}))
+	})
+
+	It("counts a literal database absent from the facts against MaxDatabases, in sorted order", func() {
+		s := baseSettings()
+		s.Limits.MaxDatabases = 1
+		defs := []queries.Definition{def("q", func(d *queries.Definition) { d.TargetDatabases = []string{"zz-ghost", "app"} })}
+		p := planner.Build(defs, s, facts("app"))
+		Expect(jobDBs(p)).To(Equal([]string{"q@app"}))
+		Expect(p.Skips).To(Equal([]planner.Skip{{Query: "q", Database: "zz-ghost", Reason: planner.ReasonMaxDatabases}}))
 	})
 
 	It("skips excluded queries and disabled definitions", func() {
@@ -276,6 +303,15 @@ var _ = Describe("Build with excluded metrics", func() {
 		d := def("probe")
 		s := baseSettings()
 		Expect(skips(d, s)).To(BeEmpty())
+		s.Exclude.Metrics = []string{"cnpg_probe_value"}
+		Expect(skips(d, s)).To(Equal([]planner.Skip{{Query: "probe", Reason: planner.ReasonAllMetrics}}))
+	})
+
+	It("ignores a value column without a metric", func() {
+		d := def("probe", func(d *queries.Definition) {
+			d.Columns["bare"] = queries.Column{Name: "bare", Role: queries.RoleValue}
+		})
+		s := baseSettings()
 		s.Exclude.Metrics = []string{"cnpg_probe_value"}
 		Expect(skips(d, s)).To(Equal([]planner.Skip{{Query: "probe", Reason: planner.ReasonAllMetrics}}))
 	})

@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"go.yaml.in/yaml/v4"
+
+	"github.com/gabrosys/plugin-telemetry/internal/queries"
 )
 
 // presence records which defaulted durations the file sets, so an explicit 0s is kept and fails validation.
@@ -40,7 +42,7 @@ func Defaults() Settings {
 			MaxSeriesPerQuery:   10000,
 			MaxSeriesTotal:      50000,
 			MaxDatabases:        50,
-			MaxLabelValueLength: 1024,
+			MaxLabelValueLength: queries.DefaultMaxLabelValueLength,
 			MaxLabelsPerSeries:  32,
 		},
 		Exporter: Exporter{

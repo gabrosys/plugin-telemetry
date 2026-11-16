@@ -2,8 +2,9 @@ package queries
 
 import (
 	"cmp"
+	"maps"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -51,8 +52,6 @@ const progressPrefix = "pg_stat_progress_"
 var (
 	identifier = regexp.MustCompile(`[A-Za-z0-9_$]+`)
 	globChars  = regexp.MustCompile(`[][*?]`)
-	schemaDot  = regexp.MustCompile(`(?i)\bpg_catalog\s*\.\s*$`)
-	anyDot     = regexp.MustCompile(`\.\s*$`)
 	dollarTag  = regexp.MustCompile(`^\$([A-Za-z_][A-Za-z0-9_]*)?\$`)
 )
 
@@ -112,27 +111,43 @@ func catalogNames(sql string, match func(string) bool) []string {
 			continue
 		}
 
-		before := sql[:loc[0]]
-		if anyDot.MatchString(before) {
-			prefix := schemaDot.FindStringIndex(before)
-			if prefix == nil {
+		if end, dotted := dotBefore(sql, loc[0]); dotted {
+			start := end
+			for start > 0 && isIdentifierChar(sql[start-1]) {
+				start--
+			}
+			if !strings.EqualFold(sql[start:end], "pg_catalog") {
 				continue
 			}
 			// A longer qualified name such as db.pg_catalog.pg_locks is not a plain catalog reference.
-			if anyDot.MatchString(before[:prefix[0]]) {
+			if _, longer := dotBefore(sql, start); longer {
 				continue
 			}
 		}
 		found[name] = struct{}{}
 	}
 
-	names := make([]string, 0, len(found))
-	for name := range found {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	return slices.Sorted(maps.Keys(found))
+}
 
-	return names
+// dotBefore reports whether sql[:i] ends in a dot and whitespace only after it, and returns the index where
+// the text before that dot ends.
+func dotBefore(sql string, i int) (end int, dotted bool) {
+	i = trimSpaceBack(sql, i)
+	if i == 0 || sql[i-1] != '.' {
+		return i, false
+	}
+
+	return trimSpaceBack(sql, i-1), true
+}
+
+// trimSpaceBack returns the index where sql[:i] ends once its trailing whitespace is dropped.
+func trimSpaceBack(sql string, i int) int {
+	for i > 0 && strings.IndexByte(" \t\n\r\f", sql[i-1]) >= 0 {
+		i--
+	}
+
+	return i
 }
 
 // blankCommentsAndStrings replaces each comment and string constant with a space, following PostgreSQL 18

@@ -3,6 +3,7 @@ package queries_test
 import (
 	"os"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -347,7 +348,20 @@ q:
 		Entry("after a quoted name with a quote", `SELECT 1 AS \"a'b\" FROM pg_stat_activity`, "[a, b]", true),
 		Entry("after a quoted name with dashes", `SELECT 1 AS \"--c\" FROM pg_stat_activity`, "[a, b]", true),
 		Entry("a literal after a quoted name with a quote", `SELECT 1 AS \"x'\", 'pg_stat_activity'`, "[a, b]", false),
+		Entry("whitespace around the schema dot", "SELECT 1 AS v FROM pg_catalog . pg_locks", "[a, b]", true),
+		Entry("a database-qualified name", "SELECT 1 AS v FROM db.pg_catalog.pg_locks", "[a, b]", false),
+		Entry("a schema that merely ends in pg_catalog", "SELECT 1 AS v FROM x$pg_catalog.pg_locks", "[a, b]", false),
 	)
+
+	It("scans 10,000 relation names in under a second", func() {
+		sql := "SELECT 1 AS v FROM " + strings.Repeat("pg_locks, ", 10000) + "pg_settings"
+		start := time.Now()
+		def := queries.Define("q", queries.UserQuery{Query: sql, TargetDatabases: []string{"a", "b"}}, opts)
+
+		Expect(time.Since(start)).To(BeNumerically("<", time.Second))
+		Expect(def.Warnings).To(HaveLen(1))
+		Expect(def.ReadsSettings).To(BeTrue())
+	})
 
 	DescribeTable("ReadsSettings",
 		func(query, predicate string, want bool) {

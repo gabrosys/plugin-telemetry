@@ -1,6 +1,8 @@
 package queries_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"sort"
 
@@ -99,6 +101,31 @@ var _ = Describe("Builtin", func() {
 		}))
 		Expect(names).To(HaveLen(12))
 		Expect(builtinHelp).To(HaveLen(11))
+	})
+
+	It("pins each built-in's SQL and descriptions in a golden file", func() {
+		type pinned struct {
+			SQL          string            `json:"sql"`
+			Descriptions map[string]string `json:"descriptions"`
+		}
+		got := map[string]pinned{}
+		for key, def := range defineBuiltin() {
+			p := pinned{SQL: def.SQL, Descriptions: map[string]string{}}
+			for name, c := range def.Columns {
+				p.Descriptions[name] = c.Description
+			}
+			got[key] = p
+		}
+
+		var out bytes.Buffer
+		enc := json.NewEncoder(&out)
+		enc.SetEscapeHTML(false)
+		enc.SetIndent("", "  ")
+		Expect(enc.Encode(got)).To(Succeed())
+		if os.Getenv("UPDATE_GOLDEN") != "" {
+			Expect(testdata().WriteFile("builtin-sql.golden.json", out.Bytes(), 0o600)).To(Succeed())
+		}
+		Expect(out.String()).To(Equal(string(readTestdata("builtin-sql.golden.json"))))
 	})
 
 	It("makes only collector_sync_replicas primary-only", func() {

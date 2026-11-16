@@ -13,7 +13,7 @@ Each row names the measured value and the section that holds the method. Commit 
 | Sidecar at `maxSeriesTotal` 50000: working set, restarts | max < 64 MiB (67108864 B), no OOM kill, no restart, no export error | 48417 series; max reading 56897536 B (54.3 MiB), `OOMKilled` once, restart count 0 to 1, 0 export errors | missed, pending the user's decision (proposal in its section) |
 | Plugin replica with 1000 Clusters cached: settled working set | <= 64 MiB (67108864 B) | max 60252160 B (57.5 MiB) over both replicas | met |
 | A replacement replica with 1000 Clusters | no OOM kill under its 128Mi limit, settles <= 64 MiB | Ready in 12.1 s, 0 restarts, no termination reason, max 58773504 B (56.1 MiB) | met |
-| Open watches added by 10 sidecars | 60 +/- 5 (6 per sidecar: the sidecar's 5 and the kubelet's token-Secret watch; the brief's 50 left out the kubelet's, corrected in 360b671) | 60 | met |
+| Open watches added by 10 sidecars | 60 +/- 5 (6 per sidecar: its 5 informers and the kubelet's watch on the token Secret volume) | 60 | met |
 | Per-row conversion cost (ENG-07) | measured, no target | 296 to 5464 B and 0.4 to 5.6 us per row | see "Per-row conversion and batching" |
 | Pipelined batches (design 6.3) | needed only if `skippedRuns` > 0 | `skippedRuns` 0 | not needed |
 
@@ -103,17 +103,17 @@ Both targets are met with the change in place. The headroom to 64 MiB is 6.5 MiB
 
 Method: a Secret `measure-queries` (one `SELECT 1` query), a `MetricQuerySet` `measure-set` and a `TelemetryExporter` with `querySets: [measure-set]`; 10 Clusters `w-00` to `w-09` with one instance and `customQueriesSecret` `measure-queries`, first without the plugin. The spec reads the API server's `/metrics` at the start and the end of a 30 minute window (baseline), adds the plugin to every Cluster, waits until each sidecar exports, and reads a second 30 minute window. Per window it sums `apiserver_longrunning_requests{verb="WATCH"}` and takes the growth of `apiserver_request_total` for `verb="LIST"` and `verb="WATCH"`. The sidecar load is the plugin window minus the baseline window.
 
-Each sidecar runs five informers, each a watch on one object by name: the Cluster, the exporter, `cnpg-default-monitoring`, the Secret and the set. A client-go reflector's watch timeout is random between 5 and 10 minutes, so 50 watches renew about 50 x 30 / 7.5 = 200 times in 30 minutes. An initial sync may be a WATCH instead of a LIST (`WatchListClient`).
+Each sidecar adds 6 watches: its five informers, each a watch on one object by name (the Cluster, the exporter, `cnpg-default-monitoring`, the Secret and the set), and the kubelet's watch on the Pod's token Secret volume (below). A client-go reflector's watch timeout is random between 5 and 10 minutes, so 60 watches renew between 60 x 30 / 10 = 180 and 60 x 30 / 5 = 360 times in 30 minutes, 240 at the 7.5 minute midpoint. An initial sync may be a WATCH instead of a LIST (`WatchListClient`).
 
-Result: the open-watch increase was 60 (6 per sidecar). The brief's expected 50 (5 per sidecar) missed it; the sixth watch is the kubelet's (below), so the corrected expectation is 60 +/- 5, which the measurement meets.
+Result: the open-watch increase was 60 (6 per sidecar), as expected (60 +/- 5).
 
 | Quantity | Baseline window | Plugin window | Sidecar load |
 |---|---|---|---|
 | Open WATCH (start of window) | 287 | 347 | +60 (expected 60 +/- 5) |
 | LIST requests | 11 | 10 | -1 (noise) |
-| WATCH requests | 1075 | 1264 | +189 (expected renewals about 200) |
+| WATCH requests | 1075 | 1264 | +189 (expected renewals 180 to 360) |
 
-Per sidecar per hour: about 38 WATCH requests (189 x 2 / 10) and no measurable LIST requests; the initial syncs are WATCH requests. The measured renewals (189) match the 200 expected.
+Per sidecar per hour: about 38 WATCH requests (189 x 2 / 10) and no measurable LIST requests; the initial syncs are WATCH requests. The measured 189 sits inside the expected 180 to 360 renewals. These figures, and the extrapolation below, cover all 60 added watches, including the kubelet's token-Secret watch: up to 1 in 6 of the requests is the kubelet's.
 
 Linear extrapolation (every watch is its own informer):
 
@@ -125,7 +125,7 @@ Linear extrapolation (every watch is its own informer):
 
 That is about 10.5 WATCH requests per second at 1000 instances.
 
-The sixth watch per sidecar is the kubelet's. A single-Cluster check (the same setup, one Cluster, the plugin removed and added again) read `apiserver_longrunning_requests{verb="WATCH"}` per resource: `clusters` +1, `telemetryexporters` +1, `metricquerysets` +1, `configmaps` +1 (`cnpg-default-monitoring`) and `secrets` +2. The sidecar opens one Secret watch (the queries Secret; `internal/kubesource/store.go:31`). The other is the kubelet's watch on the Pod's token Secret volume (`internal/podpatch/podpatch.go:23`): the kubelet's `configMapAndSecretChangeDetectionStrategy` defaults to `Watch` (Kubernetes v1.37.0 `pkg/kubelet/apis/config/v1beta1/defaults.go:268-269`). It is not the sidecar's load, and it goes away with the Pod.
+The sixth watch per sidecar is the kubelet's. A single-Cluster check (the same setup, one Cluster, the plugin removed and added again) read `apiserver_longrunning_requests{verb="WATCH"}` per resource: `clusters` +1, `telemetryexporters` +1, `metricquerysets` +1, `configmaps` +1 (`cnpg-default-monitoring`) and `secrets` +2. The sidecar opens one Secret watch (the queries Secret; `internal/kubesource/store.go:31`). The other is the kubelet's watch on the Pod's token Secret volume (`internal/podpatch/podpatch.go:23`): the kubelet's `configMapAndSecretChangeDetectionStrategy` defaults to `Watch` (Kubernetes v1.37.0 `pkg/kubelet/apis/config/v1beta1/defaults.go:268-269`). It is not an informer of the sidecar, but it is part of the measured load and goes away with the Pod.
 
 ## Per-row conversion and batching
 

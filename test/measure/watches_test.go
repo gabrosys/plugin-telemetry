@@ -120,7 +120,7 @@ func window(ctx context.Context, cs kubernetes.Interface) apiWindow {
 }
 
 var _ = Describe("the API requests of the exporters' watches", Ordered, func() {
-	It("measures the API requests of ten exporters' 50 watches", func(ctx SpecContext) {
+	It("measures the API requests of ten exporters' 60 watches", func(ctx SpecContext) {
 		env, out, c, cfg := measureEnv(ctx)
 		cs, err := kubernetes.NewForConfig(cfg)
 		Expect(err).NotTo(HaveOccurred())
@@ -206,7 +206,7 @@ var _ = Describe("the API requests of the exporters' watches", Ordered, func() {
 			Baseline: baseline, Plugin: withPlugin,
 			OpenIncrease:     withPlugin.Start.Open - baseline.End.Open,
 			ExpectedOpen:     watchSidecars * (watchesPer + kubeletWatches),
-			ExpectedRenewals: float64(watchSidecars*watchesPer) * float64(watchWindow) / float64(watchMeanRenewal),
+			ExpectedRenewals: float64(watchSidecars*(watchesPer+kubeletWatches)) * float64(watchWindow) / float64(watchMeanRenewal),
 			MeasuredWatch:    withPlugin.Watch - baseline.Watch,
 		}
 		hours := float64(time.Hour / watchWindow)

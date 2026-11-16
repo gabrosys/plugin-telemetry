@@ -29,6 +29,7 @@ import (
 const (
 	watchSidecars   = 10
 	watchesPer      = 5 // the Cluster, the exporter, cnpg-default-monitoring, the Secret, the set
+	kubeletWatches  = 1 // the kubelet's watch on the token Secret volume (watch is its default Secret detection strategy)
 	watchWindow     = 30 * time.Minute
 	watchOpenWithin = 5.0
 	// A reflector's watch timeout is random in [5 min, 10 min] (client-go tools/cache/reflector.go:56-57).
@@ -204,7 +205,7 @@ var _ = Describe("the API requests of the exporters' watches", Ordered, func() {
 			CNPGVersion: env.CNPGVersion, Sidecars: watchSidecars, WindowMinutes: watchWindow.Minutes(),
 			Baseline: baseline, Plugin: withPlugin,
 			OpenIncrease:     withPlugin.Start.Open - baseline.End.Open,
-			ExpectedOpen:     watchSidecars * watchesPer,
+			ExpectedOpen:     watchSidecars * (watchesPer + kubeletWatches),
 			ExpectedRenewals: float64(watchSidecars*watchesPer) * float64(watchWindow) / float64(watchMeanRenewal),
 			MeasuredWatch:    withPlugin.Watch - baseline.Watch,
 		}

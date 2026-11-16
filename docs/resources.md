@@ -97,11 +97,11 @@ Method: a Secret `measure-queries` (one `SELECT 1` query), a `MetricQuerySet` `m
 
 Each sidecar runs five informers, each a watch on one object by name: the Cluster, the exporter, `cnpg-default-monitoring`, the Secret and the set. A client-go reflector's watch timeout is random between 5 and 10 minutes, so 50 watches renew about 50 x 30 / 7.5 = 200 times in 30 minutes. An initial sync may be a WATCH instead of a LIST (`WatchListClient`).
 
-Result: **target missed.** The open-watch increase was 60, not 50 +/- 5.
+Result: the open-watch increase was 60 (6 per sidecar). The brief's expected 50 (5 per sidecar) missed it; the sixth watch is the kubelet's (below), so the corrected expectation is 60 +/- 5, which the measurement meets.
 
 | Quantity | Baseline window | Plugin window | Sidecar load |
 |---|---|---|---|
-| Open WATCH (start of window) | 287 | 347 | +60 (expected 50 +/- 5) |
+| Open WATCH (start of window) | 287 | 347 | +60 (expected 60 +/- 5) |
 | LIST requests | 11 | 10 | -1 (noise) |
 | WATCH requests | 1075 | 1264 | +189 (expected renewals about 200) |
 
@@ -117,4 +117,4 @@ Linear extrapolation (every watch is its own informer):
 
 That is about 10.5 WATCH requests per second at 1000 instances.
 
-The six open watches per sidecar, one more than the five informers, are not identified by this run. One candidate is the kubelet's watch on the new token Secret volume of each Pod; it was not checked.
+The sixth watch per sidecar is the kubelet's. A single-Cluster check (the same setup, one Cluster, the plugin removed and added again) read `apiserver_longrunning_requests{verb="WATCH"}` per resource: `clusters` +1, `telemetryexporters` +1, `metricquerysets` +1, `configmaps` +1 (`cnpg-default-monitoring`) and `secrets` +2. The sidecar opens one Secret watch (the queries Secret; `internal/kubesource/store.go:31`). The other is the kubelet's watch on the Pod's token Secret volume (`internal/podpatch/podpatch.go:23`): the kubelet's `configMapAndSecretChangeDetectionStrategy` defaults to `Watch` (Kubernetes v1.37.0 `pkg/kubelet/apis/config/v1beta1/defaults.go:268-269`). It is not the sidecar's load, and it goes away with the Pod.

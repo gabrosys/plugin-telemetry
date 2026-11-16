@@ -239,6 +239,22 @@ var _ = Describe("Pool", func() {
 		Expect(conn).NotTo(BeNil())
 	})
 
+	It("reports the context's end, not ErrNoSlot, when the context ended as well", func(ctx SpecContext) {
+		newPool(1, time.Minute)
+		_, release, err := pool.Acquire(ctx, "app")
+		Expect(err).NotTo(HaveOccurred())
+		defer release(false)
+
+		cancelled, cancel := context.WithCancel(ctx)
+		cancel()
+		// With both channels ready select picks at random, so repeat to catch a wrong pick.
+		for range 200 {
+			_, _, err = pool.AcquireWithin(cancelled, "postgres", time.Nanosecond)
+			Expect(err).To(MatchError(context.Canceled))
+			Expect(err).NotTo(MatchError(pg.ErrNoSlot))
+		}
+	})
+
 	It("CloseIdle closes connections idle past idleTimeout", func(ctx SpecContext) {
 		newPool(3, time.Minute)
 		old, release, err := pool.Acquire(ctx, "app")

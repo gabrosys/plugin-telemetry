@@ -160,6 +160,10 @@ func (p *Pool) acquire(ctx context.Context, database string, withBackoff bool, m
 			case <-wait:
 				continue
 			case <-giveUp:
+				// select picks at random when the context ended as well.
+				if err := ctx.Err(); err != nil {
+					return nil, nil, fmt.Errorf("wait for a connection slot: %w", err)
+				}
 				return nil, nil, fmt.Errorf("wait for a connection slot: %w", ErrNoSlot)
 			case <-ctx.Done():
 				return nil, nil, fmt.Errorf("wait for a connection slot: %w", ctx.Err())

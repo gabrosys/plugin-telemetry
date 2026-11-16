@@ -277,6 +277,19 @@ var _ = Describe("A run that cannot get a connection", func() {
 	})
 })
 
+var _ = Describe("A run without a slot", func() {
+	It("stops exporting the query's series until the next ok run", func(ctx SpecContext) {
+		res := executor.Result{
+			Job: planner.Job{Query: "backends", Database: "app", Fingerprint: "f"}, Outcome: selfmetrics.OutcomeSkipped,
+			Err: fmt.Errorf("query backends on database app could not get a connection within its interval 30s: %w", pg.ErrNoSlot),
+		}
+		exported, start, t0, err := engine.RecordFailureBetweenSuccesses(ctx, res)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(exported).To(BeFalse())
+		Expect(start).To(Equal(t0))
+	})
+})
+
 var _ = DescribeTable("A failed run",
 	func(ctx SpecContext, outcome selfmetrics.Outcome) {
 		res := executor.Result{Job: planner.Job{Query: "backends", Database: "app", Fingerprint: "f"}, Outcome: outcome, WouldBe: 5}

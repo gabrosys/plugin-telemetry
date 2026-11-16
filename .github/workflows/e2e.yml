@@ -6,7 +6,7 @@ on:
       suite:
         description: e2e suite to run
         type: choice
-        options: [admission, engine, plugin, collector-metrics]
+        options: [admission, engine, plugin, collector-metrics, resilience]
         default: plugin
 
 permissions: {}

@@ -32,13 +32,14 @@ KIND_CLUSTER ?= plugin-telemetry-$(subst .,-,$(CNPG_VERSION))
 CNPG_VERSION ?= v1.30.1
 POSTGRES_IMAGE ?= ghcr.io/cloudnative-pg/postgresql:18.7-system-trixie@sha256:5a5dfbde88d5909fd4938189c141f53fb153f53c519f14907dce9e7c04baa153
 COLLECTOR_IMAGE ?= otel/opentelemetry-collector:0.165.0@sha256:34b24b740c3c88d3467740e8642a397c13898ef76d7295c5425164c482ed1b73
-E2E_SUITES := admission engine plugin collector-metrics
+E2E_SUITES := admission engine plugin collector-metrics resilience
 KIND_E2E_SUITES := $(filter-out engine,$(E2E_SUITES))
 E2E_TARGETS := $(addprefix e2e-,$(KIND_E2E_SUITES))
 # Ginkgo --timeout of a suite: E2E_TIMEOUT_<suite> when set, else 30m. E2E_PROCS_<suite> sets --procs (default 1).
 E2E_TIMEOUT_plugin := 50m
 E2E_TIMEOUT_engine := 20m
 E2E_TIMEOUT_collector-metrics := 30m
+E2E_TIMEOUT_resilience := 60m
 E2E_PROCS_plugin := 3
 # Regex for ginkgo --focus; empty runs every spec.
 E2E_FOCUS ?=

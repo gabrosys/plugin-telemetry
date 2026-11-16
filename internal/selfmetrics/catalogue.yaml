@@ -112,7 +112,7 @@
   name: cnpg_otel_plugin_hook_calls_total
   instrument: counter
   unit: "{call}"
-  description: Hook calls by service (lifecycle, operator), operation (create, evaluate, set_status) and outcome (patched, unchanged, skipped, error, noop, status).
+  description: Hook calls by service (lifecycle, operator), operation (create, evaluate, set_status) and outcome (patched, unchanged, skipped, error, noop, status). Error is a failed call, including a Pod that could not get the sidecar.
   attributes: [service, operation, outcome]
 - component: plugin
   name: cnpg_otel_plugin_hook_duration_seconds
@@ -124,5 +124,5 @@
   name: cnpg_otel_plugin_identity_reconciles_total
   instrument: counter
   unit: "{reconcile}"
-  description: Identity controller reconciles by outcome (ok, error).
-  attributes: [outcome]
+  description: Identity controller reconciles by outcome (ok, error); an error carries the reason, the Kubernetes API status reason (Forbidden, AlreadyExists, ...), Timeout for a deadline, or Unknown.
+  attributes: [outcome, reason]

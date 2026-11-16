@@ -74,7 +74,7 @@ func (l *Lifecycle) LifecycleHook(
 	start := time.Now()
 	resp, outcome, err := l.handle(ctx, req)
 	if operation, ok := lifecycleOperations[req.GetOperationType().GetType()]; ok {
-		l.Metrics.Hook(serviceLifecycle, operation, outcome, time.Since(start)) //nolint:contextcheck // Hook takes no context
+		l.Metrics.Hook(ctx, serviceLifecycle, operation, outcome, time.Since(start))
 	}
 
 	return resp, err
@@ -151,7 +151,8 @@ func (l *Lifecycle) hook(
 	patch, err := l.patch(logger, cluster, pluginConfig, original)
 	if err != nil {
 		logger.Error(err, "sidecar not injected, returning no patch")
-		return nil, outcomeSkipped, nil
+
+		return nil, outcomeError, nil
 	}
 	if len(patch) == 0 {
 		return nil, outcomeUnchanged, nil

@@ -74,7 +74,7 @@ func (*Status) GetCapabilities(context.Context, *operator.OperatorCapabilitiesRe
 func (s *Status) SetStatusInCluster(ctx context.Context, req *operator.SetStatusInClusterRequest) (*operator.SetStatusInClusterResponse, error) {
 	start := time.Now()
 	resp, outcome := s.setStatus(ctx, req)
-	s.Metrics.Hook(serviceOperator, operationSetStatus, outcome, time.Since(start)) //nolint:contextcheck // Hook takes no context
+	s.Metrics.Hook(ctx, serviceOperator, operationSetStatus, outcome, time.Since(start))
 
 	return resp, nil
 }

@@ -74,7 +74,7 @@ var _ = Describe("Catalogue", func() {
 		Expect(got).To(Equal([]row{
 			{"cnpg_otel_plugin_hook_calls_total", "counter", "{call}", []string{"service", "operation", "outcome"}},
 			{"cnpg_otel_plugin_hook_duration_seconds", "histogram", "s", []string{"service", "operation"}},
-			{"cnpg_otel_plugin_identity_reconciles_total", "counter", "{reconcile}", []string{"outcome"}},
+			{"cnpg_otel_plugin_identity_reconciles_total", "counter", "{reconcile}", []string{"outcome", "reason"}},
 		}))
 	})
 

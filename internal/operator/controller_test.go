@@ -14,8 +14,10 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -23,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/gabrosys/plugin-telemetry/internal/identity"
+	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
 )
 
@@ -270,5 +273,84 @@ var _ = Describe("IdentityController", func() {
 		res, err := ctrl.Reconcile(ctx, requestFor("ns", "pg"))
 		Expect(err).To(MatchError(errCreate))
 		Expect(res).To(Equal(reconcile.Result{}))
+	})
+
+	Describe("identity reconcile metrics", func() {
+		var m *operator.PluginMetrics
+
+		BeforeEach(func() { m = operator.NewPluginMetrics() })
+
+		reconcileWith := func(ctx context.Context, cl, reader client.Client) {
+			GinkgoHelper()
+
+			ctrl = &operator.IdentityController{Client: cl, Identity: &identity.Ensurer{Reader: reader, Writer: cl}, Metrics: m}
+			_, _ = ctrl.Reconcile(ctx, requestFor("ns", "pg"))
+		}
+
+		It("counts identity reconcile errors by reason", func(ctx context.Context) {
+			forbidden := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{
+				Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					if _, ok := obj.(*rbacv1.RoleBinding); ok {
+						return apierrors.NewForbidden(schema.GroupResource{Group: rbacv1.GroupName, Resource: "rolebindings"}, obj.GetName(), errors.New("denied"))
+					}
+
+					return cl.Create(ctx, obj, opts...)
+				},
+			})
+			reconcileWith(ctx, forbidden, forbidden)
+
+			unavailable := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{
+				Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+					return apierrors.NewServiceUnavailable("overloaded")
+				},
+			})
+			reconcileWith(ctx, unavailable, unavailable)
+
+			deadline := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{
+				Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+					return context.DeadlineExceeded
+				},
+			})
+			reconcileWith(ctx, deadline, deadline)
+
+			boom := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{
+				Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+					return errors.New("boom")
+				},
+			})
+			reconcileWith(ctx, boom, boom)
+
+			exists := newClient([]client.Object{
+				newCluster("ns", "pg", ours(nil)),
+				&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg.telemetry"}},
+			}, interceptor.Funcs{})
+			reconcileWith(ctx, exists, newClient(nil, interceptor.Funcs{}))
+
+			Expect(counts(m, identityCount)).To(Equal(map[string]int64{
+				"outcome=error,reason=Forbidden":          1,
+				"outcome=error,reason=ServiceUnavailable": 1,
+				"outcome=error,reason=Timeout":            1,
+				"outcome=error,reason=Unknown":            1,
+				"outcome=error,reason=AlreadyExists":      1,
+			}))
+		})
+
+		It("records Unknown for an object in the way with no API error inside", func(ctx context.Context) {
+			token := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: metadata.TokenSecretName("pg")},
+				Type:       corev1.SecretTypeOpaque,
+			}
+			cl := newClient([]client.Object{newCluster("ns", "pg", ours(nil)), token}, interceptor.Funcs{})
+			reconcileWith(ctx, cl, cl)
+
+			Expect(counts(m, identityCount)).To(Equal(map[string]int64{"outcome=error,reason=Unknown": 1}))
+		})
+
+		It("records a clean reconcile as ok with no reason", func(ctx context.Context) {
+			cl := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{})
+			reconcileWith(ctx, cl, cl)
+
+			Expect(counts(m, identityCount)).To(Equal(map[string]int64{"outcome=ok": 1}))
+		})
 	})
 })

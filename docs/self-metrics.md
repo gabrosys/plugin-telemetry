@@ -32,6 +32,6 @@ Metrics the plugin process reports about itself. They are exported only when `op
 
 | Name | Instrument | Unit | Attributes | Description |
 |---|---|---|---|---|
-| `cnpg_otel_plugin_hook_calls_total` | counter | `{call}` | `service`, `operation`, `outcome` | Hook calls by service (lifecycle, operator), operation (create, evaluate, set_status) and outcome (patched, unchanged, skipped, error, noop, status). |
+| `cnpg_otel_plugin_hook_calls_total` | counter | `{call}` | `service`, `operation`, `outcome` | Hook calls by service (lifecycle, operator), operation (create, evaluate, set_status) and outcome (patched, unchanged, skipped, error, noop, status). Error is a failed call, including a Pod that could not get the sidecar. |
 | `cnpg_otel_plugin_hook_duration_seconds` | histogram | `s` | `service`, `operation` | Duration of hook calls, in a single bucket. |
-| `cnpg_otel_plugin_identity_reconciles_total` | counter | `{reconcile}` | `outcome` | Identity controller reconciles by outcome (ok, error). |
+| `cnpg_otel_plugin_identity_reconciles_total` | counter | `{reconcile}` | `outcome`, `reason` | Identity controller reconciles by outcome (ok, error); an error carries the reason, the Kubernetes API status reason (Forbidden, AlreadyExists, ...), Timeout for a deadline, or Unknown. |

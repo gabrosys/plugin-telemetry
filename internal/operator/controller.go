@@ -52,11 +52,7 @@ const requeueInTheWay = 5 * time.Second
 // An object in the way requeues after 5 s; any other error goes to the workqueue's back-off.
 func (c *IdentityController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	err := c.reconcile(ctx, req)
-	outcome := outcomeOK
-	if err != nil {
-		outcome = outcomeError
-	}
-	c.Metrics.IdentityReconcile(outcome)
+	c.Metrics.IdentityReconcile(ctx, err)
 
 	logger := log.FromContext(ctx)
 	switch {

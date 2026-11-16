@@ -2,6 +2,8 @@ package operator_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -11,9 +13,8 @@ import (
 	. "github.com/onsi/gomega"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/gabrosys/plugin-telemetry/internal/export/otlptest"
@@ -75,12 +76,12 @@ const (
 )
 
 var _ = Describe("PluginMetrics", func() {
-	It("counts hook calls by service, operation and outcome and records their duration", func() {
+	It("counts hook calls by service, operation and outcome and records their duration", func(ctx context.Context) {
 		m := operator.NewPluginMetrics()
 
-		m.Hook("lifecycle", "create", "patched", 20*time.Millisecond)
-		m.Hook("lifecycle", "create", "patched", 40*time.Millisecond)
-		m.Hook("operator", "set_status", "status", time.Second)
+		m.Hook(ctx, "lifecycle", "create", "patched", 20*time.Millisecond)
+		m.Hook(ctx, "lifecycle", "create", "patched", 40*time.Millisecond)
+		m.Hook(ctx, "operator", "set_status", "status", time.Second)
 
 		Expect(counts(m, hookCalls)).To(Equal(map[string]int64{
 			"operation=create,outcome=patched,service=lifecycle":   2,
@@ -108,33 +109,40 @@ var _ = Describe("PluginMetrics", func() {
 		}
 	})
 
-	It("counts identity reconciles by outcome", func() {
+	It("counts identity reconciles by outcome and, for errors, by reason", func(ctx context.Context) {
 		m := operator.NewPluginMetrics()
 
-		m.IdentityReconcile("ok")
-		m.IdentityReconcile("ok")
-		m.IdentityReconcile("error")
+		m.IdentityReconcile(ctx, nil)
+		m.IdentityReconcile(ctx, nil)
+		m.IdentityReconcile(ctx, errors.New("boom"))
+		m.IdentityReconcile(ctx, fmt.Errorf("get cluster: %w", context.DeadlineExceeded))
+		m.IdentityReconcile(ctx, fmt.Errorf("ensure: %w", apierrors.NewForbidden(schema.GroupResource{Resource: "rolebindings"}, "pg", errors.New("denied"))))
 
-		Expect(counts(m, identityCount)).To(Equal(map[string]int64{"outcome=ok": 2, "outcome=error": 1}))
+		Expect(counts(m, identityCount)).To(Equal(map[string]int64{
+			"outcome=ok":                     2,
+			"outcome=error,reason=Unknown":   1,
+			"outcome=error,reason=Timeout":   1,
+			"outcome=error,reason=Forbidden": 1,
+		}))
 	})
 
-	It("records nothing on a nil receiver", func() {
+	It("records nothing on a nil receiver", func(ctx context.Context) {
 		var m *operator.PluginMetrics
 
 		Expect(func() {
-			m.Hook("lifecycle", "create", "patched", time.Second)
-			m.IdentityReconcile("ok")
+			m.Hook(ctx, "lifecycle", "create", "patched", time.Second)
+			m.IdentityReconcile(ctx, errors.New("boom"))
 		}).NotTo(Panic())
 	})
 
-	It("is safe for concurrent use", func() {
+	It("is safe for concurrent use", func(ctx context.Context) {
 		m := operator.NewPluginMetrics()
 		var wg sync.WaitGroup
 		for range 8 {
 			wg.Go(func() {
 				for range 50 {
-					m.Hook("operator", "set_status", "noop", time.Millisecond)
-					m.IdentityReconcile("ok")
+					m.Hook(ctx, "operator", "set_status", "noop", time.Millisecond)
+					m.IdentityReconcile(ctx, nil)
 				}
 			})
 		}
@@ -155,7 +163,7 @@ var _ = Describe("PluginMetrics", func() {
 		Expect(enabled).To(BeTrue())
 
 		m := operator.NewPluginMetrics()
-		m.Hook("lifecycle", "evaluate", "unchanged", time.Millisecond)
+		m.Hook(ctx, "lifecycle", "evaluate", "unchanged", time.Millisecond)
 
 		runCtx, cancel := context.WithCancel(ctx)
 		done := make(chan error, 1)
@@ -268,28 +276,16 @@ var _ = Describe("hooks recording metrics", func() {
 		}))
 	})
 
-	It("records identity reconciles as ok or error, an object in the way as error", func(ctx context.Context) {
-		c := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{})
-		ctrl := &operator.IdentityController{Client: c, Identity: &identity.Ensurer{Reader: c, Writer: c}, Metrics: m}
-		_, err := ctrl.Reconcile(ctx, requestFor("ns", "pg"))
-		Expect(err).NotTo(HaveOccurred())
-		_, err = ctrl.Reconcile(ctx, requestFor("ns", "gone"))
-		Expect(err).NotTo(HaveOccurred())
+	DescribeTable("counts EVALUATE as an error when it can't inject the sidecar",
+		func(ctx context.Context, images string, cluster []byte) {
+			l := &operator.Lifecycle{Images: fakeImages(images), Metrics: m}
 
-		failing := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{
-			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-				return errGet
-			},
-		})
-		ctrl = &operator.IdentityController{Client: failing, Identity: &identity.Ensurer{Reader: failing, Writer: failing}, Metrics: m}
-		_, err = ctrl.Reconcile(ctx, requestFor("ns", "pg"))
-		Expect(err).To(HaveOccurred())
+			_, _ = l.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, cluster, fixturePod("pod-main")))
 
-		blocked := newClient([]client.Object{newCluster("ns", "pg", ours(nil)), &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg.telemetry"}}}, interceptor.Funcs{})
-		ctrl = &operator.IdentityController{Client: blocked, Identity: &identity.Ensurer{Reader: newClient(nil, interceptor.Funcs{}), Writer: blocked}, Metrics: m}
-		_, err = ctrl.Reconcile(ctx, requestFor("ns", "pg"))
-		Expect(err).NotTo(HaveOccurred())
-
-		Expect(counts(m, identityCount)).To(Equal(map[string]int64{"outcome=ok": 2, "outcome=error": 2}))
-	})
+			Expect(counts(m, hookCalls)).To(Equal(map[string]int64{"operation=evaluate,outcome=error,service=lifecycle": 1}))
+		},
+		Entry("no image", "", clusterJSON(ours(nil))),
+		Entry("auth ldap", testImage, clusterJSON(ours(map[string]string{"auth": "ldap"}))),
+		Entry("malformed Cluster", testImage, []byte(`{"spec":`)),
+	)
 })

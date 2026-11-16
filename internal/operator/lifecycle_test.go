@@ -379,8 +379,6 @@ var _ = Describe("Lifecycle logging", func() {
 			)))
 		},
 		Entry("for a Cluster without the plugin", clusterJSON(), func() []byte { return fixturePod("pod-main") }),
-		Entry("for invalid plugin parameters", clusterJSON(ours(map[string]string{"auth": "ldap"})),
-			func() []byte { return fixturePod("pod-main") }),
 		Entry("for an object that is not a Pod", clusterJSON(ours(nil)), func() []byte {
 			job, err := json.Marshal(batchv1.Job{
 				TypeMeta:   metav1.TypeMeta{APIVersion: "batch/v1", Kind: "Job"},
@@ -391,6 +389,16 @@ var _ = Describe("Lifecycle logging", func() {
 			return job
 		}),
 	)
+
+	It("logs the hook line with outcome error when the sidecar can't be injected", func(ctx context.Context) {
+		ctx, hookLines := captureLogs(ctx)
+		resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
+			clusterJSON(ours(map[string]string{"auth": "ldap"})), fixturePod("pod-main")))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.GetJsonPatch()).To(BeEmpty())
+
+		Expect(hookLines()).To(HaveExactElements(hookLine("EVALUATE", "error")))
+	})
 
 	DescribeTable("logs an error before rejecting an undecodable request",
 		func(ctx context.Context, cluster, object []byte, what string) {

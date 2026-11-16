@@ -10,8 +10,12 @@ import (
 
 const (
 	operationDuration = "otel.sdk.exporter.operation.duration"
+	// HookCalls is the plugin's hook call counter.
+	HookCalls = "cnpg_otel_plugin_hook_calls_total"
 	// HookDuration is the plugin's hook duration histogram.
 	HookDuration = "cnpg_otel_plugin_hook_duration_seconds"
+	// IdentityReconciles is the plugin's identity reconcile counter.
+	IdentityReconciles = "cnpg_otel_plugin_identity_reconciles_total"
 )
 
 // contextForRecord is the context for histogram recordings; Export has no caller context.

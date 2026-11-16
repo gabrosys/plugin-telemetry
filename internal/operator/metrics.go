@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
-	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -16,6 +15,8 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/clock"
 
 	"github.com/gabrosys/plugin-telemetry/internal/clusterconfig"
@@ -52,31 +53,22 @@ const (
 
 var errNoFiles = errors.New("the plugin's metrics exporter reads no files")
 
-type hookKey struct{ service, operation, outcome string }
-
 // PluginMetrics holds the plugin's self-metrics. A nil *PluginMetrics records nothing.
 type PluginMetrics struct {
 	reader *sdkmetric.ManualReader
 	mp     *sdkmetric.MeterProvider
-	// duration is set once by NewPluginMetrics.
-	duration metric.Float64Histogram
+	// The instruments are set once by NewPluginMetrics.
+	hookCalls  metric.Int64Counter
+	duration   metric.Float64Histogram
+	reconciles metric.Int64Counter
 	// initErr is the instrument setup failure Run returns.
 	initErr error
-
-	// mu guards calls and reconciles.
-	mu         sync.RWMutex
-	calls      map[hookKey]int64
-	reconciles map[string]int64
 }
 
 // NewPluginMetrics returns the plugin's self-metrics with their instruments registered on a
 // MeterProvider that only Run reads.
 func NewPluginMetrics() *PluginMetrics {
-	m := &PluginMetrics{
-		reader:     sdkmetric.NewManualReader(),
-		calls:      map[hookKey]int64{},
-		reconciles: map[string]int64{},
-	}
+	m := &PluginMetrics{reader: sdkmetric.NewManualReader()}
 	m.mp = sdkmetric.NewMeterProvider(
 		sdkmetric.WithReader(m.reader),
 		sdkmetric.WithView(selfmetrics.Views()...),
@@ -90,17 +82,21 @@ func NewPluginMetrics() *PluginMetrics {
 
 // register creates the instruments of the catalogue's plugin section on meter.
 func (m *PluginMetrics) register(meter metric.Meter) error {
-	var observables []metric.Observable
-	counters := map[string]metric.Int64ObservableCounter{}
 	for _, def := range selfmetrics.ByComponent(selfmetrics.ComponentPlugin) {
 		switch selfmetrics.Instrument(def.Instrument) {
 		case selfmetrics.InstrumentCounter:
-			c, err := meter.Int64ObservableCounter(def.Name, metric.WithUnit(def.Unit), metric.WithDescription(def.Description))
+			c, err := meter.Int64Counter(def.Name, metric.WithUnit(def.Unit), metric.WithDescription(def.Description))
 			if err != nil {
 				return fmt.Errorf("create counter %s: %w", def.Name, err)
 			}
-			counters[def.Name] = c
-			observables = append(observables, c)
+			switch def.Name {
+			case selfmetrics.HookCalls:
+				m.hookCalls = c
+			case selfmetrics.IdentityReconciles:
+				m.reconciles = c
+			default:
+				return fmt.Errorf("counter %s: no recorder", def.Name)
+			}
 		case selfmetrics.InstrumentHistogram:
 			if def.Name != selfmetrics.HookDuration {
 				return fmt.Errorf("histogram %s: no recorder", def.Name)
@@ -117,54 +113,51 @@ func (m *PluginMetrics) register(meter metric.Meter) error {
 			return fmt.Errorf("metric %s: unknown instrument %q", def.Name, def.Instrument)
 		}
 	}
-
-	_, err := meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
-		m.mu.RLock()
-		defer m.mu.RUnlock()
-		for k, v := range m.calls {
-			o.ObserveInt64(counters["cnpg_otel_plugin_hook_calls_total"], v, metric.WithAttributes(
-				attribute.String("service", k.service),
-				attribute.String("operation", k.operation),
-				attribute.String("outcome", k.outcome)))
-		}
-		for outcome, v := range m.reconciles {
-			o.ObserveInt64(counters["cnpg_otel_plugin_identity_reconciles_total"], v,
-				metric.WithAttributes(attribute.String("outcome", outcome)))
-		}
-
-		return nil
-	}, observables...)
-	if err != nil {
-		return fmt.Errorf("register callback: %w", err)
+	if m.hookCalls == nil || m.duration == nil || m.reconciles == nil {
+		return errors.New("the catalogue lacks a plugin metric")
 	}
 
 	return nil
 }
 
 // Hook records one hook call and its duration. A nil receiver records nothing.
-func (m *PluginMetrics) Hook(service, operation, outcome string, d time.Duration) {
-	if m == nil {
+func (m *PluginMetrics) Hook(ctx context.Context, service, operation, outcome string, d time.Duration) {
+	if m == nil || m.initErr != nil {
 		return
 	}
-	m.mu.Lock()
-	m.calls[hookKey{service, operation, outcome}]++
-	m.mu.Unlock()
-
-	if m.duration != nil {
-		m.duration.Record(context.Background(), d.Seconds(), metric.WithAttributes(
-			attribute.String("service", service), attribute.String("operation", operation)))
-	}
+	m.hookCalls.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("service", service),
+		attribute.String("operation", operation),
+		attribute.String("outcome", outcome)))
+	m.duration.Record(ctx, d.Seconds(), metric.WithAttributes(
+		attribute.String("service", service), attribute.String("operation", operation)))
 }
 
-// IdentityReconcile records one identity controller reconcile, with outcome ok or error.
-// A nil receiver records nothing.
-func (m *PluginMetrics) IdentityReconcile(outcome string) {
-	if m == nil {
+// IdentityReconcile records one identity controller reconcile: outcome ok when err is nil, else
+// outcome error with the reason of err. A nil receiver records nothing.
+func (m *PluginMetrics) IdentityReconcile(ctx context.Context, err error) {
+	if m == nil || m.initErr != nil {
 		return
 	}
-	m.mu.Lock()
-	m.reconciles[outcome]++
-	m.mu.Unlock()
+	if err == nil {
+		m.reconciles.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", outcomeOK)))
+
+		return
+	}
+	m.reconciles.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("outcome", outcomeError), attribute.String("reason", failureReason(err))))
+}
+
+// failureReason names why err failed: the API status reason, Timeout for a deadline, else Unknown.
+func failureReason(err error) string {
+	if reason := apierrors.ReasonForError(err); reason != metav1.StatusReasonUnknown {
+		return string(reason)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return string(metav1.StatusReasonTimeout)
+	}
+
+	return "Unknown"
 }
 
 // collect reads the current metrics.

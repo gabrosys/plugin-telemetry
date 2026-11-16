@@ -693,12 +693,15 @@ func (e *engine) gatherRound(ctx context.Context, timed bool) {
 		err = errGatherPanicked
 	}
 	took := e.clk.Since(start)
+	if err != nil && ctx.Err() != nil {
+		e.runner.pool.CloseIdle()
+		return
+	}
+	// A round that returns early or panics before its last statement counts as failed.
+	failed := true
+	defer func() { e.stats.Collection(failed, took) }()
 	e.runner.pool.CloseIdle()
 	if err != nil {
-		if ctx.Err() != nil {
-			return
-		}
-		e.stats.Collection(true, took)
 		e.facts.Store(nil)
 		if errors.Is(err, planner.ErrSuperuser) {
 			e.refuse(ctx, cur)
@@ -715,7 +718,6 @@ func (e *engine) gatherRound(ctx context.Context, timed bool) {
 		}
 		return
 	}
-	e.stats.Collection(false, took)
 	e.refusing = false
 	e.errs.Succeeded(logger.GetLogger(), factsQuery, s.Postgres.Database)
 	e.facts.Store(&builtin.Facts{Version: facts.Version, Primary: !facts.InRecovery, WALSegmentSize: facts.WALSegmentSize})
@@ -731,6 +733,7 @@ func (e *engine) gatherRound(ctx context.Context, timed bool) {
 	v := facts.Version
 	e.server.Store(&v)
 	e.plan.setFacts(ctx, facts)
+	failed = false
 }
 
 // refuse handles a facts round that found a superuser session role: the plan is empty, the pool is new

@@ -548,6 +548,24 @@ var _ = Describe("The self-measuring metrics", func() {
 		Expect(ok).To(BeTrue())
 	})
 
+	It("count a round that panics after a good gather as failed", func() {
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) },
+			func(ctx context.Context, round int) (planner.Facts, error) {
+				if round == 0 {
+					// logChecks panics on the error text, after the gather succeeded.
+					return planner.Facts{Version: memPrimary.Version, Databases: memPrimary.Databases, ChecksErr: panickyError{}}, nil
+				}
+				<-ctx.Done()
+				return planner.Facts{}, ctx.Err()
+			})
+		up := map[string]string{"collector": "Collect.up"}
+		h.advance(func() bool { return h.logged("recovered from a panic") >= 1 })
+		h.advance(h.has("cnpg_collector_collections_total", map[string]string{}, 1))
+		h.advance(h.has("cnpg_collector_last_collection_error", map[string]string{}, 1))
+		h.advance(h.has("cnpg_collector_collection_errors_total", up, 1))
+		h.advance(h.has("cnpg_collector_up", map[string]string{"cluster": "mem"}, 0))
+	})
+
 	It("report nothing before the first facts round", func() {
 		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) },
 			func(ctx context.Context, _ int) (planner.Facts, error) {

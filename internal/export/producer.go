@@ -36,7 +36,7 @@ type Producer struct {
 // extra, when not nil, is called once per Produce; its samples join the snapshot's points of the same name.
 // A panic in extra drops only its samples (safe.Call): a Producer error drops the whole collection.
 // An extra sample wins over a snapshot series of its name and labels, or of its name and another kind;
-// the snapshot's series counts as a duplicate.
+// the snapshot's series counts as a duplicate. Of repeated extra samples the first is kept.
 func NewProducer(
 	store *snapshot.Store, clk clock.PassiveClock, onDuplicates func(map[snapshot.Key]int), extra func() []queries.Sample,
 ) *Producer {
@@ -66,7 +66,11 @@ func (p *Producer) Produce(ctx context.Context) ([]metricdata.ScopeMetrics, erro
 	all := make([]snapshot.Point, 0, len(extra)+len(points))
 	extraIDs := make(map[string]struct{}, len(extra))
 	for _, s := range extra {
-		extraIDs[queries.SeriesID(s.Metric, s.Labels)] = struct{}{}
+		id := queries.SeriesID(s.Metric, s.Labels)
+		if _, dup := extraIDs[id]; dup {
+			continue
+		}
+		extraIDs[id] = struct{}{}
 		all = append(all, snapshot.Point{
 			Metric: s.Metric, Description: s.Description, Kind: s.Kind, Labels: s.Labels, Value: s.Value, Histogram: s.Histogram,
 		})

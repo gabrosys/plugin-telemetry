@@ -255,6 +255,25 @@ var _ = Describe("Producer", func() {
 			Expect(ms[0].Name).To(Equal("cnpg_collector_pg_wal"))
 		})
 
+		It("keeps the first of repeated extra samples", func() {
+			prod = withExtra(func() []queries.Sample {
+				return []queries.Sample{pgWAL("volume_size", 1), pgWAL("volume_size", 2), pgWAL("volume_max", 3)}
+			})
+
+			ms := produce()
+
+			Expect(ms).To(HaveLen(1))
+			g, ok := ms[0].Data.(metricdata.Gauge[float64])
+			Expect(ok).To(BeTrue())
+			Expect(g.DataPoints).To(HaveLen(2))
+			values := map[string]float64{}
+			for _, dp := range g.DataPoints {
+				v, _ := dp.Attributes.Value("value")
+				values[v.AsString()] = dp.Value
+			}
+			Expect(values).To(Equal(map[string]float64{"volume_size": 1, "volume_max": 3}))
+		})
+
 		It("calls extra once per Produce", func() {
 			calls := 0
 			prod = withExtra(func() []queries.Sample { calls++; return nil })

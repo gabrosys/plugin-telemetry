@@ -21,6 +21,7 @@ spec:
         app.kubernetes.io/name: plugin-telemetry
     spec:
       serviceAccountName: plugin-telemetry
+      priorityClassName: plugin-telemetry
       # Covers the preStop sleep (5 s), the gRPC drain (10 s) and 5 s to exit.
       terminationGracePeriodSeconds: 20
       securityContext:

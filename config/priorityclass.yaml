@@ -1,0 +1,9 @@
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: plugin-telemetry
+# The value is a cluster-wide choice: compare it with the cluster's other classes.
+value: 1000000
+preemptionPolicy: PreemptLowerPriority
+globalDefault: false
+description: Plugin-telemetry operator Pods. The value is a cluster-wide choice; compare it with the other PriorityClasses of the cluster.

@@ -1,6 +1,8 @@
 package engine_test
 
 import (
+	"strings"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -13,7 +15,7 @@ import (
 // secretConfig marks the sources under secret/ as sensitive.
 type secretConfig struct{ engine.Config }
 
-func (secretConfig) Sensitive(name string) bool { return len(name) > 7 && name[:7] == "secret/" }
+func (secretConfig) Sensitive(name string) bool { return strings.HasPrefix(name, "secret/") }
 
 var _ = Describe("Definitions", func() {
 	It("quotes no value of a source the Config marks sensitive", func() {

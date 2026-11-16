@@ -117,6 +117,15 @@ func Builtin() UserQueries {
 	}
 }
 
+// message returns quiet for a sensitive source and verbose otherwise.
+func message(sensitive bool, quiet, verbose string) string {
+	if sensitive {
+		return quiet
+	}
+
+	return verbose
+}
+
 // Define turns a query into its Definition. Problems that leave the query usable become Warnings;
 // the others set Disabled.
 func Define(key string, q UserQuery, opts Options) Definition {
@@ -143,11 +152,9 @@ func Define(key string, q UserQuery, opts Options) Definition {
 	if q.RunOnServer != "" {
 		constraint, err := semver.NewConstraint(q.RunOnServer)
 		if err != nil {
-			if opts.Sensitive {
-				disabled = append(disabled, fmt.Sprintf("query %q: invalid runonserver", key))
-			} else {
-				disabled = append(disabled, fmt.Sprintf("invalid runonserver %q: %v", q.RunOnServer, err))
-			}
+			disabled = append(disabled, message(opts.Sensitive,
+				fmt.Sprintf("query %q: invalid runonserver", key),
+				fmt.Sprintf("invalid runonserver %q: %v", q.RunOnServer, err)))
 		} else {
 			def.RunOnServer = constraint
 		}
@@ -172,14 +179,10 @@ func Define(key string, q UserQuery, opts Options) Definition {
 
 	if selectsSeveralDatabases(q.TargetDatabases) {
 		if relations := clusterWideRelations(q.Query); len(relations) > 0 {
-			if opts.Sensitive {
-				def.Warnings = append(def.Warnings, fmt.Sprintf(
-					"query %q: cluster-wide relations are read in every selected database, so each reports the same rows", key))
-			} else {
-				def.Warnings = append(def.Warnings, fmt.Sprintf(
-					"cluster-wide relations (%s) are read in every selected database, so each reports the same rows",
-					strings.Join(relations, ", ")))
-			}
+			def.Warnings = append(def.Warnings, message(opts.Sensitive,
+				fmt.Sprintf("query %q: cluster-wide relations are read in every selected database, so each reports the same rows", key),
+				fmt.Sprintf("cluster-wide relations (%s) are read in every selected database, so each reports the same rows",
+					strings.Join(relations, ", "))))
 		}
 	}
 
@@ -206,11 +209,9 @@ func (d *Definition) addColumns(key string, q UserQuery, sensitive bool) map[str
 			if cm.PGVersion != "" {
 				constraint, err := semver.NewConstraint(cm.PGVersion)
 				if err != nil {
-					if sensitive {
-						d.Warnings = append(d.Warnings, fmt.Sprintf("query %q column %q: ignoring invalid pg_version", key, columnName))
-					} else {
-						d.Warnings = append(d.Warnings, fmt.Sprintf("column %q: ignoring invalid pg_version %q: %v", columnName, cm.PGVersion, err))
-					}
+					d.Warnings = append(d.Warnings, message(sensitive,
+						fmt.Sprintf("query %q column %q: ignoring invalid pg_version", key, columnName),
+						fmt.Sprintf("column %q: ignoring invalid pg_version %q: %v", columnName, cm.PGVersion, err)))
 				} else {
 					versions, source = constraint, cm.PGVersion
 				}
@@ -247,11 +248,9 @@ func (d *Definition) addColumns(key string, q UserQuery, sensitive bool) map[str
 			case UsageDuration:
 				d.setValue(base, source, sources, metricName+"_milliseconds", cm.Description, KindGauge)
 			default:
-				if sensitive {
-					d.Warnings = append(d.Warnings, fmt.Sprintf("query %q column %q: unknown usage, the column is not mapped", key, columnName))
-				} else {
-					d.Warnings = append(d.Warnings, fmt.Sprintf("column %q: unknown usage %q, the column is not mapped", columnName, cm.Usage))
-				}
+				d.Warnings = append(d.Warnings, message(sensitive,
+					fmt.Sprintf("query %q column %q: unknown usage, the column is not mapped", key, columnName),
+					fmt.Sprintf("column %q: unknown usage %q, the column is not mapped", columnName, cm.Usage)))
 			}
 		}
 	}

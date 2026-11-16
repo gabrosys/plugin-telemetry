@@ -238,3 +238,17 @@ var _ = Describe("Apply", func() {
 		})
 	}
 })
+
+var _ = DescribeTable("Apply rejects and leaves the Pod unchanged",
+	func(p podpatch.Params) {
+		pod := loadPod("pod-main")
+		before := pod.DeepCopy()
+
+		Expect(podpatch.Apply(pod, cluster, p, image)).To(MatchError(podpatch.ErrInvalidParameters))
+		Expect(pod).To(Equal(before))
+	},
+	Entry("an unknown auth mode", podpatch.Params{
+		Auth: "ldap", CPU: resource.MustParse("50m"), Memory: resource.MustParse("64Mi"),
+	}),
+	Entry("zero parameters", podpatch.Params{}),
+)

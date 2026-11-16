@@ -266,6 +266,25 @@ var _ = Describe("Lifecycle", func() {
 		})
 	}
 
+	It("logs the unknown keys of a Cluster with an invalid auth", func(ctx context.Context) {
+		ctx, all := captureAll(ctx, 2)
+		resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
+			clusterJSON(ours(map[string]string{"auth": "ldap", "atuh": "password"})), fixturePod("pod-main")))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.GetJsonPatch()).To(BeEmpty())
+		Expect(all()).To(ContainElement(SatisfyAll(
+			HaveKeyWithValue("msg", "ignoring unknown plugin parameters"),
+			HaveKeyWithValue("keys", ConsistOf("atuh")),
+		)))
+	})
+
+	It("returns no patch and no error without an image source", func(ctx context.Context) {
+		resp, err := (&operator.Lifecycle{}).LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
+			clusterJSON(ours(nil)), fixturePod("pod-main")))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.GetJsonPatch()).To(BeEmpty())
+	})
+
 	It("falls back to the default for an invalid sidecarMemory and still patches", func(ctx context.Context) {
 		ctx, all := captureAll(ctx, 2)
 		pod := fixturePod("pod-main")

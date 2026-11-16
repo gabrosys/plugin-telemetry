@@ -25,7 +25,7 @@ var errUnexpectedObject = errors.New("unexpected object type")
 var errConfigMapDeleted = errors.New("sidecar image configmap deleted, a restarted replica will not serve")
 
 var imageRefPattern = regexp.MustCompile(
-	`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*@sha256:[0-9a-f]{64}$`)
+	`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+)?@sha256:[0-9a-f]{64}$`)
 
 // ImageStore holds the current sidecar image and signals when the first valid one arrives.
 type ImageStore struct {
@@ -107,15 +107,28 @@ func imageEventHandler(logger log.Logger, store *ImageStore, namespace, name str
 			logger.Error(err, "ignoring sidecar image configmap")
 			return
 		}
-		logger.Info("sidecar image updated", "image", store.Image())
+		logger.Info("sidecar image updated", "image", cm.Data[SidecarImageKey])
 	}
 
 	return toolscache.ResourceEventHandlerFuncs{
-		AddFunc:    set,
-		UpdateFunc: func(_, obj any) { set(obj) },
+		AddFunc: set,
+		UpdateFunc: func(oldObj, newObj any) {
+			if sameImage(oldObj, newObj) {
+				return
+			}
+			set(newObj)
+		},
 		DeleteFunc: func(any) {
 			logger.WithValues("namespace", namespace, "configmap", name).
 				Error(errConfigMapDeleted, "keeping the last valid sidecar image")
 		},
 	}
+}
+
+// sameImage reports whether two ConfigMaps hold the same image reference, as on a resync.
+func sameImage(a, b any) bool {
+	oldCM, okOld := a.(*corev1.ConfigMap)
+	newCM, okNew := b.(*corev1.ConfigMap)
+
+	return okOld && okNew && oldCM.Data[SidecarImageKey] == newCM.Data[SidecarImageKey]
 }

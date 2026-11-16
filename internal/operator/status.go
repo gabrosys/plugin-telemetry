@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -129,12 +128,6 @@ func (s *Status) compute(ctx context.Context, c *apiv1.Cluster, plugin apiv1.Plu
 	parsed, authErr := podpatch.ParseParams(plugin.Parameters)
 	var problems []string
 	if authErr != nil {
-		rest := maps.Clone(plugin.Parameters)
-		delete(rest, "auth")
-		var err error
-		if parsed, err = podpatch.ParseParams(rest); err != nil {
-			return ClusterStatus{}, fmt.Errorf("parse plugin parameters: %w", err)
-		}
 		problems = append(problems, fmt.Sprintf("auth %q is invalid: no sidecar is injected", plugin.Parameters["auth"]))
 	} else {
 		problems = append(problems, clusterconfig.SpecProblems(c, parsed.Params)...)

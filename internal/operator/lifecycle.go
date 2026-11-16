@@ -164,20 +164,23 @@ func (l *Lifecycle) hook(
 func (l *Lifecycle) patch(
 	logger log.Logger, cluster *apiv1.Cluster, pluginConfig apiv1.PluginConfiguration, original *corev1.Pod,
 ) ([]byte, error) {
+	if l.Images == nil {
+		return nil, errNoImage
+	}
 	image := l.Images.Image()
 	if image == "" {
 		return nil, errNoImage
 	}
 
 	parsed, err := podpatch.ParseParams(pluginConfig.Parameters)
-	if err != nil {
-		return nil, fmt.Errorf("parse plugin parameters: %w", err)
-	}
 	for _, defaulted := range parsed.Defaulted {
 		logger.Error(defaulted, "invalid sidecar resource, using the default")
 	}
 	if len(parsed.Ignored) > 0 {
 		logger.Warning("ignoring unknown plugin parameters", "keys", parsed.Ignored)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("parse plugin parameters: %w", err)
 	}
 
 	mutated := original.DeepCopy()

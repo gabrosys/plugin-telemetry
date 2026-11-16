@@ -2,6 +2,7 @@ package podpatch
 
 import (
 	"fmt"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
@@ -12,9 +13,20 @@ import (
 const scratchSubPath = "run"
 
 // Apply upserts the sidecar and its volumes by name. It reads nothing but its arguments.
+// It returns an error, and leaves the Pod unchanged, for an unknown Auth, a zero CPU or
+// Memory, or a peer-mode Pod without the scratch volume.
 func Apply(pod *corev1.Pod, cluster string, p Params, image string) error {
-	if p.Auth == AuthPeer && !hasVolume(pod.Spec.Volumes, metadata.ScratchVolume) {
-		return fmt.Errorf("peer mode: %w", ErrNoScratchVolume)
+	switch p.Auth {
+	case AuthPeer:
+		if !slices.ContainsFunc(pod.Spec.Volumes, func(v corev1.Volume) bool { return v.Name == metadata.ScratchVolume }) {
+			return fmt.Errorf("peer mode: %w", ErrNoScratchVolume)
+		}
+	case AuthPassword:
+	default:
+		return fmt.Errorf("%w: auth %q", ErrInvalidParameters, p.Auth)
+	}
+	if p.CPU.IsZero() || p.Memory.IsZero() {
+		return fmt.Errorf("%w: sidecar CPU and memory must not be zero", ErrInvalidParameters)
 	}
 
 	pod.Spec.Volumes = upsert(pod.Spec.Volumes, corev1.Volume{
@@ -23,12 +35,12 @@ func Apply(pod *corev1.Pod, cluster string, p Params, image string) error {
 			SecretName: metadata.TokenSecretName(cluster),
 			Optional:   ptr.To(true),
 		}},
-	}, func(v corev1.Volume) string { return v.Name })
+	}, volumeName)
 
 	pod.Spec.Volumes = upsert(pod.Spec.Volumes, corev1.Volume{
 		Name:         metadata.TokenMaskVolume,
 		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-	}, func(v corev1.Volume) string { return v.Name })
+	}, volumeName)
 
 	pod.Spec.InitContainers = upsert(pod.Spec.InitContainers, sidecar(cluster, p, image),
 		func(c corev1.Container) string { return c.Name })
@@ -91,15 +103,7 @@ func fieldEnv(name, path string) corev1.EnvVar {
 	}
 }
 
-func hasVolume(volumes []corev1.Volume, name string) bool {
-	for _, v := range volumes {
-		if v.Name == name {
-			return true
-		}
-	}
-
-	return false
-}
+func volumeName(v corev1.Volume) string { return v.Name }
 
 // upsert replaces the element with the same name in place, or appends it.
 func upsert[T any](items []T, item T, name func(T) string) []T {

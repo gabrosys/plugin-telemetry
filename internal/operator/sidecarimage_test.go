@@ -38,6 +38,7 @@ var _ = DescribeTable("ImageStore.Set image references",
 	},
 	Entry("a digest reference", "ghcr.io/gabrosys/plugin-telemetry@sha256:"+hex64, true),
 	Entry("a registry with a port", "localhost:5001/plugin-telemetry@sha256:"+hex64, true),
+	Entry("a registry with a port and no path", "localhost:5001@sha256:"+hex64, false),
 	Entry("a tag", "ghcr.io/gabrosys/plugin-telemetry:v0.1.0", false),
 	Entry("a tag and a digest", "ghcr.io/gabrosys/plugin-telemetry:v0.1.0@sha256:"+hex64, false),
 	Entry("uppercase hex", "ghcr.io/x@sha256:"+strings.ToUpper(hex64), false),
@@ -124,14 +125,37 @@ var _ = Describe("image event handler", func() {
 
 	It("replaces the image on a valid update", func() {
 		handler.OnAdd(configMap(map[string]string{operator.SidecarImageKey: validImage}), true)
-		handler.OnUpdate(nil, configMap(map[string]string{operator.SidecarImageKey: otherImage}))
+		handler.OnUpdate(configMap(map[string]string{operator.SidecarImageKey: validImage}), configMap(map[string]string{operator.SidecarImageKey: otherImage}))
 
 		Expect(store.Image()).To(Equal(otherImage))
 	})
 
+	It("logs an update only when the image changed", func() {
+		handler.OnAdd(configMap(map[string]string{operator.SidecarImageKey: validImage}), true)
+		valid := configMap(map[string]string{operator.SidecarImageKey: validImage})
+		handler.OnUpdate(valid, valid)
+		handler.OnUpdate(valid, valid)
+
+		updated := func() []map[string]any {
+			var lines []map[string]any
+			for _, l := range logs() {
+				if l["msg"] == "sidecar image updated" {
+					lines = append(lines, l)
+				}
+			}
+
+			return lines
+		}
+		Expect(updated()).To(HaveLen(1))
+
+		handler.OnUpdate(valid, configMap(map[string]string{operator.SidecarImageKey: otherImage}))
+		Expect(updated()).To(HaveLen(2))
+		Expect(updated()[1]).To(HaveKeyWithValue("image", otherImage))
+	})
+
 	It("keeps the previous image and logs an error on an update to an invalid value", func() {
 		handler.OnAdd(configMap(map[string]string{operator.SidecarImageKey: validImage}), true)
-		handler.OnUpdate(nil, configMap(map[string]string{operator.SidecarImageKey: "ghcr.io/x:latest"}))
+		handler.OnUpdate(configMap(map[string]string{operator.SidecarImageKey: validImage}), configMap(map[string]string{operator.SidecarImageKey: "ghcr.io/x:latest"}))
 
 		Expect(store.Image()).To(Equal(validImage))
 		Expect(logs()).To(ContainElement(SatisfyAll(HaveKey("error"), SatisfyAll(HaveKeyWithValue("namespace", "cnpg-system"), HaveKeyWithValue("configmap", "sidecar-image")))))

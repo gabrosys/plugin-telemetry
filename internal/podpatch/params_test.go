@@ -96,4 +96,13 @@ var _ = Describe("ParseParams", func() {
 		Expect(err).To(MatchError(ContainSubstring("auth")))
 		Expect(err).NotTo(MatchError(ContainSubstring("sidecarCPU")))
 	})
+
+	It("returns every parsed field with the auth error", func() {
+		r, err := podpatch.ParseParams(map[string]string{"auth": "ldap", "atuh": "password", "sidecarCPU": "lots", "exporter": "prod"})
+		Expect(err).To(MatchError(podpatch.ErrInvalidParameters))
+		Expect(r.Ignored).To(Equal([]string{"atuh"}))
+		Expect(r.Defaulted).To(HaveLen(1))
+		Expect(r.Params.Exporter).To(Equal("prod"))
+		Expect(r.Params.Auth).To(Equal(podpatch.AuthPeer))
+	})
 })

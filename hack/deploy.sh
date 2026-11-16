@@ -41,6 +41,9 @@ patches:
       - op: add
         path: /spec/template/spec/containers/0/args/-
         value: --metrics-endpoint=$metrics_endpoint
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --log-level=debug
 images:
   - name: ghcr.io/gabrosys/plugin-telemetry
     newName: ${ref%@*}

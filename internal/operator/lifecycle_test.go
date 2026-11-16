@@ -207,7 +207,7 @@ var _ = Describe("Lifecycle", func() {
 	}
 
 	It("falls back to the default for an invalid sidecarMemory and still patches", func(ctx context.Context) {
-		ctx, all := captureAll(ctx)
+		ctx, all := captureAll(ctx, 2)
 		pod := fixturePod("pod-main")
 		resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
 			clusterJSON(ours(map[string]string{"sidecarMemory": "16Mi"})), pod))
@@ -276,11 +276,11 @@ var _ = Describe("Lifecycle", func() {
 	})
 })
 
-// captureAll returns a context whose logger keeps every line, and a
+// captureAll returns a context whose logger keeps the lines up to verbosity, and a
 // function returning all lines decoded from JSON.
-func captureAll(ctx context.Context) (context.Context, func() []map[string]any) {
+func captureAll(ctx context.Context, verbosity int) (context.Context, func() []map[string]any) {
 	var lines []string
-	sink := funcr.NewJSON(func(obj string) { lines = append(lines, obj) }, funcr.Options{})
+	sink := funcr.NewJSON(func(obj string) { lines = append(lines, obj) }, funcr.Options{Verbosity: verbosity})
 
 	return logr.NewContext(ctx, sink), func() []map[string]any {
 		GinkgoHelper()
@@ -298,7 +298,7 @@ func captureAll(ctx context.Context) (context.Context, func() []map[string]any) 
 
 // captureLogs is captureAll narrowed to the "lifecycle hook" lines.
 func captureLogs(ctx context.Context) (context.Context, func() []map[string]any) {
-	ctx, all := captureAll(ctx)
+	ctx, all := captureAll(ctx, 2)
 
 	return ctx, func() []map[string]any {
 		var hook []map[string]any
@@ -319,7 +319,7 @@ func hookLine(operation, outcome string) OmegaMatcher {
 		HaveKeyWithValue("cluster", "fixture"),
 		HaveKeyWithValue("pod", "fixture-1"),
 		HaveKeyWithValue("outcome", outcome),
-		HaveKeyWithValue("level", BeEquivalentTo(0)),
+		HaveKeyWithValue("level", BeEquivalentTo(2)),
 		Not(HaveKey("error")),
 	)
 }
@@ -364,7 +364,7 @@ var _ = Describe("Lifecycle logging", func() {
 			Expect(hookLines()).To(HaveExactElements(SatisfyAll(
 				HaveKeyWithValue("operation", "EVALUATE"),
 				HaveKeyWithValue("outcome", "skipped"),
-				HaveKeyWithValue("level", BeEquivalentTo(0)),
+				HaveKeyWithValue("level", BeEquivalentTo(2)),
 			)))
 		},
 		Entry("for a Cluster without the plugin", clusterJSON(), func() []byte { return fixturePod("pod-main") }),
@@ -383,7 +383,7 @@ var _ = Describe("Lifecycle logging", func() {
 
 	DescribeTable("logs an error before rejecting an undecodable request",
 		func(ctx context.Context, cluster, object []byte, what string) {
-			ctx, all := captureAll(ctx)
+			ctx, all := captureAll(ctx, 2)
 			_, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, cluster, object))
 			Expect(status.Code(err)).To(Equal(codes.InvalidArgument))
 
@@ -396,6 +396,32 @@ var _ = Describe("Lifecycle logging", func() {
 		Entry("a malformed object", clusterJSON(ours(nil)), []byte(`{"kind":`), "get object kind"),
 		Entry("a Pod that does not decode", clusterJSON(ours(nil)), []byte(`{"kind":"Pod","spec":"x"}`), "decode pod"),
 	)
+
+	It("logs the lifecycle hook line at debug level only", func(ctx context.Context) {
+		hookRequest := func() *lifecycle.OperatorLifecycleRequest {
+			return request(lifecycle.OperatorOperationType_TYPE_EVALUATE, clusterJSON(ours(nil)), fixturePod("pod-main"))
+		}
+		hookEntries := func(all []map[string]any) []map[string]any {
+			var hook []map[string]any
+			for _, entry := range all {
+				if entry["msg"] == "lifecycle hook" {
+					hook = append(hook, entry)
+				}
+			}
+
+			return hook
+		}
+
+		debugCtx, debugLines := captureAll(ctx, 2)
+		_, err := srv.LifecycleHook(debugCtx, hookRequest())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(hookEntries(debugLines())).To(HaveExactElements(hookLine("EVALUATE", "patched")))
+
+		infoCtx, infoLines := captureAll(ctx, 0)
+		_, err = srv.LifecycleHook(infoCtx, hookRequest())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(hookEntries(infoLines())).To(BeEmpty())
+	})
 
 	It("logs no hook line for a request it cannot decode", func(ctx context.Context) {
 		ctx, hookLines := captureLogs(ctx)

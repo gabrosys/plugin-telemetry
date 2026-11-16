@@ -109,7 +109,7 @@ var _ = Describe("image event handler", func() {
 
 	BeforeEach(func(ctx context.Context) {
 		var logCtx context.Context
-		logCtx, logs = captureAll(ctx)
+		logCtx, logs = captureAll(ctx, 2)
 		store = operator.NewImageStore()
 		handler = operator.ImageEventHandler(log.FromContext(logCtx), store)
 	})

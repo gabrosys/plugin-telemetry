@@ -114,7 +114,7 @@ func (l *Lifecycle) handle(
 		return nil, outcomeError, err
 	}
 
-	logger.Info("lifecycle hook",
+	logger.Debug("lifecycle hook",
 		"operation", strings.TrimPrefix(req.GetOperationType().GetType().String(), "TYPE_"),
 		"pod", meta.Name,
 		"outcome", outcome)

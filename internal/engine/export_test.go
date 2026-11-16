@@ -112,6 +112,40 @@ func RecordResult(ctx context.Context, res executor.Result) (kept bool, runs int
 	return kept, runs, errors.Join(err, e.mp.Shutdown(ctx))
 }
 
+// RecordFailureBetweenSuccesses records an ok run of a counter at t0, then failed, then an ok run at t0+1m
+// with a higher value. It reports whether the job's series were exported after failed and the Start of
+// the series after the last run.
+func RecordFailureBetweenSuccesses(ctx context.Context, failed executor.Result) (exported bool, start, t0 time.Time, err error) {
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, nil)
+	if err != nil {
+		return false, time.Time{}, time.Time{}, err
+	}
+	job := failed.Job
+	key := snapshot.Key{Query: job.Query, Database: job.Database}
+	e.plan.planned = map[snapshot.Key]string{key: job.Fingerprint}
+	ok := func(value float64, started time.Time) executor.Result {
+		sample := queries.Sample{Metric: "cnpg_" + job.Query + "_total", Kind: queries.KindCounter, Value: value}
+		return executor.Result{Job: job, Outcome: selfmetrics.OutcomeOK, Samples: []queries.Sample{sample}, Started: started}
+	}
+	exportedKey := func() (found bool, started time.Time) {
+		points, _ := e.store.Points()
+		for _, p := range points {
+			if p.Key == key {
+				return true, p.Start
+			}
+		}
+		return false, time.Time{}
+	}
+
+	t0 = time.Now()
+	e.record(ctx, ok(10, t0))
+	e.record(ctx, failed)
+	exported, _ = exportedKey()
+	e.record(ctx, ok(15, t0.Add(time.Minute)))
+	_, start = exportedKey()
+	return exported, start, t0, e.mp.Shutdown(ctx)
+}
+
 // queryRuns returns cnpg_otel_query_runs_total for job with outcome, from one collection of e.
 func queryRuns(ctx context.Context, e *engine, job planner.Job, outcome selfmetrics.Outcome) (int64, error) {
 	var rm metricdata.ResourceMetrics

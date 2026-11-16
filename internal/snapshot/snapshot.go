@@ -196,8 +196,12 @@ func (s *Store) Points() (points []Point, duplicates map[Key]int) {
 	})
 
 	duplicates = make(map[Key]int)
-	seen := make(map[string]struct{}, s.series)
-	points = make([]Point, 0, s.series)
+	exported := 0
+	for _, e := range s.entries {
+		exported += len(e.points)
+	}
+	seen := make(map[string]struct{}, exported)
+	points = make([]Point, 0, exported)
 	for _, k := range keys {
 		for _, p := range s.entries[k].points {
 			id := seriesID(queries.Sample{Metric: p.Metric, Labels: p.Labels})

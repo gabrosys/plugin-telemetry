@@ -185,6 +185,19 @@ var _ = Describe("A run caught in a pool swap", func() {
 	})
 })
 
+var _ = DescribeTable("A failed run",
+	func(ctx SpecContext, outcome selfmetrics.Outcome) {
+		res := executor.Result{Job: planner.Job{Query: "backends", Database: "app", Fingerprint: "f"}, Outcome: outcome, WouldBe: 5}
+		exported, start, t0, err := engine.RecordFailureBetweenSuccesses(ctx, res)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(exported).To(BeFalse(), "the series stop exporting")
+		Expect(start).To(Equal(t0), "the next run keeps the counter's start time")
+	},
+	Entry("on a timeout", selfmetrics.OutcomeTimeout),
+	Entry("when denied", selfmetrics.OutcomeDenied),
+	Entry("over the series cap", selfmetrics.OutcomeCapped),
+)
+
 var _ = Describe("Run bookkeeping", func() {
 	It("logs a bookkeeping panic with its stack and keeps running the job", func(ctx SpecContext) {
 		var (

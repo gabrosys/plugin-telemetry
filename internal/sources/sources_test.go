@@ -217,7 +217,7 @@ var _ = Describe("Loader", func() {
 		Expect(r.Status[1].Source).To(Equal(f2))
 	})
 
-	It("gives the same hash for an empty and an absent target_databases, metrics and metric_mapping", func() {
+	It("hashes an empty and an absent target_databases, metrics and metric_mapping differently", func() {
 		const absent = "a:\n  query: SELECT 1\n  metrics:\n    - v:\n        usage: MAPPEDMETRIC\n        description: V.\n"
 		const empty = "a:\n  query: SELECT 1\n  target_databases: []\n  metrics:\n    - v:\n        usage: MAPPEDMETRIC\n" +
 			"        description: V.\n        metric_mapping: {}\n"
@@ -228,20 +228,8 @@ var _ = Describe("Loader", func() {
 			return sources.NewLoader(os.ReadFile, []string{f1}, nil).Load().Hash
 		}
 
-		Expect(hash(empty)).To(Equal(hash(absent)))
-		Expect(hash(emptyMetrics)).To(Equal(hash(noMetrics)))
-	})
-
-	It("hashes an empty metric_mapping beside a metrics_mapping differently from an absent one", func() {
-		const base = "a:\n  query: SELECT 1\n  metrics:\n    - v:\n        usage: MAPPEDMETRIC\n        description: V.\n"
-		const alt = "        metrics_mapping:\n          x: 1\n"
-		hash := func(content string) string {
-			write(f1, content)
-			return sources.NewLoader(os.ReadFile, []string{f1}, nil).Load().Hash
-		}
-
-		Expect(hash(base + "        metric_mapping: {}\n" + alt)).NotTo(Equal(hash(base + alt)))
-		Expect(hash(base + "        metric_mapping: {}\n")).To(Equal(hash(base)))
+		Expect(hash(empty)).NotTo(Equal(hash(absent)))
+		Expect(hash(emptyMetrics)).NotTo(Equal(hash(noMetrics)))
 	})
 
 	It("revives the version from before a file went missing when it comes back invalid", func() {

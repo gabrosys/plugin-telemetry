@@ -173,41 +173,11 @@ func (l *Loader) previousFor(st *Status, file string) queries.UserQueries {
 	return prev
 }
 
-// hashEntries hashes fmt's %#v form, which prints maps sorted by key and so is deterministic. An empty
-// TargetDatabases, Metrics or MetricMapping hashes as an absent one.
+// hashEntries hashes fmt's %#v form, which prints maps sorted by key and so is deterministic.
 func hashEntries(entries []Entry) string {
-	norm := make([]Entry, len(entries))
-	for i, e := range entries {
-		if len(e.Query.TargetDatabases) == 0 {
-			e.Query.TargetDatabases = nil
-		}
-		if len(e.Query.Metrics) == 0 {
-			e.Query.Metrics = nil
-		} else {
-			e.Query.Metrics = normalizeMappings(e.Query.Metrics)
-		}
-		norm[i] = e
-	}
-	sum := sha256.Sum256(fmt.Appendf(nil, "%#v", norm))
+	sum := sha256.Sum256(fmt.Appendf(nil, "%#v", entries))
 
 	return hex.EncodeToString(sum[:])
-}
-
-// normalizeMappings copies metrics with every empty MetricMapping set to nil.
-func normalizeMappings(metrics []queries.Mapping) []queries.Mapping {
-	out := make([]queries.Mapping, len(metrics))
-	for i, m := range metrics {
-		out[i] = make(queries.Mapping, len(m))
-		for name, col := range m {
-			// An empty metric_mapping beside a metrics_mapping is not absent: Define warns and uses the empty one.
-			if len(col.MetricMapping) == 0 && col.MetricsMapping == nil {
-				col.MetricMapping = nil
-			}
-			out[i][name] = col
-		}
-	}
-
-	return out
 }
 
 // redactedParseError describes a YAML error by its line numbers only: the library's messages quote the

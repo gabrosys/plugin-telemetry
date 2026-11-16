@@ -112,7 +112,7 @@ func (e *engine) reload(ctx context.Context) error {
 	r.stats.ConfigLoad(r.cfg.Name(), selfmetrics.OutcomeOK, 0)
 
 	if r.loader == nil {
-		r.loader = sources.NewLoader(read, s.Sources, LoaderOptions(r.cfg)...)
+		r.loader = sources.NewLoader(read, s.Sources, r.cfg.Sensitive)
 	} else {
 		r.loader.SetFiles(s.Sources)
 	}
@@ -184,13 +184,9 @@ func loadOutcome(o string) selfmetrics.Outcome {
 
 // Definitions defines the queries of res; a source cfg marks sensitive gets a definition that quotes no value.
 func Definitions(cfg Config, s settings.Settings, res sources.Result) []queries.Definition {
-	sensitive := func(string) bool { return false }
-	if c, ok := cfg.(sensitiveConfig); ok {
-		sensitive = c.Sensitive
-	}
 	defs := make([]queries.Definition, 0, len(res.Entries))
 	for _, e := range res.Entries {
-		opts := queries.Options{MaxLabelsPerSeries: s.Limits.MaxLabelsPerSeries, Sensitive: sensitive(e.Source)}
+		opts := queries.Options{MaxLabelsPerSeries: s.Limits.MaxLabelsPerSeries, Sensitive: cfg.Sensitive(e.Source)}
 		defs = append(defs, queries.Define(e.Key, e.Query, opts))
 	}
 

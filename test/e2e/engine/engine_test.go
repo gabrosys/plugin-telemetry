@@ -14,9 +14,9 @@ import (
 	. "github.com/onsi/gomega"
 	otelruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
 
+	"github.com/gabrosys/plugin-telemetry/internal/engine"
 	"github.com/gabrosys/plugin-telemetry/internal/scheduler"
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
-	"github.com/gabrosys/plugin-telemetry/internal/sources"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/otlp"
 )
 
@@ -215,7 +215,7 @@ var _ = Describe("the engine", Ordered, ContinueOnFailure, func() {
 		oldGeneration := mustLast(lines, configInfo, nil).Attrs["generation"]
 
 		// A new query waits for its initial delay, below its interval and MaxInitialDelay, before its first run.
-		bound := sources.Debounce + min(defaultInterval, scheduler.MaxInitialDelay) + exportInterval + flushInterval + slack
+		bound := engine.Debounce + min(defaultInterval, scheduler.MaxInitialDelay) + exportInterval + flushInterval + slack
 		start := time.Now()
 		writeFile("extra.yaml", probeQuery)
 		Eventually(func(g Gomega) []otlp.Point {
@@ -244,7 +244,7 @@ var _ = Describe("the engine", Ordered, ContinueOnFailure, func() {
 			g.Expect(loadErrors(ls)).To(BeNumerically(">", errorsBefore))
 			p, _ := otlp.Last(ls, configLoads, map[string]string{"source": extra, "outcome": "error"})
 			broken = p.Time
-		}).WithContext(ctx).WithTimeout(sources.Debounce + exportInterval + flushInterval + slack).
+		}).WithContext(ctx).WithTimeout(engine.Debounce + exportInterval + flushInterval + slack).
 			WithPolling(250 * time.Millisecond).Should(Succeed())
 
 		// The exports after the failed load still carry the probe, under the same generation.

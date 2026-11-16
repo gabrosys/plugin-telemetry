@@ -62,7 +62,7 @@ var _ = Describe("Loader", func() {
 	})
 
 	It("loads the builtin query first and always ok", func() {
-		r := sources.NewLoader(os.ReadFile, nil).Load()
+		r := sources.NewLoader(os.ReadFile, nil, nil).Load()
 
 		Expect(keys(r)).To(Equal(builtinKeys))
 		Expect(r.Status).To(HaveLen(1))
@@ -75,7 +75,7 @@ var _ = Describe("Loader", func() {
 		write(f1, "a:\n  query: SELECT 1\nb:\n  query: SELECT 1\ncollector:\n  query: SELECT 0\n")
 		write(f2, "b:\n  query: SELECT 2\nc:\n  query: SELECT 3\na:\n  query: SELECT 2\n")
 
-		r := sources.NewLoader(os.ReadFile, []string{f1, f2}).Load()
+		r := sources.NewLoader(os.ReadFile, []string{f1, f2}, nil).Load()
 
 		Expect(keys(r)).To(Equal(withBuiltin("a", "b", "c")))
 		Expect(entry(r, "a").Query.Query).To(Equal("SELECT 2"))
@@ -91,7 +91,7 @@ var _ = Describe("Loader", func() {
 	It("skips a missing file", func() {
 		write(f2, "b:\n  query: SELECT 2\n")
 
-		r := sources.NewLoader(os.ReadFile, []string{f1, f2}).Load()
+		r := sources.NewLoader(os.ReadFile, []string{f1, f2}, nil).Load()
 
 		Expect(r.Status[1].Outcome).To(Equal("missing"))
 		Expect(r.Status[1].Err).To(HaveOccurred())
@@ -102,7 +102,7 @@ var _ = Describe("Loader", func() {
 	It("skips a file that is invalid from the start", func() {
 		write(f1, "a: [not, a, map")
 
-		r := sources.NewLoader(os.ReadFile, []string{f1}).Load()
+		r := sources.NewLoader(os.ReadFile, []string{f1}, nil).Load()
 
 		Expect(r.Status[1].Outcome).To(Equal("invalid"))
 		Expect(r.Status[1].Err).To(HaveOccurred())
@@ -112,7 +112,7 @@ var _ = Describe("Loader", func() {
 
 	It("keeps the last good version of a file that stops parsing", func() {
 		write(f1, "a:\n  query: SELECT 1\n")
-		l := sources.NewLoader(os.ReadFile, []string{f1})
+		l := sources.NewLoader(os.ReadFile, []string{f1}, nil)
 		good := l.Load()
 
 		write(f1, "a: [not, a, map")
@@ -132,7 +132,7 @@ var _ = Describe("Loader", func() {
 
 	It("changes the hash only when entries change", func() {
 		write(f1, "a:\n  query: SELECT 1\n")
-		l := sources.NewLoader(os.ReadFile, []string{f1})
+		l := sources.NewLoader(os.ReadFile, []string{f1}, nil)
 		first := l.Load()
 		Expect(first.Hash).To(MatchRegexp("^[0-9a-f]{64}$"))
 
@@ -151,7 +151,7 @@ var _ = Describe("Loader", func() {
 			}
 			return []byte("a:\n  query: SELECT 1\n"), nil
 		}
-		l := sources.NewLoader(read, []string{"mem/one.yaml"})
+		l := sources.NewLoader(read, []string{"mem/one.yaml"}, nil)
 		good := l.Load()
 		Expect(good.Status[1].Outcome).To(Equal(sources.OutcomeOK))
 
@@ -167,7 +167,7 @@ var _ = Describe("Loader", func() {
 
 	It("skips a denied source that never loaded", func() {
 		read := func(name string) ([]byte, error) { return nil, fmt.Errorf("get %s: %w", name, sources.ErrDenied) }
-		r := sources.NewLoader(read, []string{"mem/one.yaml"}).Load()
+		r := sources.NewLoader(read, []string{"mem/one.yaml"}, nil).Load()
 		Expect(r.Status[1].Outcome).To(Equal(sources.OutcomeDenied))
 		Expect(r.Status[1].UsingPrevious).To(BeFalse())
 		Expect(keys(r)).To(Equal(builtinKeys))
@@ -175,7 +175,7 @@ var _ = Describe("Loader", func() {
 
 	It("keeps a source's last good version when another source is added", func() {
 		write(f1, "a:\n  query: SELECT 1\n")
-		l := sources.NewLoader(os.ReadFile, []string{f1})
+		l := sources.NewLoader(os.ReadFile, []string{f1}, nil)
 		good := l.Load()
 
 		write(f1, "a: [not, a, map")
@@ -191,7 +191,7 @@ var _ = Describe("Loader", func() {
 
 	It("forgets the last good version of a file SetFiles drops", func() {
 		write(f1, "a:\n  query: SELECT 1\n")
-		l := sources.NewLoader(os.ReadFile, []string{f1})
+		l := sources.NewLoader(os.ReadFile, []string{f1}, nil)
 		l.Load()
 
 		l.SetFiles([]string{f2})
@@ -207,7 +207,7 @@ var _ = Describe("Loader", func() {
 	It("loads the files in the order SetFiles gives", func() {
 		write(f1, "a:\n  query: SELECT 1\n")
 		write(f2, "a:\n  query: SELECT 2\n")
-		l := sources.NewLoader(os.ReadFile, []string{f1, f2})
+		l := sources.NewLoader(os.ReadFile, []string{f1, f2}, nil)
 		Expect(entry(l.Load(), "a").Query.Query).To(Equal("SELECT 2"))
 
 		l.SetFiles([]string{f2, f1})
@@ -225,7 +225,7 @@ var _ = Describe("Loader", func() {
 		const emptyMetrics = "a:\n  query: SELECT 1\n  metrics: []\n"
 		hash := func(content string) string {
 			write(f1, content)
-			return sources.NewLoader(os.ReadFile, []string{f1}).Load().Hash
+			return sources.NewLoader(os.ReadFile, []string{f1}, nil).Load().Hash
 		}
 
 		Expect(hash(empty)).To(Equal(hash(absent)))
@@ -237,7 +237,7 @@ var _ = Describe("Loader", func() {
 		const alt = "        metrics_mapping:\n          x: 1\n"
 		hash := func(content string) string {
 			write(f1, content)
-			return sources.NewLoader(os.ReadFile, []string{f1}).Load().Hash
+			return sources.NewLoader(os.ReadFile, []string{f1}, nil).Load().Hash
 		}
 
 		Expect(hash(base + "        metric_mapping: {}\n" + alt)).NotTo(Equal(hash(base + alt)))
@@ -246,7 +246,7 @@ var _ = Describe("Loader", func() {
 
 	It("revives the version from before a file went missing when it comes back invalid", func() {
 		write(f1, "a:\n  query: SELECT 1\n")
-		l := sources.NewLoader(os.ReadFile, []string{f1})
+		l := sources.NewLoader(os.ReadFile, []string{f1}, nil)
 		good := l.Load()
 
 		Expect(os.Remove(f1)).To(Succeed())
@@ -272,7 +272,7 @@ var _ = Describe("Loader", func() {
 				return nil, fmt.Errorf("read %s: %w", name, fs.ErrNotExist)
 			}
 			return []byte(data), nil
-		}, []string{"mem/one.yaml", "mem/two.yaml"})
+		}, []string{"mem/one.yaml", "mem/two.yaml"}, nil)
 
 		r := l.Load()
 		Expect(read).To(Equal([]string{"mem/one.yaml", "mem/two.yaml"}))
@@ -287,7 +287,7 @@ var _ = Describe("Loader parse errors of sensitive sources", func() {
 
 	It("names the source and the line and never quotes the content", func() {
 		r := sources.NewLoader(content, []string{"secret/q/queries.yaml"},
-			sources.WithSensitive(func(name string) bool { return name == "secret/q/queries.yaml" })).Load()
+			func(name string) bool { return name == "secret/q/queries.yaml" }).Load()
 
 		st := r.Status[1]
 		Expect(st.Outcome).To(Equal(sources.OutcomeInvalid))
@@ -297,7 +297,7 @@ var _ = Describe("Loader parse errors of sensitive sources", func() {
 
 	It("keeps the message of a source that is not sensitive", func() {
 		r := sources.NewLoader(content, []string{"configmap/q/queries.yaml"},
-			sources.WithSensitive(func(name string) bool { return name == "secret/q/queries.yaml" })).Load()
+			func(name string) bool { return name == "secret/q/queries.yaml" }).Load()
 
 		Expect(r.Status[1].Err.Error()).To(ContainSubstring("SENTINE"))
 	})

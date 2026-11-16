@@ -216,7 +216,7 @@ func (p *Pool) dial(ctx context.Context, database string) (*pgx.Conn, func(bool)
 				b = &backoff{}
 				p.failed[database] = b
 			}
-			b.retryAt = p.clk.Now().Add(backoffDelay(b.failures, p.maxBackoff))
+			b.retryAt = p.clk.Now().Add(BackoffDelay(b.failures, p.maxBackoff))
 			b.failures++
 			b.last = err
 		}
@@ -249,7 +249,8 @@ func (p *Pool) connect(ctx context.Context, database string) (*pgx.Conn, error) 
 	return conn, nil
 }
 
-func backoffDelay(failures int, maxBackoff time.Duration) time.Duration {
+// BackoffDelay is 1s doubled once per failure before the current one, capped at maxBackoff.
+func BackoffDelay(failures int, maxBackoff time.Duration) time.Duration {
 	delay := initialBackoff
 	for range failures {
 		if delay >= maxBackoff {

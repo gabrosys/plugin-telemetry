@@ -20,14 +20,20 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
 	"github.com/gabrosys/plugin-telemetry/internal/snapshot"
-	"github.com/gabrosys/plugin-telemetry/internal/sources"
 )
+
+// RunWith is Run with gather in place of the facts round's PostgreSQL queries; nil means those queries.
+func RunWith(ctx context.Context, o Options, gather func(context.Context, settings.Settings) (planner.Facts, error)) error {
+	e, err := newEngine(ctx, o, gather)
+	if err != nil {
+		return err
+	}
+	e.run(ctx)
+	return nil
+}
 
 // ErrorLog is errorLog.
 type ErrorLog = errorLog
-
-// WatchDebounce is the quiet time after a file change before the engine reacts.
-const WatchDebounce = sources.Debounce
 
 // NewMeterProvider returns the engine's MeterProvider over reader.
 func NewMeterProvider(reader sdkmetric.Reader) *sdkmetric.MeterProvider {

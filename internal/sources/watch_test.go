@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -73,14 +72,10 @@ var _ = Describe("Watch", func() {
 		startWith(func(ctx context.Context, notify func()) error { return sources.WatchWith(ctx, clk, files, notify) }, fs...)
 	}
 
-	// armed reports whether the debounce timer is pending beside the retry timer.
-	armed := func() bool { return clk.Waiters() == 2 }
-
-	// fire waits for a change to arm the debounce timer and lets it fire.
-	fire := func() {
+	// atLeast waits for n notifications; one change can raise several events.
+	atLeast := func(n int32) {
 		GinkgoHelper()
-		Eventually(armed, 5*time.Second).Should(BeTrue())
-		clk.Step(sources.Debounce)
+		Eventually(count.Load, 5*time.Second).Should(BeNumerically(">=", n))
 	}
 
 	expect := func(n int32) {
@@ -114,23 +109,21 @@ var _ = Describe("Watch", func() {
 		expect(1)
 	})
 
-	It("notifies once after a write", func() {
+	It("notifies after a write", func() {
 		start(file)
 		write(file, "a:\n  query: SELECT 2\n")
-		fire()
-		expect(2)
+		atLeast(2)
 	})
 
-	It("notifies once after an editor-style rename over the file", func() {
+	It("notifies after an editor-style rename over the file", func() {
 		start(file)
 		tmp := filepath.Join(dir, ".queries.yaml.swp")
 		write(tmp, "a:\n  query: SELECT 2\n")
 		Expect(os.Rename(tmp, file)).To(Succeed())
-		fire()
-		expect(2)
+		atLeast(2)
 	})
 
-	It("notifies once after a kubernetes-style ..data symlink swap", func() {
+	It("notifies after a kubernetes-style ..data symlink swap", func() {
 		Expect(os.Remove(file)).To(Succeed())
 		v1 := filepath.Join(dir, "..2026_1")
 		v2 := filepath.Join(dir, "..2026_2")
@@ -146,70 +139,7 @@ var _ = Describe("Watch", func() {
 		Expect(os.Symlink("..2026_2", filepath.Join(dir, "..data_tmp"))).To(Succeed())
 		Expect(os.Rename(filepath.Join(dir, "..data_tmp"), filepath.Join(dir, "..data"))).To(Succeed())
 		Expect(os.RemoveAll(v1)).To(Succeed())
-		fire()
-		expect(2)
-	})
-
-	// settle gives the events of the writes so far time to reach Watch; the timer stays armed meanwhile.
-	settle := func() {
-		GinkgoHelper()
-		Consistently(armed, 100*time.Millisecond).Should(BeTrue())
-	}
-
-	It("notifies once for ten writes inside the debounce window", func() {
-		start(file)
-		for i := range 10 {
-			write(file, "a:\n  query: SELECT "+string(rune('0'+i))+"\n")
-		}
-		Eventually(armed, 5*time.Second).Should(BeTrue())
-		settle()
-		clk.Step(sources.Debounce - time.Millisecond)
-		expect(1)
-		clk.Step(time.Millisecond)
-		expect(2)
-	})
-
-	It("notifies 1s after the first event of a burst", func() {
-		start(file)
-		write(file, "a:\n  query: SELECT 1\n")
-		Eventually(armed, 5*time.Second).Should(BeTrue())
-		settle()
-		clk.Step(300 * time.Millisecond)
-		write(file, "a:\n  query: SELECT 2\n")
-		settle()
-		clk.Step(300 * time.Millisecond)
-		write(file, "a:\n  query: SELECT 3\n")
-		settle()
-		clk.Step(399 * time.Millisecond)
-		expect(1)
-		clk.Step(time.Millisecond)
-		expect(2)
-	})
-
-	It("reloads at least once a second under a steady stream of updates", func() {
-		var seen atomic.Value // the file as the latest notify read it
-		startWith(func(ctx context.Context, notify func()) error {
-			return sources.WatchWith(ctx, clk, files, func() {
-				defer GinkgoRecover()
-				b, err := os.ReadFile(filepath.Clean(file))
-				Expect(err).NotTo(HaveOccurred())
-				seen.Store(string(b))
-				notify()
-			})
-		}, file)
-		for i := range 60 {
-			// An event that lands after the timer fired and before Watch took the fire is covered by that fire's notify, so write again.
-			Eventually(func() bool {
-				write(file, "a:\n  query: SELECT "+strconv.Itoa(i)+"\n")
-				return armed()
-			}, 5*time.Second).Should(BeTrue())
-			settle()
-			clk.Step(500 * time.Millisecond)
-			if (i+1)%2 == 0 {
-				Eventually(count.Load, 5*time.Second).Should(BeNumerically(">=", 1+(i+1)/2), "a notify every second")
-			}
-		}
-		Eventually(seen.Load, 5*time.Second).Should(Equal("a:\n  query: SELECT 59\n"))
+		atLeast(2)
 	})
 
 	It("notifies once after files() adds a directory, then watches it", func() {
@@ -222,8 +152,7 @@ var _ = Describe("Watch", func() {
 		expect(2)
 
 		write(other, "a=2")
-		fire()
-		expect(3)
+		atLeast(3)
 	})
 
 	It("stops watching a directory files() no longer lists", func() {
@@ -235,12 +164,11 @@ var _ = Describe("Watch", func() {
 		clk.Step(sources.WatchRetry)
 		Eventually(clk.Waiters, 5*time.Second).Should(Equal(1))
 		write(other, "a=2")
-		Consistently(armed, 300*time.Millisecond).Should(BeFalse())
 		expect(1)
 	})
 
 	It("retries a missing directory every 5 s, logging it and its recovery once", func() {
-		// The missing directory sits outside the watched ones, so creating it raises no event that arms the debounce timer.
+		// The missing directory sits outside the watched ones, so creating it raises no event.
 		missing := filepath.Join(GinkgoT().TempDir(), "later")
 		start(file, filepath.Join(missing, "q.yaml"))
 		Expect(logged("watch the configuration files")).To(Equal(1))
@@ -261,7 +189,6 @@ var _ = Describe("Watch", func() {
 		tmp := filepath.Join(filepath.Dir(missing), "q.yaml.tmp")
 		write(tmp, "b:\n  query: SELECT 1\n")
 		Expect(os.Rename(tmp, filepath.Join(missing, "q.yaml"))).To(Succeed())
-		fire()
 		expect(3)
 		Expect(logged("watch the configuration files")).To(Equal(1))
 		Expect(logged("watching the configuration files again")).To(Equal(1))

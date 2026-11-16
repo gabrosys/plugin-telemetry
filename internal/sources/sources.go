@@ -68,23 +68,11 @@ type Loader struct {
 	previous map[string]queries.UserQueries
 }
 
-// LoaderOption configures a Loader.
-type LoaderOption func(*Loader)
-
-// WithSensitive marks the sources for which isSensitive returns true as holding secret data: a parse
-// error of such a source names the source and the line, and quotes none of its content.
-func WithSensitive(isSensitive func(name string) bool) LoaderOption {
-	return func(l *Loader) { l.sensitive = isSensitive }
-}
-
-// NewLoader returns a Loader that reads files with read, in order after the builtin query.
-func NewLoader(read ReadFile, files []string, opts ...LoaderOption) *Loader {
-	l := &Loader{read: read, files: slices.Clone(files), previous: map[string]queries.UserQueries{}}
-	for _, o := range opts {
-		o(l)
-	}
-
-	return l
+// NewLoader returns a Loader that reads files with read, in order after the builtin query. A parse
+// error of a source for which sensitive returns true names the source and the line, and quotes none of
+// its content; a nil sensitive marks none.
+func NewLoader(read ReadFile, files []string, sensitive func(name string) bool) *Loader {
+	return &Loader{read: read, files: slices.Clone(files), sensitive: sensitive, previous: map[string]queries.UserQueries{}}
 }
 
 // SetFiles makes files the sources, in order after the builtin query. A file that stays listed keeps its

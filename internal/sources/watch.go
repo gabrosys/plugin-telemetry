@@ -10,11 +10,11 @@ import (
 	"github.com/cloudnative-pg/machinery/pkg/log"
 	"github.com/fsnotify/fsnotify"
 	"k8s.io/utils/clock"
+
+	"github.com/gabrosys/plugin-telemetry/internal/latch"
 )
 
 const (
-	// Debounce is the time from the first change of a burst to Watch's notify.
-	Debounce = time.Second
 	// watchRetry is how often Watch re-reads its files and retries what failed.
 	watchRetry = 5 * time.Second
 )
@@ -22,10 +22,9 @@ const (
 var errEventsClosed = errors.New("the watcher's event channel closed")
 
 // Watch watches the directories of files(), not the files, because editors and Kubernetes replace
-// files by rename or symlink swap. It calls notify once it is watching, then Debounce after the first
-// change of a burst in those directories, so a steady stream of changes cannot postpone it. It
-// re-reads files() after each notify and every 5 s, adds and removes directories itself and notifies
-// once after its set grows. A failure to create the watcher or add a
+// files by rename or symlink swap. It calls notify once it is watching, then after each change in
+// those directories. It re-reads files() after each notify and every 5 s, adds and removes directories
+// itself and notifies once after its set grows. A failure to create the watcher or add a
 // directory, and an fsnotify error, is retried every 5 s; each kind (the watcher, fsnotify errors, each
 // directory) is logged once when it starts and once when it recovers. An fsnotify error is followed by
 // a notify. It returns nil when ctx ends.
@@ -40,9 +39,9 @@ type dirWatch struct {
 	files      func() []string
 	notify     func()
 
-	w        *fsnotify.Watcher // nil until it is created, and after it is lost
-	failing  map[string]bool   // the failures logged and not yet recovered, by kind: kindWatcher, kindEvent or a directory
-	eventErr bool              // an fsnotify error arrived since the last retry
+	w        *fsnotify.Watcher   // nil until it is created, and after it is lost
+	failing  latch.Latch[string] // the failures logged and not yet recovered, by kind: kindWatcher, kindEvent or a directory
+	eventErr bool                // an fsnotify error arrived since the last retry
 }
 
 // The kinds of failure besides a directory that cannot be watched or unwatched.
@@ -52,15 +51,9 @@ const (
 )
 
 func watch(ctx context.Context, clk clock.Clock, newWatcher func() (*fsnotify.Watcher, error), files func() []string, notify func()) error {
-	d := &dirWatch{logger: log.FromContext(ctx), newWatcher: newWatcher, files: files, notify: notify, failing: map[string]bool{}}
+	d := &dirWatch{logger: log.FromContext(ctx), newWatcher: newWatcher, files: files, notify: notify}
 	defer d.close()
 
-	debounce := clk.NewTimer(Debounce)
-	if !debounce.Stop() {
-		<-debounce.C()
-	}
-	defer debounce.Stop()
-	pending := false // the debounce timer is armed
 	retry := clk.NewTimer(watchRetry)
 	defer retry.Stop()
 
@@ -82,10 +75,7 @@ func watch(ctx context.Context, clk clock.Clock, newWatcher func() (*fsnotify.Wa
 				d.lost()
 				continue
 			}
-			if !pending {
-				debounce.Reset(Debounce)
-				pending = true
-			}
+			d.notifyAndSync()
 		case err, ok := <-errs:
 			if !ok {
 				d.lost()
@@ -95,9 +85,6 @@ func watch(ctx context.Context, clk clock.Clock, newWatcher func() (*fsnotify.Wa
 			d.eventErr = true
 			d.fail(kindEvent, fmt.Errorf("watch event: %w", err))
 			d.notify()
-		case <-debounce.C():
-			pending = false
-			d.notifyAndSync()
 		case <-retry.C():
 			if d.sync() {
 				d.notifyAndSync()
@@ -170,11 +157,7 @@ func (d *dirWatch) sync() (grew bool) {
 		d.recovered(dir)
 	}
 	// A directory that failed and is no longer listed has nothing left to recover.
-	for kind := range d.failing {
-		if kind != kindWatcher && kind != kindEvent && !want[kind] && !have[kind] {
-			delete(d.failing, kind)
-		}
-	}
+	d.failing.Retain(func(kind string) bool { return kind == kindWatcher || kind == kindEvent || want[kind] || have[kind] })
 	return grew
 }
 
@@ -196,18 +179,14 @@ func (d *dirWatch) close() {
 
 // fail logs err when a failure of kind starts.
 func (d *dirWatch) fail(kind string, err error) {
-	if d.failing[kind] {
-		return
+	if d.failing.Set(kind) {
+		d.logger.Error(err, "watch the configuration files", "retryEvery", watchRetry)
 	}
-	d.failing[kind] = true
-	d.logger.Error(err, "watch the configuration files", "retryEvery", watchRetry)
 }
 
 // recovered logs the end of a failure of kind once.
 func (d *dirWatch) recovered(kind string) {
-	if !d.failing[kind] {
-		return
+	if d.failing.Clear(kind) {
+		d.logger.Info("watching the configuration files again", "failed", kind)
 	}
-	delete(d.failing, kind)
-	d.logger.Info("watching the configuration files again", "failed", kind)
 }

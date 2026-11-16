@@ -158,8 +158,8 @@ var _ = Describe("Facts rounds", func() {
 
 		before := len(h.timersArmed())
 		h.cfg.set(func() { h.cfg.doc = strings.Replace(h.cfg.doc, "port: 1\n", "port: 2\n", 1) })
-		h.reload()
-		Expect(h.logged(`"msg"="configuration applied"`)).To(Equal(2))
+		h.change()
+		Eventually(func() int { return h.logged(`"msg"="configuration applied"`) }).Should(Equal(2))
 		h.advanceBy(time.Second, func() bool { return len(h.timersArmed()) >= before+3 })
 		Expect(h.timersArmed()[before : before+3]).To(Equal([]time.Duration{0, time.Second, 2 * time.Second}))
 	})
@@ -381,8 +381,6 @@ func (c *clusterConfig) Cluster() (*apiv1.Cluster, bool) {
 	cl := c.cluster.Load()
 	return cl, cl != nil
 }
-
-var _ engine.ClusterReader = (*clusterConfig)(nil)
 
 // builtinCluster is Cluster c: 2 instances, sync 1/1, c-1 the current primary, a 1Gi WAL volume, both
 // instances on one node.

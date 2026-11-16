@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -48,6 +50,10 @@ type sensitiveKube struct {
 func (s *sensitiveKube) Sensitive(name string) bool { return strings.HasPrefix(name, s.prefix) }
 
 func (f *fakeKube) Name() string { return "kubernetes" }
+
+func (*fakeKube) Sensitive(string) bool { return false }
+
+func (*fakeKube) Cluster() (*apiv1.Cluster, bool) { return nil, false }
 
 func (f *fakeKube) Settings() (settings.Settings, []byte, error) {
 	s, raw, err := f.base.Settings()

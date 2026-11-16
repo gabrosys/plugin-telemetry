@@ -33,6 +33,10 @@ type Config interface {
 	// Watch calls notify once it is watching, then after changes to the settings or the files files()
 	// lists; it returns nil only when ctx ends.
 	Watch(ctx context.Context, files func() []string, notify func()) error
+	// Sensitive reports whether the named file holds secret data.
+	Sensitive(name string) bool
+	// Cluster returns the instance's Cluster when the Config watches one.
+	Cluster() (*apiv1.Cluster, bool)
 }
 
 // fileConfig reads the settings from a YAML file and every other file from the file system.
@@ -73,20 +77,6 @@ func (c fileConfig) Watch(ctx context.Context, files func() []string, notify fun
 	return nil
 }
 
-// ClusterReader is a Config that watches the instance's Cluster.
-type ClusterReader interface{ Cluster() (*apiv1.Cluster, bool) }
+func (fileConfig) Sensitive(string) bool { return false }
 
-// sensitiveConfig is implemented by a Config whose files may hold secret data.
-type sensitiveConfig interface {
-	// Sensitive reports whether the named file holds secret data.
-	Sensitive(name string) bool
-}
-
-// LoaderOptions returns the sources.Loader options that follow from cfg.
-func LoaderOptions(cfg Config) []sources.LoaderOption {
-	if s, ok := cfg.(sensitiveConfig); ok {
-		return []sources.LoaderOption{sources.WithSensitive(s.Sensitive)}
-	}
-
-	return nil
-}
+func (fileConfig) Cluster() (*apiv1.Cluster, bool) { return nil, false }

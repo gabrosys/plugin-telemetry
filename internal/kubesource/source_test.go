@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"io/fs"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -602,50 +600,7 @@ var _ = Describe("Source", func() {
 	})
 
 	Describe("Watch", func() {
-		It("notifies once watching, then once, debounced, after a burst of events", func() {
-			var mu sync.Mutex // guards notified
-			var notified []time.Time
-			count := func() int {
-				mu.Lock()
-				defer mu.Unlock()
-				return len(notified)
-			}
-			done := make(chan error, 1)
-			start()
-			go func() {
-				done <- src.Watch(ctx, nil, func() {
-					mu.Lock()
-					defer mu.Unlock()
-					notified = append(notified, clk.Now())
-				})
-			}()
-			Eventually(count).Should(Equal(1))
-
-			burst := clk.Now()
-			fw.set("clusters", "pg", enabledCluster(map[string]any{}))
-			fw.set("telemetryexporters", "default", exporter(nil))
-			fw.set("clusters", "pg", enabledCluster(map[string]any{"sidecarCPU": "100m"}))
-			Eventually(clk.HasWaiters).Should(BeTrue())
-			Consistently(count, "50ms").Should(Equal(1))
-			clk.Step(999 * time.Millisecond)
-			Consistently(count, "100ms").Should(Equal(1))
-			clk.Step(time.Millisecond)
-			Eventually(count).Should(Equal(2))
-			Consistently(count, "100ms").Should(Equal(2))
-			mu.Lock()
-			second := notified[1]
-			mu.Unlock()
-			Expect(second.Sub(burst)).To(Equal(time.Second))
-
-			fw.set("telemetryexporters", "default", exporter(nil))
-			Eventually(clk.HasWaiters).Should(BeTrue())
-			clk.Step(999 * time.Millisecond)
-			Consistently(count, "100ms").Should(Equal(2))
-			clk.Step(time.Millisecond)
-			Eventually(count).Should(Equal(3))
-		})
-
-		It("notifies 1s after the first event of a burst", func() {
+		It("notifies once watching, then after a change", func() {
 			var notified atomic.Int32
 			start()
 			go func() {
@@ -655,71 +610,7 @@ var _ = Describe("Source", func() {
 			Eventually(notified.Load).Should(BeEquivalentTo(1))
 
 			fw.set("clusters", "pg", enabledCluster(map[string]any{}))
-			Eventually(clk.HasWaiters).Should(BeTrue())
-			Consistently(notified.Load, "50ms").Should(BeEquivalentTo(1))
-			clk.Step(300 * time.Millisecond)
-			fw.set("telemetryexporters", "default", exporter(nil))
-			Consistently(notified.Load, "50ms").Should(BeEquivalentTo(1))
-			clk.Step(300 * time.Millisecond)
-			fw.set("clusters", "pg", enabledCluster(map[string]any{"sidecarCPU": "100m"}))
-			Consistently(notified.Load, "50ms").Should(BeEquivalentTo(1))
-			clk.Step(399 * time.Millisecond)
-			Consistently(notified.Load, "100ms").Should(BeEquivalentTo(1))
-			clk.Step(time.Millisecond)
-			Eventually(notified.Load).Should(BeEquivalentTo(2))
-			Consistently(notified.Load, "100ms").Should(BeEquivalentTo(2))
-		})
-
-		It("reloads at least once a second under a steady stream of updates", func() {
-			var mu sync.Mutex // guards seen
-			var seen []int    // the number of series each notify reads
-			start()
-			fw.set("clusters", "pg", enabledCluster(map[string]any{}))
-			fw.set("telemetryexporters", "default", exporter(map[string]any{
-				"exporter": map[string]any{"endpoint": "http://c:4318"},
-				"metrics":  map[string]any{"querySets": []any{"qs1"}},
-			}))
-			queries := func(n int) *unstructured.Unstructured {
-				q := map[string]any{}
-				for i := range n {
-					q["q"+strconv.Itoa(i)] = map[string]any{"query": "SELECT " + strconv.Itoa(i)}
-				}
-				return querySet("qs1", q)
-			}
-			fw.set("metricquerysets", "qs1", queries(0))
-
-			go func() {
-				defer GinkgoRecover()
-				Expect(src.Watch(ctx, nil, func() {
-					raw, err := src.ReadFile(clusterconfig.QuerySetFile("qs1"))
-					Expect(err).NotTo(HaveOccurred())
-					var got map[string]any
-					Expect(json.Unmarshal(raw, &got)).To(Succeed())
-					mu.Lock()
-					defer mu.Unlock()
-					seen = append(seen, len(got))
-				})).To(Succeed())
-			}()
-			Eventually(func() int { mu.Lock(); defer mu.Unlock(); return len(seen) }).Should(Equal(1))
-
-			for i := 1; i <= 60; i++ {
-				c := enabledCluster(map[string]any{})
-				c.Object["status"] = map[string]any{"currentPrimary": "pg-" + strconv.Itoa(i)}
-				// An event that lands after the timer fired and before Watch took the fire is covered by that fire's notify, so send again.
-				Eventually(func() bool {
-					fw.set("clusters", "pg", c)
-					fw.set("metricquerysets", "qs1", queries(i))
-					return clk.HasWaiters()
-				}).Should(BeTrue())
-				Consistently(clk.HasWaiters, "20ms").Should(BeTrue())
-				clk.Step(500 * time.Millisecond)
-				if i%2 == 0 {
-					Eventually(func() int { mu.Lock(); defer mu.Unlock(); return len(seen) }).Should(BeNumerically(">=", 1+i/2), "a notify every second")
-				}
-			}
-			clk.Step(time.Second)
-
-			Eventually(func() int { mu.Lock(); defer mu.Unlock(); return seen[len(seen)-1] }).Should(Equal(60))
+			Eventually(notified.Load).Should(BeNumerically(">=", 2))
 		})
 
 		It("returns nil when ctx ends", func() {

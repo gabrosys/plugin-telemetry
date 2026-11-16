@@ -44,7 +44,7 @@ func loadConfig(cfg engine.Config) (*config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load settings: %w", err)
 	}
-	res := sources.NewLoader(cfg.ReadFile, s.Sources, engine.LoaderOptions(cfg)...).Load()
+	res := sources.NewLoader(cfg.ReadFile, s.Sources, cfg.Sensitive).Load()
 
 	return &config{read: cfg.ReadFile, settings: s, result: res, defs: engine.Definitions(cfg, s, res)}, nil
 }

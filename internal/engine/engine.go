@@ -9,13 +9,11 @@ import (
 	"maps"
 	"math/rand/v2"
 	"os"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
-	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	"github.com/cloudnative-pg/machinery/pkg/log"
 	"go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel/attribute"
@@ -28,6 +26,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/builtin"
 	"github.com/gabrosys/plugin-telemetry/internal/executor"
 	"github.com/gabrosys/plugin-telemetry/internal/export"
+	"github.com/gabrosys/plugin-telemetry/internal/latch"
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
@@ -40,6 +39,8 @@ import (
 )
 
 const (
+	// Debounce is the time from the first change notification of a burst to the reload.
+	Debounce = time.Second
 	// watchRetry is the wait before a Watch that returned early is started again.
 	watchRetry = 5 * time.Second
 	// earlyFactsGap is the shortest time between the end of a facts round and the start of the next.
@@ -57,9 +58,6 @@ const (
 	upMetric      = "cnpg_collector_up"
 	upDescription = "1 if PostgreSQL is up, 0 otherwise."
 )
-
-// ErrNilConfig is returned by Run when Options.Config is nil.
-var ErrNilConfig = errors.New("no configuration given")
 
 // errWatchEnded stands for the error of a Watch that returned nil before the engine stopped.
 var errWatchEnded = errors.New("the watch ended before the engine stopped")
@@ -84,15 +82,7 @@ type Options struct {
 // until it has. When an input is not available yet (ErrNotReady) it keeps the configuration in force
 // and waits.
 func Run(ctx context.Context, o Options) error {
-	return RunWith(ctx, o, nil)
-}
-
-// RunWith is Run with gather in place of the facts round's PostgreSQL queries; nil means those queries.
-func RunWith(ctx context.Context, o Options, gather func(context.Context, settings.Settings) (planner.Facts, error)) error {
-	if o.Config == nil {
-		return ErrNilConfig
-	}
-	e, err := newEngine(ctx, o, gather)
+	e, err := newEngine(ctx, o, nil)
 	if err != nil {
 		return err
 	}
@@ -263,11 +253,18 @@ func (e *engine) run(ctx context.Context) {
 	defer e.shutdown(ctx, stopSched, schedDone, watchDone)
 
 	safe.Call(plain, "reload", func() { e.onChange(ctx) })
+	var debounce clock.Timer // armed by the first change of a burst
+	defer stopTimer(&debounce)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-e.changed:
+			if debounce == nil {
+				debounce = e.clk.NewTimer(Debounce)
+			}
+		case <-timerC(debounce):
+			debounce = nil
 			safe.Call(plain, "reload", func() { e.onChange(ctx) })
 		case <-timerC(e.factsTimer):
 			e.onFactsTimer(ctx)
@@ -289,9 +286,9 @@ func (e *engine) watch(ctx context.Context) {
 		}
 		return nil
 	}
-	var wl watchLog
+	var failing latch.Latch[int] // the kinds of Watch failure logged since a Watch last ran
 	notify := func() {
-		if wl.recovered() {
+		if failing.ClearAll() {
 			logger.Info("watching the configuration again")
 		}
 		e.notify()
@@ -308,7 +305,7 @@ func (e *engine) watch(ctx context.Context) {
 			err = errWatchEnded
 		}
 		t := e.clk.NewTimer(watchRetry)
-		if wl.failed(err) {
+		if failing.Set(watchKind(err)) {
 			logger.Error(err, "watch the configuration", "restartEvery", watchRetry)
 		}
 		select {
@@ -320,12 +317,6 @@ func (e *engine) watch(ctx context.Context) {
 	}
 }
 
-// watchLog remembers which kinds of Watch failure were logged since a Watch last ran.
-type watchLog struct {
-	mu      sync.Mutex // guards failing
-	failing [3]bool    // by watchKind
-}
-
 // watchKind tells a panic and a Watch that ended on its own from any other error.
 func watchKind(err error) int {
 	switch {
@@ -335,25 +326,6 @@ func watchKind(err error) int {
 		return 1
 	}
 	return 2
-}
-
-// failed records err and reports whether its kind was not logged yet.
-func (w *watchLog) failed(err error) bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	k := watchKind(err)
-	was := w.failing[k]
-	w.failing[k] = true
-	return !was
-}
-
-// recovered forgets every kind and reports whether one was logged.
-func (w *watchLog) recovered() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	was := slices.Contains(w.failing[:], true)
-	w.failing = [3]bool{}
-	return was
 }
 
 // shutdown stops the export loop, the scheduler, the pool, the watch and the meter provider.
@@ -785,19 +757,14 @@ func (e *engine) logChecks(logger log.Logger, err error) {
 	}
 }
 
-// builtins is the producer's extra: the built-ins of the Cluster a ClusterReader Config watches and of the
+// builtins is the producer's extra: the built-ins of the Cluster the Config watches and of the
 // newest facts; none before a valid configuration.
 func (e *engine) builtins() []queries.Sample {
 	cluster := e.cluster.Load()
 	if cluster == nil {
 		return nil
 	}
-	var c *apiv1.Cluster
-	if r, ok := e.cfg.(ClusterReader); ok {
-		if got, ok := r.Cluster(); ok {
-			c = got
-		}
-	}
+	c, _ := e.cfg.Cluster()
 	return builtin.Samples(c, e.pod, *cluster, e.facts.Load())
 }
 
@@ -839,11 +806,7 @@ func factsWait(failures int, planInterval time.Duration) time.Duration {
 	if failures == 0 {
 		return planInterval
 	}
-	wait := time.Second
-	for i := 1; i < failures && wait < planInterval; i++ {
-		wait *= 2
-	}
-	return min(wait, planInterval)
+	return pg.BackoffDelay(failures-1, planInterval)
 }
 
 func (e *engine) setFactsTimer(d time.Duration) {
@@ -865,7 +828,7 @@ func timerC(t clock.Timer) <-chan time.Time {
 	return t.C()
 }
 
-// notify tells the control goroutine that the watch saw a change.
+// notify tells the control goroutine that the watch saw a change; it reloads Debounce after the first of a burst.
 func (e *engine) notify() {
 	select {
 	case e.changed <- struct{}{}:

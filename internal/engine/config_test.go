@@ -22,6 +22,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
+
 	"github.com/Masterminds/semver/v3"
 	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
@@ -62,6 +64,10 @@ func newMemConfig(doc string, files map[string]string) *memConfig {
 }
 
 func (c *memConfig) Name() string { return "mem" }
+
+func (*memConfig) Sensitive(string) bool { return false }
+
+func (*memConfig) Cluster() (*apiv1.Cluster, bool) { return nil, false }
 
 func (c *memConfig) Settings() (settings.Settings, []byte, error) {
 	c.mu.Lock()
@@ -267,34 +273,43 @@ type harness struct {
 	clk *clocktesting.FakeClock
 	srv *otlptest.Server
 
-	mu          sync.Mutex // guards lines, rounds and factsTimers
+	mu          sync.Mutex // guards lines, rounds, factsTimers and debounces
 	lines       []string
+	debounces   int             // the debounce timers the engine armed
 	rounds      []time.Time     // when each facts round started
 	factsTimers []time.Duration // what the engine armed its facts timer with, in order
 }
 
-// factsClock is the fake clock; it records each timer the engine's setFactsTimer creates.
+// factsClock is the fake clock; it records each timer the engine's setFactsTimer and run create.
 type factsClock struct {
 	*clocktesting.FakeClock
 	h *harness
 }
 
 func (c factsClock) NewTimer(d time.Duration) clock.Timer {
+	t := c.FakeClock.NewTimer(d) // before the record, so a spec that sees it can step the clock past it
 	pcs := make([]uintptr, 8)
 	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
-	for {
+	for first := true; ; first = false {
 		f, more := frames.Next()
+		if first && strings.HasSuffix(f.Function, "engine.(*engine).run") {
+			c.h.mu.Lock()
+			c.h.debounces++
+			c.h.mu.Unlock()
+			break
+		}
 		if strings.HasSuffix(f.Function, "engine.(*engine).setFactsTimer") {
 			c.h.mu.Lock()
 			c.h.factsTimers = append(c.h.factsTimers, d)
 			c.h.mu.Unlock()
 			break
 		}
+
 		if !more {
 			break
 		}
 	}
-	return c.FakeClock.NewTimer(d)
+	return t
 }
 
 // run starts the engine on the Config cfg returns for the receiver's URL; facts answers its facts rounds.
@@ -409,16 +424,30 @@ func (h *harness) timersArmed() []time.Duration {
 	return slices.Clone(h.factsTimers)
 }
 
-// reload notifies the engine and returns once it has handled that notification.
-func (h *harness) reload() {
+// debounceTimers counts the debounce timers the engine armed.
+func (h *harness) debounceTimers() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.debounces
+}
+
+// change notifies the engine, lets the debounce pass and returns once the engine has read the settings.
+func (h *harness) change() {
 	GinkgoHelper()
 	Eventually(h.cfg.watching).Should(BeTrue())
-	for range 2 {
-		// The second notification starts only after the first one's reload is done.
-		n := h.cfg.settingsCalls()
-		h.cfg.Notify()
-		Eventually(h.cfg.settingsCalls).Should(BeNumerically(">", n))
-	}
+	n := h.cfg.settingsCalls()
+	h.cfg.Notify()
+	// Every debounce timer but the one of the first notification ends in one Settings call.
+	Eventually(func() bool { return h.debounceTimers() > h.cfg.settingsCalls()-1 }).Should(BeTrue())
+	h.clk.Step(engine.Debounce)
+	Eventually(h.cfg.settingsCalls).Should(BeNumerically(">", n))
+}
+
+// reload is change twice: the second notification starts only after the first one's reload is done.
+func (h *harness) reload() {
+	GinkgoHelper()
+	h.change()
+	h.change()
 }
 
 // lastValue returns the last value of the series of name whose attributes include want.
@@ -579,6 +608,23 @@ var _ = Describe("An engine on an in-memory Config", func() {
 
 	generation := func(g string) map[string]string { return map[string]string{"generation": g} }
 
+	It("reloads once, Debounce after the first change of a burst", func() {
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) }, unreachable)
+		h.reload()
+		n, armed := h.cfg.settingsCalls(), h.debounceTimers()
+
+		for range 10 {
+			h.cfg.Notify()
+		}
+		Eventually(h.debounceTimers).Should(Equal(armed + 1))
+		h.clk.Step(engine.Debounce - time.Millisecond)
+		Consistently(h.cfg.settingsCalls, 50*time.Millisecond).Should(Equal(n))
+		h.clk.Step(time.Millisecond)
+
+		Eventually(h.cfg.settingsCalls).Should(Equal(n + 1))
+		Expect(h.debounceTimers()).To(Equal(armed + 1))
+	})
+
 	It("reloads on a settings or sources change and not on identical bytes", func() {
 		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) }, unreachable)
 		loads := map[string]string{"source": "mem", "outcome": "ok"}
@@ -609,18 +655,25 @@ var _ = Describe("An engine on an in-memory Config", func() {
 	It("keeps the pool when only the idle timeout changes", func() {
 		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) }, primary)
 		h.advance(func() bool { return h.logged(`"msg"="plan updated"`) == 1 && len(h.timersArmed()) == 2 })
-		timers, rounds := len(h.timersArmed()), len(h.roundTimes())
+		timers := len(h.timersArmed())
+		atOnce := func() (n int) { // the facts timers armed since for 0, which a new pool does
+			for _, d := range h.timersArmed()[timers:] {
+				if d == 0 {
+					n++
+				}
+			}
+			return n
+		}
 
 		h.cfg.set(func() { h.cfg.doc = strings.Replace(h.cfg.doc, "defaultInterval: 30s", "defaultInterval: 45s", 1) })
-		h.reload()
+		h.change()
 		h.advance(h.has("cnpg_otel_query_interval_seconds", map[string]string{"query": "alpha"}, 45))
-		Expect(h.timersArmed()).To(HaveLen(timers), "a kept pool arms no facts timer")
-		Expect(h.roundTimes()).To(HaveLen(rounds), "a kept pool starts no round")
+		Expect(atOnce()).To(BeZero(), "a kept pool arms no facts timer at once")
+		rounds := len(h.roundTimes())
 
 		h.cfg.set(func() { h.cfg.doc = strings.Replace(h.cfg.doc, "port: 1\n", "port: 2\n", 1) })
 		h.reload()
-		Eventually(func() int { return len(h.timersArmed()) }).Should(BeNumerically(">", timers), "a new pool arms the timer at once")
-		Expect(h.timersArmed()[timers]).To(BeZero())
+		Eventually(atOnce).Should(Equal(1), "a new pool arms the timer at once")
 		h.advance(func() bool { return len(h.roundTimes()) > rounds })
 	})
 
@@ -696,7 +749,7 @@ var _ = Describe("An engine on an in-memory Config", func() {
 
 		hold.Store(true)
 		h.cfg.set(func() { h.cfg.noConfig = "" })
-		h.reload()
+		h.change() // the round the reload starts holds the control goroutine
 		resumed := len(h.requests())
 		h.advance(func() bool { return len(h.requests()) >= resumed+2 })
 		for _, req := range h.requests()[resumed:] {

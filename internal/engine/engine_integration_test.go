@@ -235,7 +235,7 @@ var _ = Describe("Run", Ordered, func() {
 	})
 
 	It("exports a query appended to a source file within debounce + interval + export interval", func() {
-		bound := engine.WatchDebounce + queryInterval + exportInterval + slack
+		bound := engine.Debounce + queryInterval + exportInterval + slack
 		start := time.Now()
 		writeFile(f.extra, extraQuery)
 
@@ -444,7 +444,7 @@ var _ = Describe("Run when the exporter files change", func() {
 		Eventually(header("one")).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(BeTrue())
 
 		writeFile(headers, "x-probe=two")
-		Eventually(header("two")).WithTimeout(engine.WatchDebounce + exportInterval + slack + time.Second).
+		Eventually(header("two")).WithTimeout(engine.Debounce + exportInterval + slack + time.Second).
 			WithPolling(50 * time.Millisecond).Should(BeTrue())
 		info := points(f.srv, "cnpg_otel_config_info", time.Time{})
 		Expect(info[len(info)-1].attrs).To(HaveKeyWithValue("generation", "1"))

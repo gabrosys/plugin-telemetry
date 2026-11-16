@@ -37,7 +37,6 @@ import (
 )
 
 const (
-	debounce       = time.Second
 	tokenPollTime  = 5 * time.Second
 	startRetry     = 5 * time.Second // the wait before a watch whose start panicked, or whose informer died, is started again
 	snapshotRounds = 3               // the Cluster; the exporter and the Cluster's references; the exporter's references
@@ -476,8 +475,7 @@ func (s *Source) wakeLocked() {
 	}
 }
 
-// Watch calls notify once it is watching, then once debounce after the first event of a burst on a
-// watched object, so a steady stream of events cannot postpone it. It ignores files: the objects it
+// Watch calls notify once it is watching, then after each event on a watched object. It ignores files: the objects it
 // watches follow the settings. It returns nil when ctx ends.
 func (s *Source) Watch(ctx context.Context, _ func() []string, notify func()) error {
 	wake := make(chan struct{}, 1)
@@ -490,25 +488,12 @@ func (s *Source) Watch(ctx context.Context, _ func() []string, notify func()) er
 		s.mu.Unlock()
 	}()
 
-	timer := s.o.Clock.NewTimer(debounce)
-	if !timer.Stop() {
-		<-timer.C()
-	}
-	defer timer.Stop()
-
-	pending := false // the timer is armed
 	notify()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-wake:
-			if !pending {
-				timer.Reset(debounce)
-				pending = true
-			}
-		case <-timer.C():
-			pending = false
 			notify()
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 	"time"
 )
@@ -374,19 +375,10 @@ func (s Settings) Warnings(queryKeys []string) []string {
 	}
 	for _, g := range s.Groups {
 		for _, p := range g.Queries {
-			if !matchesAnyKey(p, queryKeys) {
+			if !slices.ContainsFunc(queryKeys, func(k string) bool { return matchAny([]string{p}, k) }) {
 				out = append(out, fmt.Sprintf("group %q: pattern %q matches no query", g.Name, p))
 			}
 		}
 	}
 	return out
-}
-
-func matchesAnyKey(pattern string, keys []string) bool {
-	for _, k := range keys {
-		if ok, err := path.Match(pattern, k); err == nil && ok {
-			return true
-		}
-	}
-	return false
 }

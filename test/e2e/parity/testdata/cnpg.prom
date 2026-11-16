@@ -21,8 +21,8 @@ cnpg_cache_hits 0
 cnpg_cache_miss 1
 # HELP cnpg_collector_collection_duration_seconds Collection time duration in seconds
 # TYPE cnpg_collector_collection_duration_seconds gauge
-cnpg_collector_collection_duration_seconds{collector="Collect.cnpg"} 0.06035967
-cnpg_collector_collection_duration_seconds{collector="Collect.up"} 0.0026417
+cnpg_collector_collection_duration_seconds{collector="Collect.cnpg"} 0.065268116
+cnpg_collector_collection_duration_seconds{collector="Collect.up"} 0.002589397
 # HELP cnpg_collector_collections_total Total number of times PostgreSQL was accessed for metrics.
 # TYPE cnpg_collector_collections_total counter
 cnpg_collector_collections_total 2
@@ -53,17 +53,17 @@ cnpg_collector_manual_switchover_required 0
 cnpg_collector_nodes_used 1
 # HELP cnpg_collector_pg_wal Total size in bytes of WAL segments in the '/var/lib/postgresql/data/pgdata/pg_wal' directory  computed as (wal_segment_size * count)
 # TYPE cnpg_collector_pg_wal gauge
-cnpg_collector_pg_wal{value="count"} 4
+cnpg_collector_pg_wal{value="count"} 5
 cnpg_collector_pg_wal{value="keep"} 32
 cnpg_collector_pg_wal{value="max"} 64
 cnpg_collector_pg_wal{value="min"} 5
-cnpg_collector_pg_wal{value="size"} 6.7108864e+07
+cnpg_collector_pg_wal{value="size"} 8.388608e+07
 cnpg_collector_pg_wal{value="slots_max"} NaN
 cnpg_collector_pg_wal{value="volume_max"} NaN
 cnpg_collector_pg_wal{value="volume_size"} NaN
 # HELP cnpg_collector_pg_wal_archive_status Number of WAL segments in the '/var/lib/postgresql/data/pgdata/pg_wal/archive_status' directory (ready, done)
 # TYPE cnpg_collector_pg_wal_archive_status gauge
-cnpg_collector_pg_wal_archive_status{value="done"} 4
+cnpg_collector_pg_wal_archive_status{value="done"} 5
 cnpg_collector_pg_wal_archive_status{value="ready"} 0
 # HELP cnpg_collector_postgres_version Postgres version
 # TYPE cnpg_collector_postgres_version gauge
@@ -82,19 +82,22 @@ cnpg_collector_sync_replicas{value="observed"} 0
 cnpg_collector_up{cluster="plugin-peer"} 1
 # HELP cnpg_collector_wal_buffers_full Number of times WAL data was written to disk because WAL buffers became full. Only available on PG 14+
 # TYPE cnpg_collector_wal_buffers_full gauge
-cnpg_collector_wal_buffers_full{stats_reset="2026-11-14T17:03:45.279348Z"} 3086
+cnpg_collector_wal_buffers_full{stats_reset="2026-11-16T11:15:53.188373Z"} 4578
 # HELP cnpg_collector_wal_bytes Total amount of WAL generated in bytes. Only available on PG 14+
 # TYPE cnpg_collector_wal_bytes gauge
-cnpg_collector_wal_bytes{stats_reset="2026-11-14T17:03:45.279348Z"} 1.3099827e+07
+cnpg_collector_wal_bytes{stats_reset="2026-11-16T11:15:53.188373Z"} 1.3100045e+07
 # HELP cnpg_collector_wal_fpi Total number of WAL full page images generated. Only available on PG 14+
 # TYPE cnpg_collector_wal_fpi gauge
-cnpg_collector_wal_fpi{stats_reset="2026-11-14T17:03:45.279348Z"} 1832
+cnpg_collector_wal_fpi{stats_reset="2026-11-16T11:15:53.188373Z"} 1832
 # HELP cnpg_collector_wal_records Total number of WAL records generated. Only available on PG 14+
 # TYPE cnpg_collector_wal_records gauge
-cnpg_collector_wal_records{stats_reset="2026-11-14T17:03:45.279348Z"} 29039
+cnpg_collector_wal_records{stats_reset="2026-11-16T11:15:53.188373Z"} 29043
 # HELP cnpg_e2e_base_one Always 1
 # TYPE cnpg_e2e_base_one gauge
 cnpg_e2e_base_one 1
+# HELP cnpg_e2e_edited_two Always 2
+# TYPE cnpg_e2e_edited_two gauge
+cnpg_e2e_edited_two 2
 # HELP cnpg_e2e_primary_one Always 1, on the primary only
 # TYPE cnpg_e2e_primary_one gauge
 cnpg_e2e_primary_one 1
@@ -103,7 +106,7 @@ cnpg_e2e_primary_one 1
 cnpg_last_error 0
 # HELP cnpg_last_update_timestamp Timestamp of the last metrics update.
 # TYPE cnpg_last_update_timestamp gauge
-cnpg_last_update_timestamp 1.794676065e+09
+cnpg_last_update_timestamp 1.794828095e+09
 # HELP cnpg_pg_database_mxid_age Number of multiple transactions (Multixact) from the frozen XID to the current one
 # TYPE cnpg_pg_database_mxid_age gauge
 cnpg_pg_database_mxid_age{datname="app"} 0
@@ -125,7 +128,7 @@ cnpg_pg_extensions_update_available{datname="app",default_version="1.0",extname=
 cnpg_pg_extensions_update_available{datname="postgres",default_version="1.0",extname="plpgsql",installed_version="1.0"} 0
 # HELP cnpg_pg_postmaster_start_time Time at which postgres started (based on epoch)
 # TYPE cnpg_pg_postmaster_start_time gauge
-cnpg_pg_postmaster_start_time 1.794675827063686e+09
+cnpg_pg_postmaster_start_time 1.794827755909914e+09
 # HELP cnpg_pg_replication_in_recovery Whether the instance is in recovery
 # TYPE cnpg_pg_replication_in_recovery gauge
 cnpg_pg_replication_in_recovery 0
@@ -432,16 +435,16 @@ cnpg_pg_settings_setting{name="work_mem"} 4096
 cnpg_pg_settings_setting{name="zero_damaged_pages"} 0
 # HELP cnpg_pg_stat_archiver_archived_count Number of WAL files that have been successfully archived
 # TYPE cnpg_pg_stat_archiver_archived_count counter
-cnpg_pg_stat_archiver_archived_count 4
+cnpg_pg_stat_archiver_archived_count 5
 # HELP cnpg_pg_stat_archiver_failed_count Number of failed attempts for archiving WAL files
 # TYPE cnpg_pg_stat_archiver_failed_count counter
 cnpg_pg_stat_archiver_failed_count 0
 # HELP cnpg_pg_stat_archiver_last_archived_time Epoch of the last time WAL archiving succeeded
 # TYPE cnpg_pg_stat_archiver_last_archived_time gauge
-cnpg_pg_stat_archiver_last_archived_time 1.794675840767704e+09
+cnpg_pg_stat_archiver_last_archived_time 1.794828070164324e+09
 # HELP cnpg_pg_stat_archiver_last_archived_wal_start_lsn Archived WAL start LSN
 # TYPE cnpg_pg_stat_archiver_last_archived_wal_start_lsn gauge
-cnpg_pg_stat_archiver_last_archived_wal_start_lsn 3
+cnpg_pg_stat_archiver_last_archived_wal_start_lsn 4
 # HELP cnpg_pg_stat_archiver_last_failed_time Epoch of the last time WAL archiving failed
 # TYPE cnpg_pg_stat_archiver_last_failed_time gauge
 cnpg_pg_stat_archiver_last_failed_time -1
@@ -450,16 +453,16 @@ cnpg_pg_stat_archiver_last_failed_time -1
 cnpg_pg_stat_archiver_last_failed_wal_start_lsn -1
 # HELP cnpg_pg_stat_archiver_seconds_since_last_archival Seconds since the last successful archival operation
 # TYPE cnpg_pg_stat_archiver_seconds_since_last_archival gauge
-cnpg_pg_stat_archiver_seconds_since_last_archival 224.287327
+cnpg_pg_stat_archiver_seconds_since_last_archival 24.906117
 # HELP cnpg_pg_stat_archiver_seconds_since_last_failure Seconds since the last failed archival operation
 # TYPE cnpg_pg_stat_archiver_seconds_since_last_failure gauge
 cnpg_pg_stat_archiver_seconds_since_last_failure -1
 # HELP cnpg_pg_stat_archiver_stats_reset_time Time at which these statistics were last reset
 # TYPE cnpg_pg_stat_archiver_stats_reset_time gauge
-cnpg_pg_stat_archiver_stats_reset_time 1.794675825279348e+09
+cnpg_pg_stat_archiver_stats_reset_time 1.794827753188373e+09
 # HELP cnpg_pg_stat_bgwriter_buffers_alloc Number of buffers allocated
 # TYPE cnpg_pg_stat_bgwriter_buffers_alloc counter
-cnpg_pg_stat_bgwriter_buffers_alloc 1438
+cnpg_pg_stat_bgwriter_buffers_alloc 1465
 # HELP cnpg_pg_stat_bgwriter_buffers_clean Number of buffers written by the background writer
 # TYPE cnpg_pg_stat_bgwriter_buffers_clean counter
 cnpg_pg_stat_bgwriter_buffers_clean 0
@@ -468,16 +471,16 @@ cnpg_pg_stat_bgwriter_buffers_clean 0
 cnpg_pg_stat_bgwriter_maxwritten_clean 0
 # HELP cnpg_pg_stat_bgwriter_stats_reset_time Time at which these statistics were last reset
 # TYPE cnpg_pg_stat_bgwriter_stats_reset_time gauge
-cnpg_pg_stat_bgwriter_stats_reset_time 1.794675825279348e+09
+cnpg_pg_stat_bgwriter_stats_reset_time 1.794827753188373e+09
 # HELP cnpg_pg_stat_checkpointer_buffers_written Number of buffers written during checkpoints and restartpoints
 # TYPE cnpg_pg_stat_checkpointer_buffers_written counter
-cnpg_pg_stat_checkpointer_buffers_written 1002
+cnpg_pg_stat_checkpointer_buffers_written 1045
 # HELP cnpg_pg_stat_checkpointer_checkpoints_req Number of requested checkpoints that have been performed
 # TYPE cnpg_pg_stat_checkpointer_checkpoints_req counter
 cnpg_pg_stat_checkpointer_checkpoints_req 3
 # HELP cnpg_pg_stat_checkpointer_checkpoints_timed Number of scheduled checkpoints that have been performed
 # TYPE cnpg_pg_stat_checkpointer_checkpoints_timed counter
-cnpg_pg_stat_checkpointer_checkpoints_timed 0
+cnpg_pg_stat_checkpointer_checkpoints_timed 1
 # HELP cnpg_pg_stat_checkpointer_restartpoints_done Number of restartpoints that have been performed
 # TYPE cnpg_pg_stat_checkpointer_restartpoints_done counter
 cnpg_pg_stat_checkpointer_restartpoints_done 0
@@ -489,13 +492,13 @@ cnpg_pg_stat_checkpointer_restartpoints_req 0
 cnpg_pg_stat_checkpointer_restartpoints_timed 0
 # HELP cnpg_pg_stat_checkpointer_stats_reset_time Time at which these statistics were last reset
 # TYPE cnpg_pg_stat_checkpointer_stats_reset_time gauge
-cnpg_pg_stat_checkpointer_stats_reset_time 1.794675825279348e+09
+cnpg_pg_stat_checkpointer_stats_reset_time 1.794827753188373e+09
 # HELP cnpg_pg_stat_checkpointer_sync_time Total amount of time that has been spent in the portion of processing checkpoints and restartpoints where files are synchronized to disk, in milliseconds
 # TYPE cnpg_pg_stat_checkpointer_sync_time counter
-cnpg_pg_stat_checkpointer_sync_time 38
+cnpg_pg_stat_checkpointer_sync_time 23
 # HELP cnpg_pg_stat_checkpointer_write_time Total amount of time that has been spent in the portion of processing checkpoints and restartpoints where files are written to disk, in milliseconds
 # TYPE cnpg_pg_stat_checkpointer_write_time counter
-cnpg_pg_stat_checkpointer_write_time 2127
+cnpg_pg_stat_checkpointer_write_time 6492
 # HELP cnpg_pg_stat_database_blk_read_time Time spent reading data file blocks by backends in this database, in milliseconds
 # TYPE cnpg_pg_stat_database_blk_read_time counter
 cnpg_pg_stat_database_blk_read_time{datname=""} 0
@@ -512,16 +515,16 @@ cnpg_pg_stat_database_blk_write_time{datname="template0"} 0
 cnpg_pg_stat_database_blk_write_time{datname="template1"} 0
 # HELP cnpg_pg_stat_database_blks_hit Number of times disk blocks were found already in the buffer cache, so that a read was not necessary (this only includes hits in the PostgreSQL buffer cache, not the operating system's file system cache)
 # TYPE cnpg_pg_stat_database_blks_hit counter
-cnpg_pg_stat_database_blks_hit{datname=""} 10379
-cnpg_pg_stat_database_blks_hit{datname="app"} 11214
-cnpg_pg_stat_database_blks_hit{datname="postgres"} 84444
+cnpg_pg_stat_database_blks_hit{datname=""} 21793
+cnpg_pg_stat_database_blks_hit{datname="app"} 11889
+cnpg_pg_stat_database_blks_hit{datname="postgres"} 191365
 cnpg_pg_stat_database_blks_hit{datname="template0"} 0
-cnpg_pg_stat_database_blks_hit{datname="template1"} 104596
+cnpg_pg_stat_database_blks_hit{datname="template1"} 104669
 # HELP cnpg_pg_stat_database_blks_read Number of disk blocks read in this database
 # TYPE cnpg_pg_stat_database_blks_read counter
 cnpg_pg_stat_database_blks_read{datname=""} 101
-cnpg_pg_stat_database_blks_read{datname="app"} 267
-cnpg_pg_stat_database_blks_read{datname="postgres"} 416
+cnpg_pg_stat_database_blks_read{datname="app"} 288
+cnpg_pg_stat_database_blks_read{datname="postgres"} 418
 cnpg_pg_stat_database_blks_read{datname="template0"} 0
 cnpg_pg_stat_database_blks_read{datname="template1"} 888
 # HELP cnpg_pg_stat_database_conflicts Number of queries canceled due to conflicts with recovery in this database
@@ -561,11 +564,11 @@ cnpg_pg_stat_database_tup_deleted{datname="template0"} 0
 cnpg_pg_stat_database_tup_deleted{datname="template1"} 36
 # HELP cnpg_pg_stat_database_tup_fetched Number of rows fetched by queries in this database
 # TYPE cnpg_pg_stat_database_tup_fetched counter
-cnpg_pg_stat_database_tup_fetched{datname=""} 2425
-cnpg_pg_stat_database_tup_fetched{datname="app"} 7068
-cnpg_pg_stat_database_tup_fetched{datname="postgres"} 56115
+cnpg_pg_stat_database_tup_fetched{datname=""} 5145
+cnpg_pg_stat_database_tup_fetched{datname="app"} 7448
+cnpg_pg_stat_database_tup_fetched{datname="postgres"} 127686
 cnpg_pg_stat_database_tup_fetched{datname="template0"} 0
-cnpg_pg_stat_database_tup_fetched{datname="template1"} 29898
+cnpg_pg_stat_database_tup_fetched{datname="template1"} 29913
 # HELP cnpg_pg_stat_database_tup_inserted Number of rows inserted by queries in this database
 # TYPE cnpg_pg_stat_database_tup_inserted counter
 cnpg_pg_stat_database_tup_inserted{datname=""} 39
@@ -575,11 +578,11 @@ cnpg_pg_stat_database_tup_inserted{datname="template0"} 0
 cnpg_pg_stat_database_tup_inserted{datname="template1"} 18747
 # HELP cnpg_pg_stat_database_tup_returned Number of rows returned by queries in this database
 # TYPE cnpg_pg_stat_database_tup_returned counter
-cnpg_pg_stat_database_tup_returned{datname=""} 4507
-cnpg_pg_stat_database_tup_returned{datname="app"} 10699
-cnpg_pg_stat_database_tup_returned{datname="postgres"} 59291
+cnpg_pg_stat_database_tup_returned{datname=""} 9808
+cnpg_pg_stat_database_tup_returned{datname="app"} 12821
+cnpg_pg_stat_database_tup_returned{datname="postgres"} 133055
 cnpg_pg_stat_database_tup_returned{datname="template0"} 0
-cnpg_pg_stat_database_tup_returned{datname="template1"} 82265
+cnpg_pg_stat_database_tup_returned{datname="template1"} 83150
 # HELP cnpg_pg_stat_database_tup_updated Number of rows updated by queries in this database
 # TYPE cnpg_pg_stat_database_tup_updated counter
 cnpg_pg_stat_database_tup_updated{datname=""} 6
@@ -590,10 +593,10 @@ cnpg_pg_stat_database_tup_updated{datname="template1"} 782
 # HELP cnpg_pg_stat_database_xact_commit Number of transactions in this database that have been committed
 # TYPE cnpg_pg_stat_database_xact_commit counter
 cnpg_pg_stat_database_xact_commit{datname=""} 0
-cnpg_pg_stat_database_xact_commit{datname="app"} 199
-cnpg_pg_stat_database_xact_commit{datname="postgres"} 980
+cnpg_pg_stat_database_xact_commit{datname="app"} 255
+cnpg_pg_stat_database_xact_commit{datname="postgres"} 2215
 cnpg_pg_stat_database_xact_commit{datname="template0"} 0
-cnpg_pg_stat_database_xact_commit{datname="template1"} 942
+cnpg_pg_stat_database_xact_commit{datname="template1"} 944
 # HELP cnpg_pg_stat_database_xact_rollback Number of transactions in this database that have been rolled back
 # TYPE cnpg_pg_stat_database_xact_rollback counter
 cnpg_pg_stat_database_xact_rollback{datname=""} 0
@@ -603,40 +606,40 @@ cnpg_pg_stat_database_xact_rollback{datname="template0"} 0
 cnpg_pg_stat_database_xact_rollback{datname="template1"} 0
 # HELP cnpg_pg_stat_replication_backend_start Time when this process was started
 # TYPE cnpg_pg_stat_replication_backend_start counter
-cnpg_pg_stat_replication_backend_start{application_name="plugin-peer-2",client_addr="10.244.0.30/32",client_port="44954",usename="streaming_replica"} 1.794675842661515e+09
+cnpg_pg_stat_replication_backend_start{application_name="plugin-peer-2",client_addr="10.244.0.147/32",client_port="45340",usename="streaming_replica"} 1.794827772456622e+09
 # HELP cnpg_pg_stat_replication_backend_xmin_age The age of this standby's xmin horizon
 # TYPE cnpg_pg_stat_replication_backend_xmin_age counter
-cnpg_pg_stat_replication_backend_xmin_age{application_name="plugin-peer-2",client_addr="10.244.0.30/32",client_port="44954",usename="streaming_replica"} 0
+cnpg_pg_stat_replication_backend_xmin_age{application_name="plugin-peer-2",client_addr="10.244.0.147/32",client_port="45340",usename="streaming_replica"} 0
 # HELP cnpg_pg_stat_replication_flush_diff_bytes Difference in bytes from the last write-ahead log location flushed to disk by this standby server
 # TYPE cnpg_pg_stat_replication_flush_diff_bytes gauge
-cnpg_pg_stat_replication_flush_diff_bytes{application_name="plugin-peer-2",client_addr="10.244.0.30/32",client_port="44954",usename="streaming_replica"} 0
+cnpg_pg_stat_replication_flush_diff_bytes{application_name="plugin-peer-2",client_addr="10.244.0.147/32",client_port="45340",usename="streaming_replica"} 0
 # HELP cnpg_pg_stat_replication_flush_lag_seconds Time elapsed between flushing recent WAL locally and receiving notification that this standby server has written and flushed it
 # TYPE cnpg_pg_stat_replication_flush_lag_seconds gauge
-cnpg_pg_stat_replication_flush_lag_seconds{application_name="plugin-peer-2",client_addr="10.244.0.30/32",client_port="44954",usename="streaming_replica"} 0
+cnpg_pg_stat_replication_flush_lag_seconds{application_name="plugin-peer-2",client_addr="10.244.0.147/32",client_port="45340",usename="streaming_replica"} 0
 # HELP cnpg_pg_stat_replication_replay_diff_bytes Difference in bytes from the last write-ahead log location replayed into the database on this standby server
 # TYPE cnpg_pg_stat_replication_replay_diff_bytes gauge
-cnpg_pg_stat_replication_replay_diff_bytes{application_name="plugin-peer-2",client_addr="10.244.0.30/32",client_port="44954",usename="streaming_replica"} 0
+cnpg_pg_stat_replication_replay_diff_bytes{application_name="plugin-peer-2",client_addr="10.244.0.147/32",client_port="45340",usename="streaming_replica"} 0
 # HELP cnpg_pg_stat_replication_replay_lag_seconds Time elapsed between flushing recent WAL locally and receiving notification that this standby server has written, flushed and applied it
 # TYPE cnpg_pg_stat_replication_replay_lag_seconds gauge
-cnpg_pg_stat_replication_replay_lag_seconds{application_name="plugin-peer-2",client_addr="10.244.0.30/32",client_port="44954",usename="streaming_replica"} 0
+cnpg_pg_stat_replication_replay_lag_seconds{application_name="plugin-peer-2",client_addr="10.244.0.147/32",client_port="45340",usename="streaming_replica"} 0
 # HELP cnpg_pg_stat_replication_sent_diff_bytes Difference in bytes from the last write-ahead log location sent on this connection
 # TYPE cnpg_pg_stat_replication_sent_diff_bytes gauge
-cnpg_pg_stat_replication_sent_diff_bytes{application_name="plugin-peer-2",client_addr="10.244.0.30/32",client_port="44954",usename="streaming_replica"} 0
+cnpg_pg_stat_replication_sent_diff_bytes{application_name="plugin-peer-2",client_addr="10.244.0.147/32",client_port="45340",usename="streaming_replica"} 0
 # HELP cnpg_pg_stat_replication_write_diff_bytes Difference in bytes from the last write-ahead log location written to disk by this standby server
 # TYPE cnpg_pg_stat_replication_write_diff_bytes gauge
-cnpg_pg_stat_replication_write_diff_bytes{application_name="plugin-peer-2",client_addr="10.244.0.30/32",client_port="44954",usename="streaming_replica"} 0
+cnpg_pg_stat_replication_write_diff_bytes{application_name="plugin-peer-2",client_addr="10.244.0.147/32",client_port="45340",usename="streaming_replica"} 0
 # HELP cnpg_pg_stat_replication_write_lag_seconds Time elapsed between flushing recent WAL locally and receiving notification that this standby server has written it
 # TYPE cnpg_pg_stat_replication_write_lag_seconds gauge
-cnpg_pg_stat_replication_write_lag_seconds{application_name="plugin-peer-2",client_addr="10.244.0.30/32",client_port="44954",usename="streaming_replica"} 0
+cnpg_pg_stat_replication_write_lag_seconds{application_name="plugin-peer-2",client_addr="10.244.0.147/32",client_port="45340",usename="streaming_replica"} 0
 # HELP go_gc_duration_seconds A summary of the wall-time pause (stop-the-world) duration in garbage collection cycles.
 # TYPE go_gc_duration_seconds summary
-go_gc_duration_seconds{quantile="0"} 8.7722e-05
-go_gc_duration_seconds{quantile="0.25"} 9.5405e-05
-go_gc_duration_seconds{quantile="0.5"} 0.000107486
-go_gc_duration_seconds{quantile="0.75"} 0.0001283
-go_gc_duration_seconds{quantile="1"} 0.000144503
-go_gc_duration_seconds_sum 0.002130873
-go_gc_duration_seconds_count 19
+go_gc_duration_seconds{quantile="0"} 8.388e-05
+go_gc_duration_seconds{quantile="0.25"} 0.00010141
+go_gc_duration_seconds{quantile="0.5"} 0.000121455
+go_gc_duration_seconds{quantile="0.75"} 0.00014199
+go_gc_duration_seconds{quantile="1"} 0.00032309
+go_gc_duration_seconds_sum 0.004769731
+go_gc_duration_seconds_count 35
 # HELP go_gc_gogc_percent Heap size target percentage configured by the user, otherwise 100. This value is set by the GOGC environment variable, and the runtime/debug.SetGCPercent function. Sourced from /gc/gogc:percent.
 # TYPE go_gc_gogc_percent gauge
 go_gc_gogc_percent 100
@@ -651,43 +654,43 @@ go_goroutines 182
 go_info{version="go1.27.4"} 1
 # HELP go_memstats_alloc_bytes Number of bytes allocated in heap and currently in use. Equals to /memory/classes/heap/objects:bytes.
 # TYPE go_memstats_alloc_bytes gauge
-go_memstats_alloc_bytes 8.55864e+06
+go_memstats_alloc_bytes 8.188424e+06
 # HELP go_memstats_alloc_bytes_total Total number of bytes allocated in heap until now, even if released already. Equals to /gc/heap/allocs:bytes.
 # TYPE go_memstats_alloc_bytes_total counter
-go_memstats_alloc_bytes_total 7.2829064e+07
+go_memstats_alloc_bytes_total 1.45546264e+08
 # HELP go_memstats_buck_hash_sys_bytes Number of bytes used by the profiling bucket hash table. Equals to /memory/classes/profiling/buckets:bytes.
 # TYPE go_memstats_buck_hash_sys_bytes gauge
-go_memstats_buck_hash_sys_bytes 1.482877e+06
+go_memstats_buck_hash_sys_bytes 1.506725e+06
 # HELP go_memstats_frees_total Total number of heap objects frees. Equals to /gc/heap/frees:objects + /gc/heap/tiny/allocs:objects.
 # TYPE go_memstats_frees_total counter
-go_memstats_frees_total 503676
+go_memstats_frees_total 1.160169e+06
 # HELP go_memstats_gc_sys_bytes Number of bytes used for garbage collection system metadata. Equals to /memory/classes/metadata/other:bytes.
 # TYPE go_memstats_gc_sys_bytes gauge
-go_memstats_gc_sys_bytes 4.14744e+06
+go_memstats_gc_sys_bytes 4.108528e+06
 # HELP go_memstats_heap_alloc_bytes Number of heap bytes allocated and currently in use, same as go_memstats_alloc_bytes. Equals to /memory/classes/heap/objects:bytes.
 # TYPE go_memstats_heap_alloc_bytes gauge
-go_memstats_heap_alloc_bytes 8.55864e+06
+go_memstats_heap_alloc_bytes 8.188424e+06
 # HELP go_memstats_heap_idle_bytes Number of heap bytes waiting to be used. Equals to /memory/classes/heap/released:bytes + /memory/classes/heap/free:bytes.
 # TYPE go_memstats_heap_idle_bytes gauge
-go_memstats_heap_idle_bytes 9.29792e+06
+go_memstats_heap_idle_bytes 9.363456e+06
 # HELP go_memstats_heap_inuse_bytes Number of heap bytes that are in use. Equals to /memory/classes/heap/objects:bytes + /memory/classes/heap/unused:bytes
 # TYPE go_memstats_heap_inuse_bytes gauge
-go_memstats_heap_inuse_bytes 1.3410304e+07
+go_memstats_heap_inuse_bytes 1.3508608e+07
 # HELP go_memstats_heap_objects Number of currently allocated objects. Equals to /gc/heap/objects:objects.
 # TYPE go_memstats_heap_objects gauge
-go_memstats_heap_objects 43013
+go_memstats_heap_objects 39097
 # HELP go_memstats_heap_released_bytes Number of heap bytes released to OS. Equals to /memory/classes/heap/released:bytes.
 # TYPE go_memstats_heap_released_bytes gauge
-go_memstats_heap_released_bytes 6.30784e+06
+go_memstats_heap_released_bytes 4.923392e+06
 # HELP go_memstats_heap_sys_bytes Number of heap bytes obtained from system. Equals to /memory/classes/heap/objects:bytes + /memory/classes/heap/unused:bytes + /memory/classes/heap/released:bytes + /memory/classes/heap/free:bytes.
 # TYPE go_memstats_heap_sys_bytes gauge
-go_memstats_heap_sys_bytes 2.2708224e+07
+go_memstats_heap_sys_bytes 2.2872064e+07
 # HELP go_memstats_last_gc_time_seconds Number of seconds since 1970 of last garbage collection.
 # TYPE go_memstats_last_gc_time_seconds gauge
-go_memstats_last_gc_time_seconds 1.7946760345089095e+09
+go_memstats_last_gc_time_seconds 1.7948280921540139e+09
 # HELP go_memstats_mallocs_total Total number of heap objects allocated, both live and gc-ed. Semantically a counter version for go_memstats_heap_objects gauge. Equals to /gc/heap/allocs:objects + /gc/heap/tiny/allocs:objects.
 # TYPE go_memstats_mallocs_total counter
-go_memstats_mallocs_total 546689
+go_memstats_mallocs_total 1.199266e+06
 # HELP go_memstats_mcache_inuse_bytes Number of bytes in use by mcache structures. Equals to /memory/classes/metadata/mcache/inuse:bytes.
 # TYPE go_memstats_mcache_inuse_bytes gauge
 go_memstats_mcache_inuse_bytes 36736
@@ -696,28 +699,28 @@ go_memstats_mcache_inuse_bytes 36736
 go_memstats_mcache_sys_bytes 48216
 # HELP go_memstats_mspan_inuse_bytes Number of bytes in use by mspan structures. Equals to /memory/classes/metadata/mspan/inuse:bytes.
 # TYPE go_memstats_mspan_inuse_bytes gauge
-go_memstats_mspan_inuse_bytes 338400
+go_memstats_mspan_inuse_bytes 363040
 # HELP go_memstats_mspan_sys_bytes Number of bytes used for mspan structures obtained from system. Equals to /memory/classes/metadata/mspan/inuse:bytes + /memory/classes/metadata/mspan/free:bytes.
 # TYPE go_memstats_mspan_sys_bytes gauge
-go_memstats_mspan_sys_bytes 359040
+go_memstats_mspan_sys_bytes 375360
 # HELP go_memstats_next_gc_bytes Number of heap bytes when next garbage collection will take place. Equals to /gc/heap/goal:bytes.
 # TYPE go_memstats_next_gc_bytes gauge
-go_memstats_next_gc_bytes 1.611697e+07
+go_memstats_next_gc_bytes 1.6911602e+07
 # HELP go_memstats_other_sys_bytes Number of bytes used for other system allocations. Equals to /memory/classes/other:bytes.
 # TYPE go_memstats_other_sys_bytes gauge
-go_memstats_other_sys_bytes 3.340483e+06
+go_memstats_other_sys_bytes 3.355611e+06
 # HELP go_memstats_stack_inuse_bytes Number of bytes obtained from system for stack allocator in non-CGO environments. Equals to /memory/classes/heap/stacks:bytes.
 # TYPE go_memstats_stack_inuse_bytes gauge
-go_memstats_stack_inuse_bytes 2.4576e+06
+go_memstats_stack_inuse_bytes 2.29376e+06
 # HELP go_memstats_stack_sys_bytes Number of bytes obtained from system for stack allocator. Equals to /memory/classes/heap/stacks:bytes + /memory/classes/os-stacks:bytes.
 # TYPE go_memstats_stack_sys_bytes gauge
-go_memstats_stack_sys_bytes 2.4576e+06
+go_memstats_stack_sys_bytes 2.29376e+06
 # HELP go_memstats_sys_bytes Number of bytes obtained from system. Equals to /memory/classes/total:byte.
 # TYPE go_memstats_sys_bytes gauge
-go_memstats_sys_bytes 3.454388e+07
+go_memstats_sys_bytes 3.4560264e+07
 # HELP go_sched_gomaxprocs_threads The current runtime.GOMAXPROCS setting, or the number of operating system threads that can execute user-level Go code simultaneously. Sourced from /sched/gomaxprocs:threads.
 # TYPE go_sched_gomaxprocs_threads gauge
 go_sched_gomaxprocs_threads 16
 # HELP go_threads Number of OS threads created.
 # TYPE go_threads gauge
-go_threads 23
+go_threads 22

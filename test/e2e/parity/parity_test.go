@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/go-cmp/cmp/cmpopts"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
@@ -32,11 +33,11 @@ const (
 	syncMax     = `cnpg_collector_sync_replicas{value="max"}`
 	syncSeen    = `cnpg_collector_sync_replicas{value="observed"}`
 	// The edited copy's cnpg_last_update_timestamp; the fixture's is afterUpdate.
-	beforeUpdate = 1794676040
-	afterUpdate  = 1794676065
+	beforeUpdate = 1794828070
+	afterUpdate  = 1794828095
 	// Our last success of pg_stat_database in the newest export.
-	xactSuccess      = 1794676044.9216478
-	xactSuccessMicro = int64(1794676044921648)
+	xactSuccess      = 1794828077.9944074
+	xactSuccessMicro = int64(1794828077994407)
 	latency          = "cnpg_e2e_base_latency"
 )
 
@@ -262,7 +263,7 @@ func row(md, series string) string {
 }
 
 var _ = Describe("ParseCNPG", func() {
-	at := time.Unix(1794676070, 500_000_000)
+	at := time.Unix(1794828100, 500_000_000)
 
 	It("times the built-ins by the scrape and lo_pages and the queries by cnpg_last_update_timestamp", func() {
 		series := parseCNPG(fixture("cnpg.prom"), at)
@@ -285,7 +286,7 @@ var _ = Describe("ParseCNPG", func() {
 			"application_name": "plugin-peer-2", "datname": "", "state": "active", "usename": "streaming_replica",
 		}))
 		Expect(named(series, xactApp).Kind).To(Equal("counter"))
-		Expect(named(series, xactApp).Value).To(Equal(199.0))
+		Expect(named(series, xactApp).Value).To(Equal(255.0))
 		Expect(math.IsNaN(named(series, `cnpg_collector_pg_wal{value="slots_max"}`).Value)).To(BeTrue())
 	})
 
@@ -331,14 +332,14 @@ var _ = Describe("Ours", func() {
 	It("reads the pod's newest export with each series' kind", func() {
 		series := ours()
 
-		Expect(named(series, xactApp).Value).To(Equal(168.0))
+		Expect(named(series, xactApp).Value).To(Equal(211.0))
 		Expect(named(series, xactApp).Kind).To(Equal("counter"))
 		Expect(named(series, xactApp).Labels).To(Equal(map[string]string{"datname": "app"}))
 		Expect(named(series, baseOne).Kind).To(Equal("gauge"))
 		h := ofMetric(series, "otel.sdk.exporter.operation.duration")
 		Expect(h.Kind).To(Equal("histogram"))
-		Expect(h.Value).To(Equal(23.0))
-		Expect(h.Sum).To(Equal(0.26840146))
+		Expect(h.Value).To(Equal(22.0))
+		Expect(h.Sum).To(Equal(0.15783348799999997))
 		Expect(h.Name).To(HavePrefix(`otel.sdk.exporter.operation.duration{http.response.status_code="200",otel.component.name=`))
 	})
 
@@ -353,24 +354,24 @@ var _ = Describe("Ours", func() {
 		Entry("pg_stat_database", xactApp, xactSuccessMicro),
 		Entry("pg_stat_database on a database it did not run on, by the oldest",
 			`cnpg_pg_stat_database_xact_commit{datname="template1"}`, xactSuccessMicro),
-		Entry("pg_stat_archiver", "cnpg_pg_stat_archiver_archived_count", int64(1794676049938602)),
-		Entry("pg_stat_bgwriter through pg_stat_bgwriter_17", "cnpg_pg_stat_bgwriter_buffers_alloc", int64(1794676049752869)),
-		Entry("lo_pages on postgres, by datname", `cnpg_collector_lo_pages{datname="postgres"}`, int64(1794676044389125)),
-		Entry("lo_pages on app, by datname", `cnpg_collector_lo_pages{datname="app"}`, int64(1794676047957001)),
+		Entry("pg_stat_archiver", "cnpg_pg_stat_archiver_archived_count", int64(1794828081949583)),
+		Entry("pg_stat_bgwriter through pg_stat_bgwriter_17", "cnpg_pg_stat_bgwriter_buffers_alloc", int64(1794828085524662)),
+		Entry("lo_pages on postgres, by datname", `cnpg_collector_lo_pages{datname="postgres"}`, int64(1794828081890259)),
+		Entry("lo_pages on app, by datname", `cnpg_collector_lo_pages{datname="app"}`, int64(1794828084159439)),
 	)
 
 	It("takes the oldest database's success when the series names none of them", func() {
 		series := parity.Ours(ourLines(), pod, map[string][]string{"cnpg_pg_stat_database_xact_commit": {"pg_extensions"}})
 
 		Expect(named(series, `cnpg_pg_stat_database_xact_commit{datname="template1"}`).At).
-			To(BeTemporally("~", time.UnixMicro(1794676044379828), time.Microsecond))
+			To(BeTemporally("~", time.UnixMicro(1794828078284518), time.Microsecond))
 	})
 
 	It("takes the point time without a query or its success", func() {
 		series := parity.Ours(ourLines(), pod, map[string][]string{baseOne: {"missing"}})
 
-		Expect(named(series, `cnpg_collector_up{cluster="plugin-peer"}`).At).To(Equal(time.Unix(0, 1794676064129338069)))
-		Expect(named(series, baseOne).At).To(Equal(time.Unix(0, 1794676064129486833)))
+		Expect(named(series, `cnpg_collector_up{cluster="plugin-peer"}`).At).To(Equal(time.Unix(0, 1794828092351454488)))
+		Expect(named(series, baseOne).At).To(Equal(time.Unix(0, 1794828092352470342)))
 	})
 
 	DescribeTable("times a series two queries define by the one that succeeded, whichever sorts last",
@@ -378,7 +379,7 @@ var _ = Describe("Ours", func() {
 			series := parity.Ours(ourLines(), pod, map[string][]string{"cnpg_pg_stat_bgwriter_buffers_alloc": keys})
 
 			Expect(named(series, "cnpg_pg_stat_bgwriter_buffers_alloc").At).
-				To(BeTemporally("~", time.UnixMicro(1794676049752869), time.Microsecond))
+				To(BeTemporally("~", time.UnixMicro(1794828085524662), time.Microsecond))
 		},
 		Entry("the succeeding one sorts first", "pg_stat_bgwriter_17", "zz_missing"),
 		Entry("the succeeding one sorts last", "aa_missing", "pg_stat_bgwriter_17"),
@@ -388,9 +389,9 @@ var _ = Describe("Ours", func() {
 		lines := append(ourLines(), asPod("plugin-peer-2", 999)...)
 
 		mine := parity.Ours(lines, pod, index())
-		Expect(named(mine, xactApp).Value).To(Equal(168.0))
+		Expect(named(mine, xactApp).Value).To(Equal(211.0))
 		Expect(named(parity.Ours(lines, "plugin-peer-2", index()), xactApp).Value).To(Equal(999.0))
-		Expect(mine).To(Equal(ours()))
+		Expect(mine).To(BeComparableTo(ours(), cmpopts.EquateNaNs())) // the built-ins hold NaN
 	})
 })
 
@@ -441,7 +442,7 @@ var _ = Describe("Bracket", func() {
 	)
 
 	It("uses CNPG samples exactly one margin away", func() {
-		t := time.Unix(1794676100, 0)
+		t := time.Unix(1794828100, 0)
 		up := `cnpg_collector_up{cluster="plugin-peer"}`
 		mine := retimed(collectorSeries(t), t)
 
@@ -476,11 +477,11 @@ var _ = Describe("Bracket", func() {
 	)
 
 	It("fails a series on one side only and names both when a label value differs", func() {
-		reset := `cnpg_collector_wal_records{stats_reset="2026-11-14T17:03:45.279348Z"}`
-		local := `cnpg_collector_wal_records{stats_reset="2026-11-14T18:03:45.279348+01:00"}`
-		t := time.Unix(1794676100, 0)
+		reset := `cnpg_collector_wal_records{stats_reset="2026-11-16T11:15:53.188373Z"}`
+		local := `cnpg_collector_wal_records{stats_reset="2026-11-16T12:15:53.188373+01:00"}`
+		t := time.Unix(1794828100, 0)
 		mine := with(retimed(collectorSeries(t), t), reset, func(s *parity.Series) {
-			s.Name, s.Labels = local, map[string]string{"stats_reset": "2026-11-14T18:03:45.279348+01:00"}
+			s.Name, s.Labels = local, map[string]string{"stats_reset": "2026-11-16T12:15:53.188373+01:00"}
 		})
 
 		checks := parity.Bracket(collectorSeries(t.Add(-5*time.Second)), collectorSeries(t.Add(5*time.Second)), mine, parity.Options{})
@@ -511,7 +512,7 @@ var _ = Describe("Bracket", func() {
 	})
 
 	Context("self-measuring", func() {
-		t := time.Unix(1794676100, 0)
+		t := time.Unix(1794828100, 0)
 		duration := "cnpg_collector_collection_duration_seconds"
 
 		check := func(mine []parity.Series, metric string) parity.Check {
@@ -616,7 +617,7 @@ var _ = Describe("Bracket", func() {
 	)
 
 	Context("built-ins", func() {
-		t := time.Unix(1794676100, 0)
+		t := time.Unix(1794828100, 0)
 		bracket := func(mine []parity.Series, o parity.Options) []parity.Check {
 			return parity.Bracket(collectorSeries(t.Add(-5*time.Second)), collectorSeries(t.Add(5*time.Second)), mine, o)
 		}
@@ -646,8 +647,8 @@ var _ = Describe("Bracket", func() {
 			},
 			Entry("count under CNPG's, not asked", walCount, 3.0, false, "fail", "bracket"),
 			Entry("count under CNPG's, asked", walCount, 3.0, true, "pass", "v1.30.1-wal-regex"),
-			Entry("count equal to CNPG's, asked", walCount, 4.0, true, "pass", "v1.30.1-wal-regex"),
-			Entry("count over CNPG's, asked", walCount, 5.0, true, "fail", "v1.30.1-wal-regex"),
+			Entry("count equal to CNPG's, asked", walCount, 5.0, true, "pass", "v1.30.1-wal-regex"),
+			Entry("count over CNPG's, asked", walCount, 6.0, true, "fail", "v1.30.1-wal-regex"),
 			Entry("size under CNPG's, asked", `cnpg_collector_pg_wal{value="size"}`, 1.0, true, "pass", "v1.30.1-wal-regex"),
 			Entry("min under CNPG's, asked", walMin, 4.0, true, "fail", "bracket"),
 		)
@@ -705,8 +706,8 @@ var _ = Describe("Markdown", func() {
 		Expect(md).To(HavePrefix("# Parity\n"))
 		r := row(md, xactApp)
 		for _, part := range []string{
-			"| bracket |", "| no |", "150 at 2026-11-14T17:07:20.000Z", "168 at 2026-11-14T17:07:24.921Z",
-			"199 at 2026-11-14T17:07:45.000Z", "| 1s |", "| pass |",
+			"| bracket |", "| no |", "150 at 2026-11-16T11:21:10.000Z", "168 at 2026-11-16T11:21:17.994Z",
+			"255 at 2026-11-16T11:21:35.000Z", "| 1s |", "| pass |",
 		} {
 			Expect(r).To(ContainSubstring(part))
 		}
@@ -716,7 +717,7 @@ var _ = Describe("Markdown", func() {
 		r := row(parity.Markdown("Parity", checks(peerBackend, 2)), peerBackend)
 
 		for _, part := range []string{
-			"| yes |", "1 at 2026-11-14T17:07:20.000Z", "2 at 2026-11-14T17:07:26.314Z", "1 at 2026-11-14T17:07:45.000Z",
+			"| yes |", "1 at 2026-11-16T11:21:10.000Z", "2 at 2026-11-16T11:21:16.994Z", "1 at 2026-11-16T11:21:35.000Z",
 			"| 1s |", "| fail |",
 		} {
 			Expect(r).To(ContainSubstring(part))

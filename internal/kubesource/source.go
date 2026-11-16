@@ -476,8 +476,8 @@ func (s *Source) wakeLocked() {
 	}
 }
 
-// Watch calls notify once it is watching, then, debounced, after any event on a watched object. It
-// ignores files: the objects it watches follow the settings. It returns nil when ctx ends.
+// Watch calls notify once it is watching, then once debounce after the first event of a burst on a
+// watched object, so a steady stream of events cannot postpone it. It ignores files: the objects it watches follow the settings. It returns nil when ctx ends.
 func (s *Source) Watch(ctx context.Context, _ func() []string, notify func()) error {
 	wake := make(chan struct{}, 1)
 	s.mu.Lock()
@@ -495,14 +495,19 @@ func (s *Source) Watch(ctx context.Context, _ func() []string, notify func()) er
 	}
 	defer timer.Stop()
 
+	pending := false // the timer is armed
 	notify()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-wake:
-			timer.Reset(debounce)
+			if !pending {
+				timer.Reset(debounce)
+				pending = true
+			}
 		case <-timer.C():
+			pending = false
 			notify()
 		}
 	}

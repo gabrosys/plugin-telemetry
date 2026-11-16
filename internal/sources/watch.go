@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	// Debounce is the quiet time after a change before Watch notifies.
+	// Debounce is the time from the first change of a burst to Watch's notify.
 	Debounce = time.Second
 	// watchRetry is how often Watch re-reads its files and retries what failed.
 	watchRetry = 5 * time.Second
@@ -22,8 +22,8 @@ const (
 var errEventsClosed = errors.New("the watcher's event channel closed")
 
 // Watch watches the directories of files(), not the files, because editors and Kubernetes replace
-// files by rename or symlink swap. It calls notify once it is watching, then, debounced, after any
-// change in those directories. It re-reads files() after each notify and every 5 s, adds and removes
+// files by rename or symlink swap. It calls notify once it is watching, then Debounce after the first
+// change of a burst in those directories, so a steady stream of changes cannot postpone it. It re-reads files() after each notify and every 5 s, adds and removes
 // directories itself and notifies once after its set grows. A failure to create the watcher or add a
 // directory, and an fsnotify error, is retried every 5 s; each kind (the watcher, fsnotify errors, each
 // directory) is logged once when it starts and once when it recovers. An fsnotify error is followed by
@@ -59,6 +59,7 @@ func watch(ctx context.Context, clk clock.Clock, newWatcher func() (*fsnotify.Wa
 		<-debounce.C()
 	}
 	defer debounce.Stop()
+	pending := false // the debounce timer is armed
 	retry := clk.NewTimer(watchRetry)
 	defer retry.Stop()
 
@@ -80,7 +81,10 @@ func watch(ctx context.Context, clk clock.Clock, newWatcher func() (*fsnotify.Wa
 				d.lost()
 				continue
 			}
-			debounce.Reset(Debounce)
+			if !pending {
+				debounce.Reset(Debounce)
+				pending = true
+			}
 		case err, ok := <-errs:
 			if !ok {
 				d.lost()
@@ -91,6 +95,7 @@ func watch(ctx context.Context, clk clock.Clock, newWatcher func() (*fsnotify.Wa
 			d.fail(kindEvent, fmt.Errorf("watch event: %w", err))
 			d.notify()
 		case <-debounce.C():
+			pending = false
 			d.notifyAndSync()
 		case <-retry.C():
 			if d.sync() {

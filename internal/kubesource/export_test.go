@@ -2,6 +2,7 @@ package kubesource
 
 import (
 	"context"
+	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
@@ -24,9 +25,13 @@ func (h handler) Fail(err error) { h.fail(err) }
 // RunWith watches with w until ctx ends.
 func (s *Source) RunWith(ctx context.Context, w Watcher) { s.run(ctx, w) }
 
-// SnapshotWith is Snapshot over client, with no token wait.
-func SnapshotWith(ctx context.Context, o Options, client dynamic.Interface) (*Source, error) {
-	return New(o).snapshot(ctx, client)
+// SnapshotWith is Snapshot over the watcher w, with no token wait.
+func SnapshotWith(ctx context.Context, o Options, wait time.Duration, w Watcher) (*Source, error) {
+	s := New(o)
+	return s.open(ctx, wait, func(ctx context.Context) error {
+		s.run(ctx, w)
+		return nil
+	})
 }
 
 // DynamicWatcher is the watcher the sidecar runs, over client.

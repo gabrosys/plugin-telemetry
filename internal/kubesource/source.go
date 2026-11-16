@@ -19,8 +19,6 @@ import (
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	"github.com/cloudnative-pg/machinery/pkg/log"
 	"github.com/go-logr/logr"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic"
@@ -37,9 +35,8 @@ import (
 )
 
 const (
-	tokenPollTime  = 5 * time.Second
-	startRetry     = 5 * time.Second // the wait before a watch whose start panicked, or whose informer died, is started again
-	snapshotRounds = 3               // the Cluster; the exporter and the Cluster's references; the exporter's references
+	tokenPollTime = 5 * time.Second
+	startRetry    = 5 * time.Second // the wait before a watch whose start panicked, or whose informer died, is started again
 )
 
 var errNotSynced = errors.New("watch has not synced")
@@ -97,71 +94,63 @@ func (s *Source) Start(ctx context.Context) error {
 	return nil
 }
 
-// Snapshot gets every referenced object once, with no watch, for the instance tools; ctx bounds the
-// token wait and the Gets.
-func Snapshot(ctx context.Context, o Options) (*Source, error) {
+// Snapshot starts a Source on ctx, which keeps its watches until ctx ends, and waits up to wait for its
+// Settings to stop being not ready, for the instance tools.
+func Snapshot(ctx context.Context, o Options, wait time.Duration) (*Source, error) {
 	s := New(o)
-	client, err := s.client(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if client == nil {
-		return nil, fmt.Errorf("sidecar token %s did not appear: %w", filepath.Join(s.o.TokenDir, "token"), ctx.Err())
-	}
 
-	return s.snapshot(ctx, client)
+	return s.open(ctx, wait, s.Start)
 }
 
-// snapshot gets the wanted objects in rounds: the Cluster, then the exporter and the Cluster's references,
-// then the exporter's. A 404 is a missing object and a 403 a denied one; other errors, and the end of
-// ctx, are returned.
-func (s *Source) snapshot(ctx context.Context, client dynamic.Interface) (*Source, error) {
-	s.mu.Lock()
-	s.log = log.FromContext(ctx)
-	s.mu.Unlock()
+// pollReady is how often open checks whether the Settings are ready.
+const pollReady = 100 * time.Millisecond
 
-	var failures []error
-	for range snapshotRounds {
-		if err := ctx.Err(); err != nil {
-			failures = append(failures, fmt.Errorf("get the referenced objects: %w", err))
-			break
-		}
-		s.mu.Lock()
-		var gets []key
-		for k := range s.wantedLocked() {
-			if s.entries[k] == nil {
-				gets = append(gets, k)
-			}
-		}
-		s.mu.Unlock()
-		if len(gets) == 0 {
-			break
-		}
+// open runs start on its own goroutine, which ends with ctx, and returns s once every watch the wanted set
+// has has reported or been denied. It fails when start fails, or when wait or ctx ends first.
+func (s *Source) open(ctx context.Context, wait time.Duration, start func(context.Context) error) (*Source, error) {
+	started := make(chan error, 1)
+	go func() { started <- start(ctx) }()
+	waitCtx, stopWait := context.WithTimeout(ctx, wait)
+	defer stopWait()
 
-		for _, k := range gets {
-			gvr := resources[k.kind]
-			obj, err := client.Resource(gvr).Namespace(s.o.Namespace).Get(ctx, k.name, metav1.GetOptions{})
-			e := &entry{}
-			switch {
-			case err == nil:
-				e.synced, e.obj = true, obj
-			case apierrors.IsNotFound(err):
-				e.synced = true
-			case apierrors.IsForbidden(err):
-				e.denied = fmt.Errorf("%w: %w", sources.ErrDenied, err)
-			default:
-				failures = append(failures, fmt.Errorf("get %s %s: %w", gvr.Resource, k.name, err))
+	for !s.synced() {
+		select {
+		case err := <-started:
+			if err != nil {
+				return nil, err
 			}
-			s.mu.Lock()
-			s.entries[k] = e
-			s.mu.Unlock()
+			// Start returns without an error only when ctx has ended.
+			return nil, s.notReady(ctx.Err())
+		case <-waitCtx.Done():
+			return nil, s.notReady(waitCtx.Err())
+		case <-s.o.Clock.After(pollReady):
 		}
-	}
-	if err := errors.Join(failures...); err != nil {
-		return nil, err
 	}
 
 	return s, nil
+}
+
+// synced reports whether every watch the wanted set has has reported or been denied.
+func (s *Source) synced() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k := range s.wantedLocked() {
+		if e := s.entries[k]; e == nil || !e.synced && e.denied == nil {
+			return false
+		}
+	}
+
+	return true
+}
+
+// notReady is the error of an open that ended before the watches synced: no token, or ErrNotReady.
+func (s *Source) notReady(cause error) error {
+	token := filepath.Join(s.o.TokenDir, "token")
+	if _, err := os.Stat(token); err != nil {
+		return fmt.Errorf("sidecar token %s did not appear: %w", token, cause)
+	}
+
+	return fmt.Errorf("the watched objects did not sync: %w: %w", engine.ErrNotReady, cause)
 }
 
 // client waits for the token and returns the dynamic client; nil when ctx ended first.

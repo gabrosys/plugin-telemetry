@@ -122,7 +122,7 @@ var _ = Describe("instance in Kubernetes mode", func() {
 				gotOptions = append(gotOptions, o)
 				return src
 			},
-			func(context.Context, kubesource.Options) (engine.Config, error) {
+			func(context.Context, kubesource.Options, time.Duration) (engine.Config, error) {
 				return nil, errors.New("unexpected snapshot")
 			}))
 	}
@@ -264,7 +264,7 @@ var _ = Describe("instance tools in Kubernetes mode", func() {
 				Fail("unexpected run")
 				return nil
 			},
-			func(_ context.Context, o kubesource.Options) (engine.Config, error) {
+			func(_ context.Context, o kubesource.Options, _ time.Duration) (engine.Config, error) {
 				gotOptions = append(gotOptions, o)
 				return s, nil
 			}))
@@ -334,26 +334,23 @@ var _ = Describe("instance tools in Kubernetes mode", func() {
 		Expect(gotOptions).To(BeEmpty())
 	})
 
-	It("names a snapshot failure once and gives the snapshot a deadline", func() {
-		var deadline time.Time
-		var hasDeadline bool
+	It("names a snapshot failure once and gives the snapshot the wait cap", func() {
+		var gotWait time.Duration
 		DeferCleanup(cli.SetKubeSources(
 			func(kubesource.Options) cli.KubeSource {
 				Fail("unexpected run")
 				return nil
 			},
-			func(ctx context.Context, _ kubesource.Options) (engine.Config, error) {
-				deadline, hasDeadline = ctx.Deadline()
+			func(_ context.Context, _ kubesource.Options, wait time.Duration) (engine.Config, error) {
+				gotWait = wait
 				return nil, errors.New("sidecar token /t/token did not appear: context deadline exceeded")
 			}))
 		for _, sub := range []string{"validate", "test", "print-config"} {
-			hasDeadline = false
+			gotWait = 0
 			out, err := execute(context.Background(), "instance", sub)
 			Expect(err).To(HaveOccurred(), sub)
 			Expect(strings.Count(out+err.Error(), "kubernetes snapshot:")).To(Equal(1), sub)
-			Expect(hasDeadline).To(BeTrue(), sub)
-			Expect(time.Until(deadline)).To(BeNumerically("<=", cli.SnapshotTimeout), sub)
-			Expect(time.Until(deadline)).To(BeNumerically(">", 10*time.Second), sub)
+			Expect(gotWait).To(Equal(cli.SnapshotTimeout), sub)
 		}
 	})
 

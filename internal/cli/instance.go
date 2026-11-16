@@ -32,7 +32,7 @@ type kubeSource interface {
 	Start(ctx context.Context) error
 }
 
-// snapshotTimeout bounds the token wait and the reads of the tools.
+// snapshotTimeout bounds the wait of the tools for the token and the watched objects.
 const snapshotTimeout = 15 * time.Second
 
 // newKubeSource and snapshotKubeSource build the Kubernetes source; specs replace them.
@@ -40,8 +40,8 @@ var (
 	newKubeSource = func(o kubesource.Options) kubeSource {
 		return kubesource.New(o)
 	}
-	snapshotKubeSource = func(ctx context.Context, o kubesource.Options) (engine.Config, error) {
-		src, err := kubesource.Snapshot(ctx, o)
+	snapshotKubeSource = func(ctx context.Context, o kubesource.Options, wait time.Duration) (engine.Config, error) {
+		src, err := kubesource.Snapshot(ctx, o, wait)
 		if err != nil {
 			return nil, err //nolint:wrapcheck // open adds the context
 		}
@@ -73,7 +73,7 @@ func kubeOptions(getenv func(string) string) (kubesource.Options, error) {
 	return o, nil
 }
 
-// openFunc returns the configuration the tools read: the config file, or a snapshot of the Kubernetes objects.
+// openFunc returns the configuration the tools read: the config file, or the Kubernetes objects once their watches have synced.
 // The environment is checked here, before anything is read.
 func openFunc(config string) (func(context.Context) (engine.Config, error), error) {
 	if config != "" {
@@ -85,9 +85,7 @@ func openFunc(config string) (func(context.Context) (engine.Config, error), erro
 	}
 
 	return func(ctx context.Context) (engine.Config, error) {
-		ctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
-		defer cancel()
-		cfg, err := snapshotKubeSource(ctx, o)
+		cfg, err := snapshotKubeSource(ctx, o, snapshotTimeout)
 		if err != nil {
 			return nil, fmt.Errorf("kubernetes snapshot: %w", err)
 		}

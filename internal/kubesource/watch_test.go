@@ -1,15 +1,16 @@
 package kubesource_test
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-logr/logr"
-	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -21,6 +22,7 @@ import (
 	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/gabrosys/plugin-telemetry/internal/clusterconfig"
+	"github.com/gabrosys/plugin-telemetry/internal/engine"
 	"github.com/gabrosys/plugin-telemetry/internal/kubesource"
 	"github.com/gabrosys/plugin-telemetry/internal/sources"
 )
@@ -134,14 +136,11 @@ var _ = Describe("the dynamic watcher", func() {
 var _ = Describe("Snapshot", func() {
 	var (
 		ctx    context.Context
-		logs   *bytes.Buffer
 		client *dynfake.FakeDynamicClient
 	)
 
 	BeforeEach(func() {
-		logs = &bytes.Buffer{}
-		logger := funcr.New(func(prefix, args string) { logs.WriteString(prefix + args + "\n") }, funcr.Options{Verbosity: 10})
-		ctx = logr.NewContext(context.Background(), logger)
+		ctx = logr.NewContext(context.Background(), logr.Discard())
 		gvrs := map[schema.GroupVersionResource]string{
 			{Group: "postgresql.cnpg.io", Version: "v1", Resource: "clusters"}:                           "ClusterList",
 			{Group: "telemetry.gabrosys.github.io", Version: "v1alpha1", Resource: "telemetryexporters"}: "TelemetryExporterList",
@@ -166,30 +165,17 @@ var _ = Describe("Snapshot", func() {
 		)
 	})
 
-	snapshot := func() (*kubesource.Source, error) {
+	snapshot := func(wait time.Duration) (*kubesource.Source, error) {
+		dir := GinkgoT().TempDir()
+		Expect(os.WriteFile(filepath.Join(dir, "token"), []byte("t"), 0o600)).To(Succeed())
 		return kubesource.SnapshotWith(ctx, kubesource.Options{
-			Namespace: "ns", Cluster: "pg", APIServer: "https://x", TokenDir: GinkgoT().TempDir(),
-		}, client)
+			Namespace: "ns", Cluster: "pg", APIServer: "https://x", TokenDir: dir,
+		}, wait, kubesource.DynamicWatcher(client))
 	}
 
-	// gets returns the objects read, as "<resource>/<name>".
-	gets := func() []string {
-		var out []string
-		for _, a := range client.Actions() {
-			if g, ok := a.(clienttesting.GetAction); ok && a.GetVerb() == "get" {
-				out = append(out, a.GetResource().Resource+"/"+g.GetName())
-			}
-		}
-		return out
-	}
-
-	It("reads every referenced object once and treats a 404 as a missing object", func() {
-		src, err := snapshot()
+	It("waits for every referenced object and treats a missing one as absent", func() {
+		src, err := snapshot(5 * time.Second)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(gets()).To(ConsistOf(
-			"clusters/pg", "telemetryexporters/default", "secrets/pw", "configmaps/mon-cm",
-			"secrets/hdr", "configmaps/envcm", "metricquerysets/extra",
-		))
 
 		s, _, err := src.Settings()
 		Expect(err).NotTo(HaveOccurred())
@@ -201,47 +187,38 @@ var _ = Describe("Snapshot", func() {
 	})
 
 	It("reports a 403 as ErrDenied", func() {
-		client.PrependReactor("get", "secrets", func(a clienttesting.Action) (bool, runtime.Object, error) {
-			if g, ok := a.(clienttesting.GetAction); ok && g.GetName() == "hdr" {
-				return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "hdr", errForbidden)
-			}
-			return false, nil, nil
+		client.PrependReactor("list", "secrets", func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "hdr", errForbidden)
 		})
-		src, err := snapshot()
+		src, err := snapshot(5 * time.Second)
 		Expect(err).NotTo(HaveOccurred())
 		_, err = src.ReadFile(clusterconfig.SecretFile("hdr", "h"))
 		Expect(err).To(MatchError(sources.ErrDenied))
 	})
 
-	It("returns any other error once and does not log it", func() {
-		client.PrependReactor("get", "configmaps", func(a clienttesting.Action) (bool, runtime.Object, error) {
-			if g, ok := a.(clienttesting.GetAction); ok && g.GetName() == "envcm" {
-				return true, nil, apierrors.NewInternalError(errors.New("etcd is down"))
-			}
-			return false, nil, nil
+	It("retries any other error until the wait passes, then says the objects are not ready", func() {
+		client.PrependReactor("list", "configmaps", func(clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewInternalError(errors.New("etcd is down"))
 		})
-		_, err := snapshot()
-		Expect(err.Error()).To(HavePrefix("get configmaps envcm: "))
-		Expect(strings.Count(err.Error(), "etcd is down")).To(Equal(1))
-		Expect(gets()).To(ContainElement("configmaps/envcm"))
-		Expect(strings.Count(strings.Join(gets(), " "), "configmaps/envcm")).To(Equal(1))
-		Expect(logs.String()).NotTo(ContainSubstring("etcd is down"))
+		start := time.Now()
+		_, err := snapshot(500 * time.Millisecond)
+		Expect(time.Since(start)).To(BeNumerically(">=", 400*time.Millisecond))
+		Expect(err).To(MatchError(engine.ErrNotReady))
+		Expect(err).To(MatchError(context.DeadlineExceeded))
 	})
 
-	It("returns one context error promptly, and logs nothing, when ctx has ended", func() {
+	It("returns one context error promptly when ctx has ended", func() {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithCancel(ctx)
 		cancel()
 		done := make(chan error, 1)
 		go func() {
-			_, err := snapshot()
+			_, err := snapshot(time.Minute)
 			done <- err
 		}()
 		var err error
 		Eventually(done, "1s").Should(Receive(&err))
 		Expect(err).To(MatchError(context.Canceled))
 		Expect(strings.Count(err.Error(), context.Canceled.Error())).To(Equal(1))
-		Expect(gets()).To(BeEmpty())
-		Expect(logs.String()).To(BeEmpty())
 	})
 })

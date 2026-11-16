@@ -727,7 +727,7 @@ var _ = Describe("Snapshot without a token", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 		start := time.Now()
-		_, err := kubesource.Snapshot(ctx, kubesource.Options{Namespace: "ns", Cluster: "pg", APIServer: "https://127.0.0.1:1", TokenDir: dir})
+		_, err := kubesource.Snapshot(ctx, kubesource.Options{Namespace: "ns", Cluster: "pg", APIServer: "https://127.0.0.1:1", TokenDir: dir}, time.Minute)
 		Expect(time.Since(start)).To(BeNumerically("<", time.Second))
 		Expect(err).To(MatchError(context.DeadlineExceeded))
 		Expect(err).To(MatchError(Equal("sidecar token " + dir + "/token did not appear: " + context.DeadlineExceeded.Error())))

@@ -68,7 +68,7 @@ func (s *suite) setUp(ctx SpecContext) {
 	Expect(s.c.Create(ctx, &queries)).To(Succeed())
 
 	exporter := framework.ExporterFor(s.ns, podpatch.DefaultExporter)
-	exporter.Spec.Metrics.PlanInterval = &metav1.Duration{Duration: 30 * time.Second}
+	exporter.Spec.Metrics.PlanInterval = &metav1.Duration{Duration: planCycle}
 	Expect(s.c.Create(ctx, exporter)).To(Succeed())
 
 	cluster := framework.PeerCluster(s.ns, clusterName, s.env.PostgresImage)

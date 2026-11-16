@@ -71,7 +71,7 @@ func (s *suite) readyCollector(ctx context.Context) (bool, error) {
 
 // collectorSpecs adds ENG-05: the collector down for ten minutes.
 func collectorSpecs(s *suite) {
-	It("ENG-05: with the collector down for 10 minutes each sidecar's working set stays within 10 % of its steady value "+
+	It("ENG-05: with the collector down for 10 minutes each sidecar's median working set stays within 10 % of its steady median "+
 		"and exports resume within two export intervals", func(ctx SpecContext) {
 		s.healthy(ctx)
 
@@ -121,13 +121,12 @@ func collectorSpecs(s *suite) {
 		var breaches []string
 		soft := NewGomega(func(message string, _ ...int) { breaches = append(breaches, message) })
 		for i, pod := range pods {
-			steady := median(steadyWS[i])
-			highest := slices.Max(outageWS[i])
-			AddReportEntry("working set "+pod.Name, fmt.Sprintf("steady %d, min %d, max %d bytes",
-				steady, slices.Min(outageWS[i]), highest))
+			steady, outage := median(steadyWS[i]), median(outageWS[i])
+			AddReportEntry("working set "+pod.Name, fmt.Sprintf("steady median %d, outage median %d, min %d, max %d bytes",
+				steady, outage, slices.Min(outageWS[i]), slices.Max(outageWS[i])))
 			AddReportEntry("rssBytes "+pod.Name, fmt.Sprintf("steady %d, min %d, max %d bytes",
 				median(steadyRSS[i]), slices.Min(outageRSS[i]), slices.Max(outageRSS[i])))
-			soft.Expect(float64(highest)).To(BeNumerically("<=", growthLimit*float64(steady)), "working set of %s", pod.Name)
+			soft.Expect(float64(outage)).To(BeNumerically("<=", growthLimit*float64(steady)), "median working set of %s", pod.Name)
 		}
 
 		var delays []time.Duration

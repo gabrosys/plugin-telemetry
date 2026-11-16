@@ -238,8 +238,8 @@ func BackoffDelay(failures int, maxBackoff time.Duration) time.Duration {
 	return min(delay, maxBackoff)
 }
 
-// releaser returns the function that hands conn back; only its first call has an effect. ctx only
-// supplies the values (the logger) for closing conn, not a cancellation.
+// releaser returns the function that hands conn back; only its first call has an effect. ctx is
+// accepted for contextcheck; closing conn uses WithoutCancel(ctx) and the 2 s closeTimeout.
 func (p *Pool) releaser(ctx context.Context, conn *pgx.Conn, database string) func(bool) {
 	var once sync.Once
 	return func(broken bool) {
@@ -276,8 +276,8 @@ func (p *Pool) IdleTimeout() time.Duration {
 	return p.idleTimeout
 }
 
-// CloseIdle closes the idle connections that have been unused for the idle timeout. ctx only supplies
-// values: each close is bounded by closeTimeout, whatever ctx.
+// CloseIdle closes the idle connections that have been unused for the idle timeout. ctx is accepted
+// for contextcheck; each close uses WithoutCancel(ctx) and the 2 s closeTimeout.
 func (p *Pool) CloseIdle(ctx context.Context) {
 	p.mu.Lock()
 	now := p.clk.Now()
@@ -303,7 +303,8 @@ func (p *Pool) CloseIdle(ctx context.Context) {
 }
 
 // Close closes the idle connections and makes AcquireWithin fail. Connections still in use are
-// closed when they are released. ctx only supplies values: each close is bounded by closeTimeout.
+// closed when they are released. ctx is accepted for contextcheck;
+// each close uses WithoutCancel(ctx) and the 2 s closeTimeout.
 func (p *Pool) Close(ctx context.Context) {
 	p.mu.Lock()
 	p.closed = true
@@ -325,7 +326,7 @@ func (p *Pool) notifyLocked() {
 }
 
 // closeConn ends the session; the socket is closed even when the goodbye fails, so the error is only logged.
-// A cancelled ctx must not cut the goodbye short, so only its values are kept.
+// A cancelled ctx must not cut the goodbye short, so it is detached with WithoutCancel.
 func (p *Pool) closeConn(ctx context.Context, conn *pgx.Conn, database string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
 	defer cancel()

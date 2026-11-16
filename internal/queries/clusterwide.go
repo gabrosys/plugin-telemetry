@@ -133,21 +133,12 @@ func catalogNames(sql string, match func(string) bool) []string {
 // dotBefore reports whether sql[:i] ends in a dot and whitespace only after it, and returns the index where
 // the text before that dot ends.
 func dotBefore(sql string, i int) (end int, dotted bool) {
-	i = trimSpaceBack(sql, i)
+	i = len(strings.TrimRight(sql[:i], " \t\n\r\f"))
 	if i == 0 || sql[i-1] != '.' {
 		return i, false
 	}
 
-	return trimSpaceBack(sql, i-1), true
-}
-
-// trimSpaceBack returns the index where sql[:i] ends once its trailing whitespace is dropped.
-func trimSpaceBack(sql string, i int) int {
-	for i > 0 && strings.IndexByte(" \t\n\r\f", sql[i-1]) >= 0 {
-		i--
-	}
-
-	return i
+	return len(strings.TrimRight(sql[:i-1], " \t\n\r\f")), true
 }
 
 // blankCommentsAndStrings replaces each comment and string constant with a space, following PostgreSQL 18

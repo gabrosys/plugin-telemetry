@@ -140,8 +140,8 @@ func (e *engine) reload(ctx context.Context) error {
 		return nil
 	}
 	r.commit(logger, next)
-	files = watchedFiles(next.settings)
-	e.files.Store(&files)
+	inForce := watchedFiles(next.settings)
+	e.files.Store(&inForce)
 	r.replan(ctx)
 	return nil
 }

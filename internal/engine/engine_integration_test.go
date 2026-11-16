@@ -551,8 +551,9 @@ var _ = Describe("Run while PostgreSQL is not up yet", func() {
 var _ = Describe("Run when PostgreSQL stops", func() {
 	It("gathers facts right after a run loses its connection", func(ctx SpecContext) {
 		// The planning cycle is far longer than the spec: after a successful round only an early round, asked
-		// for by a run that lost its connection, can bring cnpg_collector_up to 0. The way back to 1 comes from
-		// the facts backoff or further early rounds, bounded by the pool's reconnect backoff.
+		// for by a run that lost its connection, can bring cnpg_collector_up to 0. The way back to 1 is not
+		// asserted: a failed early round leaves the planning timer alone, so it comes with the next planning
+		// cycle (see "comes back after an outage") or with a run that loses its connection after the restart.
 		f := newFixture(time.Hour)
 		writeFile(f.config, f.valid)
 		f.run()
@@ -561,9 +562,6 @@ var _ = Describe("Run when PostgreSQL stops", func() {
 		Expect(server.StopServer(ctx)).To(Succeed())
 		DeferCleanup(func(ctx SpecContext) { Expect(server.StartServer(ctx)).To(Succeed()) })
 		Eventually(expectUp(f.srv, 0)).WithTimeout(10 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
-
-		Expect(server.StartServer(ctx)).To(Succeed())
-		Eventually(expectUp(f.srv, 1)).WithTimeout(45 * time.Second).WithPolling(250 * time.Millisecond).Should(Succeed())
 	}, SpecTimeout(2*time.Minute))
 })
 

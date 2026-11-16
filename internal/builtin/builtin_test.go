@@ -99,12 +99,37 @@ var _ = Describe("Samples", func() {
 		Expect(builtin.Samples(nil, podName, clusterName, nil)).To(BeEmpty())
 	})
 
+	It("returns no facts-derived sample with a Cluster and without facts", func() {
+		c := legacyCluster(clusterName)
+		c.Spec.WalStorage = &apiv1.StorageConfiguration{Size: "1Gi"}
+		samples := builtin.Samples(c, podName, clusterName, nil)
+
+		absent(samples, "postgres_version", "cluster", "c", "full", "18.7")
+		absent(samples, "pg_wal", "value", "volume_size")
+		absent(samples, "pg_wal", "value", "volume_max")
+		for _, name := range []string{"first_recoverability_point", "last_available_backup_timestamp", "last_failed_backup_timestamp"} {
+			absent(samples, name)
+		}
+		for _, s := range samples {
+			Expect(s.Metric).NotTo(Equal(prefix + "postgres_version"))
+		}
+	})
+
 	It("returns sorted gauges with CNPG's help strings", func() {
 		c := legacyCluster(clusterName)
 		c.Spec.WalStorage = &apiv1.StorageConfiguration{Size: "1Gi"}
 		samples := builtin.Samples(c, podName, clusterName, facts(true))
 
 		Expect(sort.SliceIsSorted(samples, func(i, j int) bool { return samples[i].Metric < samples[j].Metric })).To(BeTrue())
+		var order []string
+		for _, s := range samples {
+			if s.Metric == prefix+"sync_replicas" || s.Metric == prefix+"pg_wal" {
+				order = append(order, s.Metric[len(prefix):]+"="+s.Labels[0].Value)
+			}
+		}
+		Expect(order).To(Equal([]string{
+			"pg_wal=volume_max", "pg_wal=volume_size", "sync_replicas=expected", "sync_replicas=max", "sync_replicas=min",
+		}))
 		help := map[string]string{
 			"replica_mode":                    "1 if the cluster is in replica mode, 0 otherwise",
 			"fencing_on":                      "1 if the instance is fenced, 0 otherwise",
@@ -133,6 +158,7 @@ var _ = Describe("Samples", func() {
 		Expect(seen).To(HaveLen(len(help)))
 	})
 
+	// Ported from CloudNativePG v1.30.1 api/v1/cluster_funcs.go:1087-1112 (IsReplica); the table is ours.
 	Describe("replica_mode", func() {
 		enabled, disabled := true, false
 		DescribeTable("IsReplica",
@@ -151,6 +177,7 @@ var _ = Describe("Samples", func() {
 		)
 	})
 
+	// Ported from CloudNativePG v1.30.1 api/v1/cluster_funcs_test.go:921-967, plus "not json" (pkg/utils/fencing.go:46-64).
 	Describe("fencing_on", func() {
 		DescribeTable("the annotation",
 			func(annotations map[string]string, pod string, want float64) {
@@ -167,6 +194,7 @@ var _ = Describe("Samples", func() {
 		)
 	})
 
+	// CloudNativePG v1.30.1 pg_collector.go:533-551 (collectNodesUsed).
 	Describe("nodes_used", func() {
 		It("is the topology count when extracted", func() {
 			c := legacyCluster(clusterName)
@@ -180,6 +208,7 @@ var _ = Describe("Samples", func() {
 		})
 	})
 
+	// Ported from CloudNativePG v1.30.1 pkg/postgres/replication/legacy_test.go:30-100 and legacy.go:55-169, replication.go:30-37.
 	Describe("sync_replicas", func() {
 		It("reports min, max and expected", func() {
 			c := legacyCluster(clusterName)
@@ -288,6 +317,7 @@ var _ = Describe("Samples", func() {
 		})
 	})
 
+	// CloudNativePG v1.30.1 internal/management/controller/instance_controller.go:1007-1020 (reconcileMetrics).
 	Describe("manual_switchover_required", func() {
 		DescribeTable("on the current primary",
 			func(primary, phase string, want float64, present bool) {
@@ -307,6 +337,7 @@ var _ = Describe("Samples", func() {
 		)
 	})
 
+	// CloudNativePG v1.30.1 pg_collector.go:489-532 (setTimestampMetric).
 	Describe("the backup timestamps", func() {
 		const when = "2026-11-15T10:00:00Z"
 		unix := float64(time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC).Unix())
@@ -344,6 +375,7 @@ var _ = Describe("Samples", func() {
 		}
 	})
 
+	// CloudNativePG v1.30.1 metricserver/wal.go:205-239 (volume_size, volume_max, getWalVolumeSize).
 	Describe("pg_wal volume", func() {
 		It("is the volume size in bytes and in segments", func() {
 			c := legacyCluster(clusterName)

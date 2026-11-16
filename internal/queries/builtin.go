@@ -10,6 +10,10 @@ const (
 	KeySyncObserved  = "collector_sync_replicas"
 )
 
+// PGWALHelp is CNPG's help for pg_wal (pg_collector.go:196-201 at v1.30.1), shared with the Cluster-derived rows.
+const PGWALHelp = "Total size in bytes of WAL segments in the '/var/lib/postgresql/data/pgdata/pg_wal' directory " +
+	" computed as (wal_segment_size * count)"
+
 // StatsResetSQL renders stats_reset as CNPG's label does: '-infinity' when NULL, else UTC RFC 3339
 // with the trailing zeros of the fraction removed (Go's time.RFC3339Nano).
 const StatsResetSQL = `CASE WHEN stats_reset IS NULL THEN '-infinity' ELSE ` +
@@ -79,8 +83,7 @@ func Builtin() UserQueries {
 			Query: pgWALSQL,
 			Metrics: []Mapping{
 				{"value": label("Which WAL figure the row holds")},
-				{"pg_wal": gauge("Total size in bytes of WAL segments in the '/var/lib/postgresql/data/pgdata/pg_wal' directory " +
-					" computed as (wal_segment_size * count)")},
+				{"pg_wal": gauge(PGWALHelp)},
 			},
 		},
 		KeyArchiveStatus: {

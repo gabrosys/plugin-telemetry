@@ -2,6 +2,7 @@
 package builtin
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -48,11 +49,11 @@ func Samples(c *apiv1.Cluster, pod, cluster string, f *Facts) []queries.Sample {
 		out = append(out, gauge("postgres_version", "Postgres version", v, label("full", full), label("cluster", cluster)))
 	}
 
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Metric != out[j].Metric {
-			return out[i].Metric < out[j].Metric
+	slices.SortStableFunc(out, func(a, b queries.Sample) int {
+		if c := cmp.Compare(a.Metric, b.Metric); c != 0 {
+			return c
 		}
-		return labelsLess(out[i].Labels, out[j].Labels)
+		return slices.CompareFunc(a.Labels, b.Labels, compareLabels)
 	})
 	return out
 }
@@ -99,15 +100,12 @@ func clusterSamples(c *apiv1.Cluster, pod string, f *Facts) []queries.Sample {
 		size = math.NaN()
 	}
 	return append(out,
-		gauge("pg_wal", pgWALHelp, size, label("value", "volume_size")),
-		gauge("pg_wal", pgWALHelp, segments, label("value", "volume_max")),
+		gauge("pg_wal", queries.PGWALHelp, size, label("value", "volume_size")),
+		gauge("pg_wal", queries.PGWALHelp, segments, label("value", "volume_max")),
 	)
 }
 
 const (
-	pgWALHelp = "Total size in bytes of WAL segments in the '/var/lib/postgresql/data/pgdata/pg_wal' directory " +
-		" computed as (wal_segment_size * count)"
-
 	nodesUsedHelp = "NodesUsed represents the count of distinct nodes accommodating the instances. " +
 		"A value of '-1' suggests that the metric is not available. " +
 		"A value of '1' suggests that all instances are hosted on a single node, " +
@@ -129,23 +127,11 @@ func boolValue(b bool) float64 {
 	return 0
 }
 
-func labelsLess(a, b []queries.Label) bool {
-	return slices.CompareFunc(a, b, func(x, y queries.Label) int {
-		if x.Key != y.Key {
-			return compare(x.Key, y.Key)
-		}
-		return compare(x.Value, y.Value)
-	}) < 0
-}
-
-func compare(a, b string) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
+func compareLabels(x, y queries.Label) int {
+	if c := cmp.Compare(x.Key, y.Key); c != 0 {
+		return c
 	}
-	return 0
+	return cmp.Compare(x.Value, y.Value)
 }
 
 // isReplica ports Cluster.IsReplica (api/v1/cluster_funcs.go:1087-1112 at v1.30.1).

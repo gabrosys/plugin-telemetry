@@ -5,6 +5,7 @@ package executor_test
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"strconv"
 	"sync"
@@ -473,6 +474,51 @@ var _ = Describe("Executor", func() {
 		Expect(ok.Err).NotTo(HaveOccurred())
 	})
 
+	It("does not cut a slow connect at the interval", func(ctx SpecContext) {
+		lis, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
+		Expect(err).NotTo(HaveOccurred())
+		stalled := make(chan net.Conn, 4)
+		accepting := make(chan struct{})
+		go func() {
+			defer close(accepting)
+			for {
+				c, err := lis.Accept()
+				if err != nil {
+					return
+				}
+				stalled <- c
+			}
+		}()
+		DeferCleanup(func() {
+			Expect(lis.Close()).To(Succeed())
+			<-accepting
+			close(stalled)
+			for c := range stalled {
+				Expect(c.Close()).To(Succeed())
+			}
+		})
+		addr, ok := lis.Addr().(*net.TCPAddr)
+		Expect(ok).To(BeTrue())
+
+		cfg := server.MonitorConfig(GinkgoT().TempDir())
+		cfg.Host, cfg.Port = "127.0.0.1", addr.AddrPort().Port()
+		cfg.ConnectTimeout = time.Second
+		slow := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()))
+		DeferCleanup(slow.Close)
+
+		job := jobFor("SELECT 'a' AS datname, 1 AS value")
+		job.Interval = 200 * time.Millisecond
+		start := time.Now()
+		res := newExecutor(slow, l).Run(ctx, job)
+
+		Expect(time.Since(start)).To(BeNumerically(">=", 900*time.Millisecond), "the connect runs to its own timeout")
+		Expect(res.Outcome).NotTo(Equal(selfmetrics.OutcomeSkipped))
+		Expect(res.Err).NotTo(MatchError(pg.ErrNoSlot))
+		Expect(res.ConnectionLost).To(BeTrue())
+		again := newExecutor(slow, l).Run(ctx, job)
+		Expect(again.Err).To(MatchError(pg.ErrBackoff), "the failed connect starts the backoff")
+	})
+
 	It("starts a run's deadline once it has a pool slot", func(ctx SpecContext) {
 		l.QueryTimeout = 500 * time.Millisecond
 		cfg := server.MonitorConfig(GinkgoT().TempDir())
@@ -507,7 +553,7 @@ var _ = Describe("Executor", func() {
 
 		Expect(time.Since(start)).To(BeNumerically("<", time.Second))
 		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeSkipped))
-		Expect(res.Err).To(MatchError(executor.ErrNoSlot))
+		Expect(res.Err).To(MatchError(pg.ErrNoSlot))
 		Expect(res.Err).To(MatchError(ContainSubstring("query probe on database postgres could not get a connection within its interval 200ms")))
 		Expect(res.ConnectionLost).To(BeFalse())
 		Expect(res.Samples).To(BeNil())

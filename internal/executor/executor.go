@@ -36,9 +36,6 @@ const (
 	sqlstateInsufficient  = "42501"
 )
 
-// ErrNoSlot is wrapped in the error of a run that got no pool slot within its interval.
-var ErrNoSlot = errors.New("no connection slot")
-
 // Result is the outcome of one Run.
 type Result struct {
 	Job     planner.Job
@@ -72,7 +69,7 @@ func New(pool *pg.Pool, limits settings.Limits, server func() *semver.Version, c
 // SQLSTATE 42501 is denied; a closed pool, which a pool swap leaves behind, and a wait that got no slot
 // within the interval are skipped.
 func Classify(err error) selfmetrics.Outcome {
-	if errors.Is(err, pg.ErrPoolClosed) || errors.Is(err, ErrNoSlot) {
+	if errors.Is(err, pg.ErrPoolClosed) || errors.Is(err, pg.ErrNoSlot) {
 		return selfmetrics.OutcomeSkipped
 	}
 	var pgErr *pgconn.PgError
@@ -120,16 +117,11 @@ func RunTimeout(l settings.Limits) time.Duration { return l.QueryTimeout + deadl
 // run waits for a pool slot for at most the job's interval, then runs the job under a deadline that starts at the slot.
 // pastDeadline reports that this deadline had passed when run returned.
 func (e *Executor) run(ctx context.Context, job planner.Job, res *Result) (pastDeadline bool, err error) {
-	acquireCtx, stopWait := ctx, context.CancelFunc(func() {})
-	if job.Interval > 0 {
-		acquireCtx, stopWait = context.WithTimeout(ctx, job.Interval)
-	}
-	conn, release, err := e.pool.Acquire(acquireCtx, job.Database)
-	stopWait()
+	conn, release, err := e.pool.AcquireWithin(ctx, job.Database, job.Interval)
 	if err != nil {
-		if ctx.Err() == nil && errors.Is(err, pg.ErrSlotWait) && errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, pg.ErrNoSlot) {
 			return false, fmt.Errorf("query %s on database %s could not get a connection within its interval %s: %w",
-				job.Query, job.Database, job.Interval, ErrNoSlot)
+				job.Query, job.Database, job.Interval, pg.ErrNoSlot)
 		}
 		// A cancelled wait, the backoff after a failed connect and a closed pool lose no connection.
 		res.ConnectionLost = ctx.Err() == nil && !errors.Is(err, pg.ErrBackoff) && !errors.Is(err, pg.ErrPoolClosed)

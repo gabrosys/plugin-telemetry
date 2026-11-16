@@ -222,6 +222,23 @@ var _ = Describe("Pool", func() {
 		Expect(err).To(MatchError(context.DeadlineExceeded))
 	})
 
+	It("gives up after maxWait with ErrNoSlot while every slot is taken, and not when it has a slot", func(ctx SpecContext) {
+		newPool(1, time.Minute)
+		_, release, err := pool.Acquire(ctx, "app")
+		Expect(err).NotTo(HaveOccurred())
+
+		start := time.Now()
+		_, _, err = pool.AcquireWithin(ctx, "postgres", 200*time.Millisecond)
+		Expect(err).To(MatchError(pg.ErrNoSlot))
+		Expect(time.Since(start)).To(BeNumerically("<", 2*time.Second))
+
+		release(false)
+		conn, release2, err := pool.AcquireWithin(ctx, "postgres", 200*time.Millisecond)
+		Expect(err).NotTo(HaveOccurred())
+		release2(false)
+		Expect(conn).NotTo(BeNil())
+	})
+
 	It("CloseIdle closes connections idle past idleTimeout", func(ctx SpecContext) {
 		newPool(3, time.Minute)
 		old, release, err := pool.Acquire(ctx, "app")

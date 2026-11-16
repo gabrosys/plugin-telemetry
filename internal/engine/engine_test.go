@@ -266,7 +266,7 @@ var _ = Describe("A run that cannot get a connection", func() {
 		job := planner.Job{Query: "backends", Database: "app", Fingerprint: "f", Interval: 30 * time.Second}
 		noSlot := executor.Result{
 			Job: job, Outcome: selfmetrics.OutcomeSkipped,
-			Err: fmt.Errorf("query backends on database app could not get a connection within its interval 30s: %w", executor.ErrNoSlot),
+			Err: fmt.Errorf("query backends on database app could not get a connection within its interval 30s: %w", pg.ErrNoSlot),
 		}
 		ok := executor.Result{Job: job, Outcome: selfmetrics.OutcomeOK}
 

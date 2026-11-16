@@ -22,8 +22,8 @@ const (
 // ErrPoolClosed is returned by Acquire once the pool is closed.
 var ErrPoolClosed = errors.New("connection pool is closed")
 
-// ErrSlotWait is wrapped in the error of an Acquire whose context ended while it waited for a slot.
-var ErrSlotWait = errors.New("wait for a connection slot ended")
+// ErrNoSlot is returned by AcquireWithin when no slot came free within maxWait.
+var ErrNoSlot = errors.New("no connection slot")
 
 // Pool hands out connections to databases of one server, with at most maxConns open in total.
 type Pool struct {
@@ -106,16 +106,28 @@ func (p *Pool) Guard() string { return p.guard }
 // connection of another database, or waits. After a failed connect it returns ErrBackoff until
 // 1s, 2s, 4s ... up to the maximum backoff have passed for that database.
 func (p *Pool) Acquire(ctx context.Context, database string) (*pgx.Conn, func(broken bool), error) {
-	return p.acquire(ctx, database, true)
+	return p.acquire(ctx, database, true, 0)
+}
+
+// AcquireWithin is Acquire that waits at most maxWait for a slot (0 or less: no limit) and then returns
+// ErrNoSlot. maxWait does not bound the connect, which keeps ctx and the connect timeout.
+func (p *Pool) AcquireWithin(ctx context.Context, database string, maxWait time.Duration) (*pgx.Conn, func(broken bool), error) {
+	return p.acquire(ctx, database, true, maxWait)
 }
 
 // AcquireNow is Acquire without the backoff: it connects even while database waits before
 // reconnecting, and a successful connect ends that wait.
 func (p *Pool) AcquireNow(ctx context.Context, database string) (*pgx.Conn, func(broken bool), error) {
-	return p.acquire(ctx, database, false)
+	return p.acquire(ctx, database, false, 0)
 }
 
-func (p *Pool) acquire(ctx context.Context, database string, withBackoff bool) (*pgx.Conn, func(broken bool), error) {
+func (p *Pool) acquire(ctx context.Context, database string, withBackoff bool, maxWait time.Duration) (*pgx.Conn, func(broken bool), error) {
+	var giveUp <-chan time.Time // nil blocks forever: no limit
+	if maxWait > 0 {
+		timer := time.NewTimer(maxWait)
+		defer timer.Stop()
+		giveUp = timer.C
+	}
 	for {
 		p.mu.Lock()
 		if p.closed {
@@ -147,8 +159,10 @@ func (p *Pool) acquire(ctx context.Context, database string, withBackoff bool) (
 			select {
 			case <-wait:
 				continue
+			case <-giveUp:
+				return nil, nil, fmt.Errorf("wait for a connection slot: %w", ErrNoSlot)
 			case <-ctx.Done():
-				return nil, nil, fmt.Errorf("%w: %w", ErrSlotWait, ctx.Err())
+				return nil, nil, fmt.Errorf("wait for a connection slot: %w", ctx.Err())
 			}
 		}
 		p.mu.Unlock()

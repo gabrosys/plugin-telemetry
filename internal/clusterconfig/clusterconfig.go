@@ -54,8 +54,9 @@ func Build(in Inputs) (settings.Settings, []string, error) {
 	warnings := applyMetrics(&s, in.Cluster, spec.Metrics)
 	applyExporter(&s.Exporter, spec.Exporter)
 
-	env := otlpEnv{configMap: in.EnvConfigMap, secret: in.EnvSecret}
+	env := otlpEnv{configMap: in.EnvConfigMap}
 	if spec.EnvFrom != nil && spec.EnvFrom.Secret != nil {
+		env.secret = in.EnvSecret
 		env.secretName = spec.EnvFrom.Secret.Name
 	}
 	envWarnings, envErrs := env.apply(&s.Exporter, spec.Exporter)
@@ -234,7 +235,7 @@ func resourceAttributes(in Inputs, env otlpEnv) (map[string]string, []string) {
 	if v, ok := env.get(envResourceAttrs); ok {
 		parsed, err := ParseResourceAttributes(v.value)
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("%s: ignored, %v", envResourceAttrs, err))
+			warnings = append(warnings, fmt.Sprintf("%v; ignored", err))
 		}
 		maps.Copy(out, parsed)
 	}

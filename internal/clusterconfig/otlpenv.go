@@ -29,15 +29,14 @@ type otlpEnv struct {
 }
 
 type envValue struct {
-	value      string
-	key        string
-	fromSecret bool
+	value string
+	key   string
 }
 
 // get returns the value of one key: the Secret over the ConfigMap, an empty value being unset.
 func (o otlpEnv) get(key string) (envValue, bool) {
 	if v := strings.TrimSpace(o.secret[key]); v != "" {
-		return envValue{value: v, key: key, fromSecret: true}, true
+		return envValue{value: v, key: key}, true
 	}
 	if v := strings.TrimSpace(o.configMap[key]); v != "" {
 		return envValue{value: v, key: key}, true

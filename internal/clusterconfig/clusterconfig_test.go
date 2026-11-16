@@ -3,6 +3,7 @@ package clusterconfig_test
 import (
 	"errors"
 	"regexp"
+	"strings"
 	"time"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
@@ -256,7 +257,7 @@ var _ = Describe("Build", func() {
 		Expect(mustBuild(in).ResourceAttributes).To(BeEmpty())
 	})
 
-	It("lets fixed attributes win over resourceAttributes, and resourceAttributes over OTEL_RESOURCE_ATTRIBUTES", func() {
+	It("lets label attributes win over resourceAttributes, and resourceAttributes over OTEL_RESOURCE_ATTRIBUTES", func() {
 		in := withEnv(
 			map[string]string{"OTEL_RESOURCE_ATTRIBUTES": "env=cm,a=cm,cnpg.cluster.label.l=cm"},
 			map[string]string{"OTEL_RESOURCE_ATTRIBUTES": "env=secret,a=secret,s=1"},
@@ -274,7 +275,8 @@ var _ = Describe("Build", func() {
 		s, warnings, err := clusterconfig.Build(in)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(s.ResourceAttributes).To(BeEmpty())
-		Expect(warnings).To(ConsistOf(ContainSubstring("OTEL_RESOURCE_ATTRIBUTES")))
+		Expect(warnings).To(HaveLen(1))
+		Expect(strings.Count(warnings[0], "OTEL_RESOURCE_ATTRIBUTES")).To(Equal(1))
 		Expect(warnings[0]).NotTo(ContainSubstring("secret-value-xyz"))
 	})
 

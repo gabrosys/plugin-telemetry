@@ -54,6 +54,17 @@ func CollectorReady(ctx context.Context, c client.Client) error {
 	return nil
 }
 
+// ScaleCollector sets the replicas of the collector Deployment.
+func ScaleCollector(ctx context.Context, c client.Client, replicas int32) error {
+	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: collectorNamespace, Name: collectorName}}
+	patch := client.RawPatch(types.MergePatchType, []byte(fmt.Sprintf(`{"spec":{"replicas":%d}}`, replicas)))
+	if err := c.Patch(ctx, deploy, patch); err != nil {
+		return fmt.Errorf("scale deployment %s/%s to %d: %w", collectorNamespace, collectorName, replicas, err)
+	}
+
+	return nil
+}
+
 // CollectorReader reads the file the collector's file exporter writes. Rotation is off and the exporter appends,
 // so each Pod has one file that only grows and every line is read once.
 type CollectorReader struct {

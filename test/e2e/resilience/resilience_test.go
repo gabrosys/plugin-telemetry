@@ -24,6 +24,7 @@ var _ = Describe("resilience", Ordered, ContinueOnFailure, func() {
 		Expect(framework.MatchesCNPGVersion(img, s.env.CNPGVersion)).To(BeTrue(), img)
 	}, SpecTimeout(time.Minute))
 
+	collectorSpecs(s)
 	sidecarSpecs(s)
 	restartSpecs(s)
 	renewalSpecs(s)

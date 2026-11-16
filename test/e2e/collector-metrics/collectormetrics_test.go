@@ -54,7 +54,10 @@ const (
 	statePoll      = 2 * time.Second
 	freshPoll      = 500 * time.Millisecond
 
-	fencedFrozen         = "fenced-frozen"
+	fencedFrozen = "fenced-frozen"
+	// primaryOnlyOnStandby: CNPG sets sync_replicas{observed} and the backup timestamps only on a primary
+	// (v1.30.1 pkg/management/postgres/webserver/metricserver/pg_collector.go:445-457) and
+	// manual_switchover_required only on the current primary (internal/management/controller/instance_controller.go:1012-1018).
 	primaryOnlyOnStandby = "primary-only-on-standby"
 )
 

@@ -36,9 +36,11 @@ const (
 	ruleBracket       = "bracket"
 	ruleSelfMeasuring = "self-measuring"
 	ruleQueryCache    = "cnpg-query-cache"
-	ruleWALRegex      = "v1.30.1-wal-regex"
-	ruleCNPGOnly      = "cnpg-only"
-	ruleOursOnly      = "ours-only"
+	// ruleWALRegex: v1.30.1 counts WAL files with ^[0-9A-F]{24}, without $, so .partial and .backup files
+	// count too (pkg/management/postgres/webserver/metricserver/wal.go:147); main anchors it.
+	ruleWALRegex = "v1.30.1-wal-regex"
+	ruleCNPGOnly = "cnpg-only"
+	ruleOursOnly = "ours-only"
 )
 
 // selfMeasuring are CNPG's metrics that measure its collector (pg_collector.go:112-141 at v1.30.1).

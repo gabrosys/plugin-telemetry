@@ -3,7 +3,6 @@ package scheduler
 
 import (
 	"context"
-	"errors"
 	"math/rand/v2"
 	"sync"
 	"time"
@@ -21,9 +20,6 @@ const (
 	// MaxJitter caps the random delay added to each interval.
 	MaxJitter = time.Second
 )
-
-// ErrAlreadyRunning is returned by Run when it has been called before.
-var ErrAlreadyRunning = errors.New("scheduler already running")
 
 // RunFunc runs one job. ctx is derived from the context passed to Run.
 type RunFunc func(ctx context.Context, job planner.Job)
@@ -116,10 +112,6 @@ func (s *Scheduler) Update(p planner.Plan) {
 // It returns after every running job has returned.
 func (s *Scheduler) Run(ctx context.Context) error {
 	s.mu.Lock()
-	if s.started {
-		s.mu.Unlock()
-		return ErrAlreadyRunning
-	}
 	s.started = true
 	s.ctx = ctx
 	dbs := map[string]struct{}{}

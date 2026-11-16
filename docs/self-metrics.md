@@ -8,7 +8,7 @@ Metrics the engine reports about itself.
 |---|---|---|---|---|
 | `cnpg_otel_query_runs_total` | counter | `{run}` | `query`, `database`, `outcome` | Query runs by outcome (ok, error, timeout, skipped, capped, denied). |
 | `cnpg_otel_query_last_duration_seconds` | gauge | `s` | `query`, `database` | Duration of the last run of a query. |
-| `cnpg_otel_query_last_success_timestamp_seconds` | gauge | `s` | `query`, `database` | Unix time of the last run of a query that returned rows (outcome ok). |
+| `cnpg_otel_query_last_success_timestamp_seconds` | gauge | `s` | `query`, `database` | Unix time of the last run of a query with outcome ok, zero rows included. |
 | `cnpg_otel_query_interval_seconds` | gauge | `s` | `query` | Effective run interval of a query. |
 | `cnpg_otel_query_capped_series` | gauge | `{series}` | `query`, `database` | Series a capped query would have produced in its last run. |
 | `cnpg_otel_query_dropped_series_total` | counter | `{series}` | `query`, `database`, `reason` | Series dropped from a query, by reason. |

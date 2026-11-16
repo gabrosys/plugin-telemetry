@@ -53,7 +53,7 @@ func Samples(c *apiv1.Cluster, pod, cluster string, f *Facts) []queries.Sample {
 		if c := cmp.Compare(a.Metric, b.Metric); c != 0 {
 			return c
 		}
-		return slices.CompareFunc(a.Labels, b.Labels, compareLabels)
+		return slices.CompareFunc(a.Labels, b.Labels, queries.CompareLabels)
 	})
 	return out
 }
@@ -125,13 +125,6 @@ func boolValue(b bool) float64 {
 		return 1
 	}
 	return 0
-}
-
-func compareLabels(x, y queries.Label) int {
-	if c := cmp.Compare(x.Key, y.Key); c != 0 {
-		return c
-	}
-	return cmp.Compare(x.Value, y.Value)
 }
 
 // isReplica ports Cluster.IsReplica (api/v1/cluster_funcs.go:1087-1112 at v1.30.1).

@@ -1,11 +1,11 @@
 package planner
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"math"
 	"path"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -25,9 +25,6 @@ const (
 	ReasonMaxDatabases     = "maxDatabases"
 	ReasonNoDatabase       = "no matching database"
 )
-
-// isGlob is CloudNativePG's isPathPattern (pkg/management/postgres/metrics/collector.go:78 at v1.30.1).
-var isGlob = regexp.MustCompile(`[][*?]`)
 
 // Job is one query to run on one database.
 type Job struct {
@@ -55,19 +52,12 @@ func Build(defs []queries.Definition, s settings.Settings, f Facts) Plan {
 		planQuery(&p, &defs[i], s, f)
 	}
 	slices.SortFunc(p.Jobs, func(a, b Job) int {
-		return cmpPair(a.Database, a.Query, b.Database, b.Query)
+		return cmp.Or(strings.Compare(a.Database, b.Database), strings.Compare(a.Query, b.Query))
 	})
 	slices.SortFunc(p.Skips, func(a, b Skip) int {
-		return cmpPair(a.Database, a.Query, b.Database, b.Query)
+		return cmp.Or(strings.Compare(a.Database, b.Database), strings.Compare(a.Query, b.Query))
 	})
 	return p
-}
-
-func cmpPair(a1, a2, b1, b2 string) int {
-	if c := strings.Compare(a1, b1); c != 0 {
-		return c
-	}
-	return strings.Compare(a2, b2)
 }
 
 func planQuery(p *Plan, d *queries.Definition, s settings.Settings, f Facts) {
@@ -88,11 +78,11 @@ func planQuery(p *Plan, d *queries.Definition, s settings.Settings, f Facts) {
 		return
 	}
 
-	if AllMetricsExcluded(d, s) {
+	def, excluded, values := applyMetricExclusions(d, s)
+	if values > 0 && len(excluded) == values {
 		skip("", ReasonAllMetrics)
 		return
 	}
-	def, excluded := applyMetricExclusions(d, s)
 
 	targets := expandTargets(d.TargetDatabases, s.Postgres.Database, f.Databases)
 	if len(targets) == 0 {
@@ -120,20 +110,6 @@ func planQuery(p *Plan, d *queries.Definition, s settings.Settings, f Facts) {
 	}
 }
 
-// AllMetricsExcluded reports whether d has value columns and the settings exclude the metrics of all of them.
-func AllMetricsExcluded(d *queries.Definition, s settings.Settings) bool {
-	values, excluded := 0, 0
-	for _, c := range d.Columns {
-		if c.Role == queries.RoleValue && c.Metric != "" {
-			values++
-			if s.ExcludedMetric(c.Metric) {
-				excluded++
-			}
-		}
-	}
-	return values > 0 && values == excluded
-}
-
 // EffectiveInterval returns the group of d and its interval: the group's or the default interval,
 // raised to cache_seconds.
 func EffectiveInterval(d *queries.Definition, s settings.Settings) (group string, interval time.Duration) {
@@ -141,20 +117,23 @@ func EffectiveInterval(d *queries.Definition, s settings.Settings) (group string
 	return group, max(interval, cacheInterval(d.CacheSeconds))
 }
 
-// applyMetricExclusions returns a copy of d whose excluded value columns are discarded and the sorted
-// names of those metrics.
-func applyMetricExclusions(d *queries.Definition, s settings.Settings) (def *queries.Definition, excluded []string) {
+// applyMetricExclusions returns a copy of d whose excluded value columns are discarded, the sorted
+// names of those metrics, and the number of d's value columns.
+func applyMetricExclusions(d *queries.Definition, s settings.Settings) (def *queries.Definition, excluded []string, values int) {
 	cp := *d
 	cp.Columns = make(map[string]queries.Column, len(d.Columns))
 	for name, c := range d.Columns {
-		if c.Role == queries.RoleValue && c.Metric != "" && s.ExcludedMetric(c.Metric) {
-			c.Role = queries.RoleDiscard
-			excluded = append(excluded, c.Metric)
+		if c.Role == queries.RoleValue && c.Metric != "" {
+			values++
+			if s.ExcludedMetric(c.Metric) {
+				c.Role = queries.RoleDiscard
+				excluded = append(excluded, c.Metric)
+			}
 		}
 		cp.Columns[name] = c
 	}
 	slices.Sort(excluded)
-	return &cp, excluded
+	return &cp, excluded, values
 }
 
 func fingerprintOf(base string, excluded []string) string {
@@ -182,7 +161,7 @@ func expandTargets(targets []string, defaultDB string, databases []string) []str
 	}
 	set := map[string]struct{}{}
 	for _, t := range targets {
-		if !isGlob.MatchString(t) {
+		if !queries.IsGlob(t) {
 			set[t] = struct{}{}
 			continue
 		}

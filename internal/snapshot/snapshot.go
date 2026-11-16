@@ -2,10 +2,10 @@
 package snapshot
 
 import (
+	"cmp"
 	"errors"
 	"math"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -187,12 +187,8 @@ func (s *Store) Points() (points []Point, duplicates map[Key]int) {
 	for k := range s.entries {
 		keys = append(keys, k)
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].Query != keys[j].Query {
-			return keys[i].Query < keys[j].Query
-		}
-
-		return keys[i].Database < keys[j].Database
+	slices.SortFunc(keys, func(a, b Key) int {
+		return cmp.Or(strings.Compare(a.Query, b.Query), strings.Compare(a.Database, b.Database))
 	})
 
 	duplicates = make(map[Key]int)
@@ -218,25 +214,11 @@ func (s *Store) Points() (points []Point, duplicates map[Key]int) {
 		}
 	}
 
-	sort.SliceStable(points, func(i, j int) bool {
-		if points[i].Metric != points[j].Metric {
-			return points[i].Metric < points[j].Metric
-		}
-
-		return compareLabels(points[i].Labels, points[j].Labels) < 0
+	slices.SortStableFunc(points, func(a, b Point) int {
+		return cmp.Or(strings.Compare(a.Metric, b.Metric), slices.CompareFunc(a.Labels, b.Labels, queries.CompareLabels))
 	})
 
 	return points, duplicates
-}
-
-func compareLabels(a, b []queries.Label) int {
-	return slices.CompareFunc(a, b, func(x, y queries.Label) int {
-		if c := strings.Compare(x.Key, y.Key); c != 0 {
-			return c
-		}
-
-		return strings.Compare(x.Value, y.Value)
-	})
 }
 
 // seriesID joins the metric and labels with NUL and SOH separators.

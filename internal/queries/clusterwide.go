@@ -1,6 +1,7 @@
 package queries
 
 import (
+	"cmp"
 	"regexp"
 	"sort"
 	"strings"
@@ -63,13 +64,22 @@ func isClusterWide(name string) bool {
 	return strings.HasPrefix(name, progressPrefix) && len(name) > len(progressPrefix)
 }
 
+// IsGlob reports whether a target_databases entry is a pattern; it is CloudNativePG's isPathPattern
+// (pkg/management/postgres/metrics/collector.go:78 at v1.30.1).
+func IsGlob(target string) bool { return globChars.MatchString(target) }
+
+// CompareLabels orders labels by key, then value.
+func CompareLabels(x, y Label) int {
+	return cmp.Or(strings.Compare(x.Key, y.Key), strings.Compare(x.Value, y.Value))
+}
+
 // selectsSeveralDatabases reports whether target_databases names a glob or two or more entries.
 func selectsSeveralDatabases(targets []string) bool {
 	if len(targets) >= 2 {
 		return true
 	}
 	for _, target := range targets {
-		if globChars.MatchString(target) {
+		if IsGlob(target) {
 			return true
 		}
 	}

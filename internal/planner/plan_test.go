@@ -267,19 +267,23 @@ var _ = Describe("EffectiveInterval", func() {
 	})
 })
 
-var _ = Describe("AllMetricsExcluded", func() {
-	It("is true only when every value metric is excluded", func() {
+var _ = Describe("Build with excluded metrics", func() {
+	skips := func(d queries.Definition, s settings.Settings) []planner.Skip {
+		return planner.Build([]queries.Definition{d}, s, facts("app")).Skips
+	}
+
+	It("skips a query only when every value metric is excluded", func() {
 		d := def("probe")
 		s := baseSettings()
-		Expect(planner.AllMetricsExcluded(&d, s)).To(BeFalse())
+		Expect(skips(d, s)).To(BeEmpty())
 		s.Exclude.Metrics = []string{"cnpg_probe_value"}
-		Expect(planner.AllMetricsExcluded(&d, s)).To(BeTrue())
+		Expect(skips(d, s)).To(Equal([]planner.Skip{{Query: "probe", Reason: planner.ReasonAllMetrics}}))
 	})
 
-	It("is false for a query without value columns", func() {
+	It("does not skip a query without value columns", func() {
 		d := def("labels", func(d *queries.Definition) { delete(d.Columns, "value") })
 		s := baseSettings()
 		s.Exclude.Metrics = []string{"*"}
-		Expect(planner.AllMetricsExcluded(&d, s)).To(BeFalse())
+		Expect(skips(d, s)).To(BeEmpty())
 	})
 })

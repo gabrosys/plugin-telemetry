@@ -181,9 +181,25 @@ func partialSuccess(r Response) *colmetricpb.ExportMetricsServiceResponse {
 }
 
 // NewHTTP starts an OTLP/HTTP receiver on 127.0.0.1, with TLS when tlsCfg is not nil.
+// It panics when the listener cannot start, like httptest.
 func NewHTTP(tlsCfg *tls.Config) *Server {
+	s, err := NewHTTPAt("127.0.0.1:0", tlsCfg)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+// NewHTTPAt starts an OTLP/HTTP receiver on addr, with TLS when tlsCfg is not nil.
+func NewHTTPAt(addr string, tlsCfg *tls.Config) (*Server, error) {
+	var lc net.ListenConfig
+	lis, err := lc.Listen(context.Background(), "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen: %w", err)
+	}
 	s := newServer()
 	hs := httptest.NewUnstartedServer(http.HandlerFunc(s.serveHTTP))
+	hs.Listener = lis
 	if tlsCfg != nil {
 		hs.TLS = tlsCfg
 		hs.StartTLS()
@@ -192,7 +208,7 @@ func NewHTTP(tlsCfg *tls.Config) *Server {
 	}
 	s.URL = hs.URL
 	s.stop = hs.Close
-	return s
+	return s, nil
 }
 
 func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
@@ -274,8 +290,13 @@ type metricsService struct {
 
 // NewGRPC starts an OTLP/gRPC receiver on 127.0.0.1, with TLS when tlsCfg is not nil.
 func NewGRPC(tlsCfg *tls.Config) (*Server, error) {
+	return NewGRPCAt("127.0.0.1:0", tlsCfg)
+}
+
+// NewGRPCAt starts an OTLP/gRPC receiver on addr, with TLS when tlsCfg is not nil.
+func NewGRPCAt(addr string, tlsCfg *tls.Config) (*Server, error) {
 	var lc net.ListenConfig
-	lis, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	lis, err := lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("listen: %w", err)
 	}

@@ -16,6 +16,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/encoding/gzip"
@@ -152,6 +153,19 @@ func (e *Exporter) initHTTP(ctx context.Context, m material) error {
 	return nil
 }
 
+// connectParams are grpc-go's defaults with the reconnect delay capped at half an interval.
+func (e *Exporter) connectParams() grpc.ConnectParams {
+	return grpc.ConnectParams{
+		Backoff: backoff.Config{
+			BaseDelay:  time.Second,
+			Multiplier: 1.6,
+			Jitter:     0.2,
+			MaxDelay:   min(e.s.Interval/2, 120*time.Second),
+		},
+		MinConnectTimeout: e.s.Timeout,
+	}
+}
+
 func (e *Exporter) initGRPC(ctx context.Context, m material) error {
 	creds := insecure.NewCredentials()
 	if e.secure {
@@ -161,6 +175,7 @@ func (e *Exporter) initGRPC(ctx context.Context, m material) error {
 		grpc.WithTransportCredentials(creds),
 		grpc.WithNoProxy(),
 		grpc.WithDisableServiceConfig(),
+		grpc.WithConnectParams(e.connectParams()),
 		grpc.WithUnaryInterceptor(boundAttempt(e.s.Timeout)),
 		grpc.WithUserAgent("OTel Go OTLP over gRPC metrics exporter/" + otlpmetricgrpc.Version()),
 	}

@@ -24,6 +24,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/export"
 	"github.com/gabrosys/plugin-telemetry/internal/export/otlptest"
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
+	"github.com/gabrosys/plugin-telemetry/internal/planner"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
 	"github.com/gabrosys/plugin-telemetry/test/pgtest"
 )
@@ -91,6 +92,7 @@ type fixture struct {
 	valid         string // a valid configuration for the receiver
 	srv           *otlptest.Server
 	done          chan error
+	gather        func(context.Context, settings.Settings) (planner.Facts, error) // nil reads the facts from PostgreSQL
 }
 
 func newFixture(planInterval time.Duration) *fixture {
@@ -136,12 +138,12 @@ func (f *fixture) runConfig(cfg engine.Config) {
 	ctx, cancel := context.WithCancel(ctrllog.IntoContext(context.Background(), GinkgoLogr))
 	f.done = make(chan error, 1)
 	go func() {
-		f.done <- engine.Run(ctx, engine.Options{
+		f.done <- engine.RunWith(ctx, engine.Options{
 			Config: cfg,
 			Clock:  clock.RealClock{},
 			Rand:   rand.New(rand.NewPCG(1, 2)), //nolint:gosec // seeded jitter for the test
 			Getenv: func(string) string { return "" },
-		})
+		}, f.gather)
 	}()
 	DeferCleanup(func() {
 		cancel()
@@ -635,5 +637,64 @@ var _ = Describe("Run when a counter's query fails", func() {
 		for _, p := range points(f.srv, "cnpg_start_probe_n", time.Time{}) {
 			Expect(p.start).To(Equal(start), "value %v", p.value)
 		}
+	}, SpecTimeout(2*time.Minute))
+})
+
+// primaryOnlyProbe is a query that runs on a primary only.
+const primaryOnlyProbe = `primary_probe:
+  primary: true
+  query: SELECT 7 AS value
+  metrics:
+    - value:
+        usage: GAUGE
+        description: A probe that runs on a primary only.
+`
+
+// realFacts reads the facts from PostgreSQL the way the engine does, on a connection of its own.
+func realFacts(ctx context.Context, dir string) (planner.Facts, error) {
+	cc, err := pg.ConnConfig(server.MonitorConfig(dir), "postgres")
+	if err != nil {
+		return planner.Facts{}, fmt.Errorf("connection config: %w", err)
+	}
+	conn, err := pgx.ConnectConfig(ctx, cc)
+	if err != nil {
+		return planner.Facts{}, fmt.Errorf("connect: %w", err)
+	}
+	facts, err := planner.GatherFacts(ctx, conn)
+	if cerr := conn.Close(context.WithoutCancel(ctx)); cerr != nil {
+		err = errors.Join(err, fmt.Errorf("close: %w", cerr))
+	}
+	return facts, err
+}
+
+var _ = Describe("Run when the server's role changes", func() {
+	It("drops a primary-only query at the first facts round that reports recovery, and plans it again after promotion", func(_ SpecContext) {
+		var inRecovery atomic.Bool
+		dir := GinkgoT().TempDir()
+		f := newFixture(time.Second)
+		f.gather = func(ctx context.Context, _ settings.Settings) (planner.Facts, error) {
+			facts, err := realFacts(ctx, dir)
+			facts.InRecovery = inRecovery.Load()
+			return facts, err
+		}
+		writeFile(f.extra, primaryOnlyProbe)
+		writeFile(f.config, f.valid)
+		f.run()
+		Eventually(func() []point { return points(f.srv, "cnpg_primary_probe_value", time.Time{}) }).
+			WithTimeout(20 * time.Second).WithPolling(100 * time.Millisecond).ShouldNot(BeEmpty())
+
+		inRecovery.Store(true)
+		var dropped time.Time
+		Eventually(func() []point {
+			dropped = time.Now()
+			return points(f.srv, "cnpg_primary_probe_value", dropped.Add(-2*exportInterval))
+		}).WithTimeout(2 * (time.Second + exportInterval + slack)).WithPolling(100 * time.Millisecond).Should(BeEmpty())
+		Consistently(func() []point { return points(f.srv, "cnpg_primary_probe_value", dropped) }).
+			WithTimeout(3 * exportInterval).WithPolling(100 * time.Millisecond).Should(BeEmpty())
+
+		inRecovery.Store(false)
+		since := time.Now()
+		Eventually(func() []point { return points(f.srv, "cnpg_primary_probe_value", since) }).
+			WithTimeout(time.Second + queryInterval + exportInterval + 2*slack).WithPolling(100 * time.Millisecond).ShouldNot(BeEmpty())
 	}, SpecTimeout(2*time.Minute))
 })

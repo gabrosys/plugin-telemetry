@@ -36,8 +36,10 @@ type fixedProducer struct {
 	n   int
 	err error
 
-	panics int // the next Produce calls that panic
-	size   int // bytes of each of the 8 labels of a point; 0 gives one small label
+	panics   int  // the next Produce calls that panic
+	numbered bool // one point whose value is the number of the call
+	calls    int
+	size     int // bytes of each of the 8 labels of a point; 0 gives one small label
 }
 
 func (p *fixedProducer) Produce(context.Context) ([]metricdata.ScopeMetrics, error) {
@@ -46,6 +48,14 @@ func (p *fixedProducer) Produce(context.Context) ([]metricdata.ScopeMetrics, err
 	if p.panics > 0 {
 		p.panics--
 		panic("producer broke")
+	}
+	p.calls++
+	if p.numbered {
+		rm := batch(1, 1)
+		rm.ScopeMetrics[0].Metrics[0].Data = metricdata.Gauge[float64]{DataPoints: []metricdata.DataPoint[float64]{{
+			Attributes: attribute.NewSet(attribute.String("k", "v")), Time: time.Unix(1, 0), Value: float64(p.calls),
+		}}}
+		return rm.ScopeMetrics, p.err
 	}
 	if p.size > 0 {
 		return wide(p.n, 8, p.size).ScopeMetrics, p.err
@@ -619,6 +629,43 @@ var _ = Describe("Loop", func() {
 
 		h.stop()
 		Expect(e.Export(ctx, batch(1, 1))).To(MatchError(export.ErrExporterShutdown))
+	})
+
+	It("sends only the latest collection after an outage, holding nothing back", func() {
+		srv := newHTTPServer(nil)
+		srv.Respond(otlptest.Response{HTTPStatus: http.StatusServiceUnavailable})
+		s := exporterSettings(settings.ProtocolHTTP, srv.URL+"/v1/metrics")
+		s.Interval, s.Timeout = time.Second, 400*time.Millisecond
+		h := newLoopHarness(1)
+		h.prod.numbered = true
+		h.loop.SetExporter(context.Background(), newExporter(s), time.Second, 1000)
+		h.start()
+
+		for i := 0; i < 100 && h.exports("error") < 20; i++ {
+			h.step(time.Second)
+		}
+		Expect(h.exports("error")).To(Equal(20.0))
+		srv.Respond(otlptest.Response{})
+		for i := 0; i < 100 && h.exports("ok") == 0; i++ {
+			h.step(time.Second)
+		}
+
+		reqs := srv.Requests()
+		Expect(h.exports("ok")).To(Equal(1.0))
+		var values []float64
+		for _, rm := range reqs[len(reqs)-1].Metrics.GetResourceMetrics() {
+			for _, sm := range rm.GetScopeMetrics() {
+				for _, m := range sm.GetMetrics() {
+					if m.GetName() != "g" {
+						continue
+					}
+					for _, dp := range m.GetGauge().GetDataPoints() {
+						values = append(values, dp.GetAsDouble())
+					}
+				}
+			}
+		}
+		Expect(values).To(Equal([]float64{21}))
 	})
 
 	Context("with a request cap of 16 KiB", func() {

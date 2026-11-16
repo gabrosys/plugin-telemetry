@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -547,5 +548,67 @@ var _ = Describe("Exporter", func() {
 		Entry("a partial success wrapped as the SDK wraps it (otlpmetrichttp v1.47.0 exporter.go:81)",
 			fmt.Errorf("failed to upload metrics: %w", errors.New("OTLP partial success: m (7) x (7 metric data points rejected)")),
 			"rejected", 7),
+	)
+
+	DescribeTable("resumes within two export intervals after five failed connection attempts",
+		func(ctx SpecContext, protocol string) {
+			var lc net.ListenConfig
+			lis, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
+			Expect(err).NotTo(HaveOccurred())
+			addr := lis.Addr().String()
+			endpoint := "http://" + addr
+			if protocol == settings.ProtocolHTTP {
+				endpoint += "/v1/metrics"
+			}
+			s := exporterSettings(protocol, endpoint)
+			s.Interval, s.Timeout = time.Second, 400*time.Millisecond
+			e := newExporter(s)
+
+			refused := make(chan struct{})
+			go func() {
+				defer close(refused)
+				for range 5 {
+					conn, err := lis.Accept()
+					if err != nil {
+						return
+					}
+					if err := conn.Close(); err != nil {
+						return
+					}
+				}
+			}()
+			DeferCleanup(func() {
+				if err := lis.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+					Fail("close listener: " + err.Error())
+				}
+			})
+			Eventually(func() bool {
+				if err := e.Export(ctx, batch(1, 1)); err == nil {
+					return false
+				}
+				select {
+				case <-refused:
+					return true
+				default:
+					return false
+				}
+			}).WithTimeout(30 * time.Second).WithPolling(10 * time.Millisecond).Should(BeTrue())
+			Expect(lis.Close()).To(Succeed())
+
+			var srv *otlptest.Server
+			if protocol == settings.ProtocolGRPC {
+				srv, err = otlptest.NewGRPCAt(addr, nil)
+			} else {
+				srv, err = otlptest.NewHTTPAt(addr, nil)
+			}
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(srv.Close)
+
+			Eventually(func() error { return e.Export(ctx, batch(1, 1)) }).
+				WithTimeout(2 * time.Second).WithPolling(50 * time.Millisecond).Should(Succeed())
+			Expect(srv.Requests()).NotTo(BeEmpty())
+		},
+		Entry("http/protobuf", settings.ProtocolHTTP),
+		Entry("grpc", settings.ProtocolGRPC),
 	)
 })

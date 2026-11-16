@@ -140,6 +140,89 @@ var _ = Describe("Source", func() {
 		Expect(data).NotTo(BeEmpty())
 	})
 
+	DescribeTable("returns ErrNotReady, not ErrNoConfiguration, while an input has not synced",
+		func(clusterParams, exporterSpec map[string]any, feed func()) {
+			start()
+			fw.set("clusters", "pg", enabledCluster(clusterParams))
+			if exporterSpec != nil {
+				fw.set("telemetryexporters", "default", exporter(exporterSpec))
+			}
+			feed()
+			_, _, err := src.Settings()
+			Expect(err).To(MatchError(engine.ErrNotReady))
+			Expect(err).NotTo(MatchError(engine.ErrNoConfiguration))
+		},
+		Entry("the exporter", map[string]any{}, nil, func() {}),
+		Entry("the envFrom ConfigMap", map[string]any{}, map[string]any{
+			"exporter": map[string]any{"endpoint": "http://c:4318"},
+			"envFrom":  map[string]any{"configMap": map[string]any{"name": "envcm"}},
+		}, func() {}),
+		Entry("the envFrom Secret", map[string]any{}, map[string]any{
+			"exporter": map[string]any{"endpoint": "http://c:4318"},
+			"envFrom":  map[string]any{"secret": map[string]any{"name": "envsecret"}},
+		}, func() {}),
+		Entry("the password Secret", map[string]any{"auth": "password", "passwordSecret": "pw"},
+			map[string]any{"exporter": map[string]any{"endpoint": "http://c:4318"}}, func() {}),
+		Entry("a denied exporter", map[string]any{}, map[string]any{"exporter": map[string]any{"endpoint": "http://c:4318"}}, func() {
+			fw.fail("telemetryexporters", "default", errors.Join(errors.New("forbidden"), sources.ErrDenied))
+		}),
+	)
+
+	It("returns ErrNotReady and ErrDenied for a Cluster denied before its first sync", func() {
+		start()
+		fw.fail("clusters", "pg", errors.Join(errors.New("forbidden"), sources.ErrDenied))
+		_, _, err := src.Settings()
+		Expect(err).To(MatchError(engine.ErrNotReady))
+		Expect(err).To(MatchError(sources.ErrDenied))
+		Expect(err).NotTo(MatchError(engine.ErrNoConfiguration))
+	})
+
+	It("keeps the last good references watched while an input is not ready", func() {
+		start()
+		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+		fw.set("telemetryexporters", "default", exporter(map[string]any{
+			"exporter": map[string]any{"endpoint": "http://c:4318", "headers": map[string]any{"name": "h1", "key": "h"}},
+		}))
+		fw.set("secrets", "h1", secret("h1", map[string]string{"h": "k=1"}))
+		_, _, err := src.Settings()
+		Expect(err).NotTo(HaveOccurred())
+
+		fw.set("telemetryexporters", "default", exporter(map[string]any{
+			"exporter": map[string]any{"endpoint": "http://c:4318", "headers": map[string]any{"name": "h1", "key": "h"}},
+			"envFrom":  map[string]any{"configMap": map[string]any{"name": "envcm"}},
+		}))
+		watching("clusters/pg", "telemetryexporters/default", "secrets/h1", "configmaps/envcm")
+		_, _, err = src.Settings()
+		Expect(err).To(MatchError(engine.ErrNotReady))
+		Consistently(fw.active, "100ms").Should(ContainElement("secrets/h1"))
+	})
+
+	It("logs each Build warning once while the settings bytes stay the same", func() {
+		start()
+		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+		spec := func(endpoint string) map[string]any {
+			return map[string]any{
+				"exporter":       map[string]any{"endpoint": endpoint},
+				"resourceLabels": []any{"cnpg.io/instanceRole"},
+			}
+		}
+		fw.set("telemetryexporters", "default", exporter(spec("http://c:4318")))
+		const warning = "spec.resourceLabels: cnpg.io/instanceRole is ignored"
+		for range 3 {
+			_, _, err := src.Settings()
+			Expect(err).NotTo(HaveOccurred())
+		}
+		Expect(strings.Count(logs.String(), warning)).To(Equal(1))
+		Expect(logs.String()).To(MatchRegexp(`(?i)warn.*` + warning))
+
+		fw.set("telemetryexporters", "default", exporter(spec("http://other:4318")))
+		for range 2 {
+			_, _, err := src.Settings()
+			Expect(err).NotTo(HaveOccurred())
+		}
+		Expect(strings.Count(logs.String(), warning)).To(Equal(2), "changed bytes log the warnings again")
+	})
+
 	It("starts watches for exactly References and stops those no longer referenced", func() {
 		start()
 		watching("clusters/pg")

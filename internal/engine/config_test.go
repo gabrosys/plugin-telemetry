@@ -44,6 +44,7 @@ type memConfig struct {
 	mu          sync.Mutex // guards every field below
 	doc         string
 	noConfig    string // when set, Settings fails with ErrNoConfiguration for this reason
+	notReady    string // when set, Settings fails with ErrNotReady for this reason
 	files       map[string]string
 	fileErrs    map[string]error
 	reads       map[string]int
@@ -72,6 +73,9 @@ func (c *memConfig) Settings() (settings.Settings, []byte, error) {
 	}
 	if c.noConfig != "" {
 		return settings.Settings{}, nil, fmt.Errorf("%w: %s", engine.ErrNoConfiguration, c.noConfig)
+	}
+	if c.notReady != "" {
+		return settings.Settings{}, nil, fmt.Errorf("%w: %s", engine.ErrNotReady, c.notReady)
 	}
 	s, err := settings.Parse([]byte(c.doc), "/mem")
 	return s, []byte(c.doc), err
@@ -616,6 +620,30 @@ var _ = Describe("An engine on an in-memory Config", func() {
 		h.advance(func() bool { return len(points(h.srv, "cnpg_otel_query_interval_seconds", since)) > 0 })
 		Expect(attrValues(points(h.srv, "cnpg_otel_config_info", since), "generation")).To(HaveEach("1"))
 		Expect(attrValues(points(h.srv, "cnpg_otel_query_interval_seconds", since), "query")).To(ContainElement("alpha"))
+	})
+
+	It("logs a not-ready reason once at info, keeps the configuration in force and counts no load", func() {
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) }, primary)
+		alpha := map[string]string{"query": "alpha"}
+		h.advance(h.has("cnpg_otel_query_interval_seconds", alpha, 30))
+		loads := map[string]string{"source": "mem"}
+		before, _ := h.lastValue("cnpg_otel_config_loads_total", loads)
+
+		for _, reason := range []string{"reason one", "reason one", "reason two", "reason two", "reason one"} {
+			h.cfg.set(func() { h.cfg.notReady = reason })
+			h.reload()
+		}
+		Expect(h.loggedAll("configuration not ready, waiting", "reason one")).To(Equal(2))
+		Expect(h.loggedAll("configuration not ready, waiting", "reason two")).To(Equal(1))
+		Expect(h.logged("invalid configuration")).To(BeZero())
+		Expect(h.logged("no configuration")).To(BeZero())
+
+		h.cfg.set(func() { h.cfg.notReady = "" })
+		h.reload()
+		h.advance(h.has("cnpg_otel_query_interval_seconds", alpha, 30))
+		after, _ := h.lastValue("cnpg_otel_config_loads_total", loads)
+		Expect(after).To(Equal(before), "a not-ready input counts no load, and the same settings load nothing")
+		Expect(h.logged(`"msg"="configuration applied"`)).To(Equal(1), "the configuration in force was kept")
 	})
 
 	It("idles on ErrNoConfiguration, logs its reason once per change and resumes", func() {

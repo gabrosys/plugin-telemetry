@@ -61,7 +61,8 @@ func newReplanner(cfg Config, stats *selfmetrics.Stats, store *snapshot.Store, e
 
 // reload reads the settings and digests them with the sources and the exporter files. When the
 // digest changed it loads the sources, defines the queries, applies, commits and replans; a change of
-// the exporter files alone rebuilds the exporter with no new generation. On error nothing in force changes.
+// the exporter files alone rebuilds the exporter with no new generation. On error nothing in force changes;
+// a not-ready input (ErrNotReady) also leaves the digest and the load counts alone.
 func (e *engine) reload(ctx context.Context) error {
 	r, read := e.plan, e.cfg.ReadFile
 	logger := log.FromContext(ctx)
@@ -77,6 +78,9 @@ func (e *engine) reload(ctx context.Context) error {
 			e.teardown()
 			r.idle(ctx)
 		}
+		return fmt.Errorf("load settings: %w", err)
+	}
+	if errors.Is(err, ErrNotReady) {
 		return fmt.Errorf("load settings: %w", err)
 	}
 	if err != nil {

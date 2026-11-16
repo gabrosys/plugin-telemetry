@@ -14,12 +14,17 @@ import (
 // ErrNoConfiguration is what Config.Settings wraps when there is nothing to run.
 var ErrNoConfiguration = errors.New("no configuration")
 
+// ErrNotReady is what Config.Settings wraps when an input has not synced or is denied: the engine
+// keeps the configuration in force, counts no load and waits.
+var ErrNotReady = errors.New("configuration not ready")
+
 // Config is where the engine reads its settings and the files they name.
 type Config interface {
 	// Name labels the settings in logs and in the source attribute: the file path, or "kubernetes".
 	Name() string
 	// Settings reads and validates the settings; the bytes identify what they came from and enter
-	// the reload digest. An error wrapping ErrNoConfiguration means there is nothing to run.
+	// the reload digest. An error wrapping ErrNoConfiguration means there is nothing to run;
+	// one wrapping ErrNotReady means an input is not available yet.
 	Settings() (settings.Settings, []byte, error)
 	// ReadFile reads a file the settings name: fs.ErrNotExist when missing, sources.ErrDenied on a 403.
 	ReadFile(name string) ([]byte, error)

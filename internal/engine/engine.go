@@ -148,7 +148,7 @@ type engine struct {
 	lastFacts     time.Time
 	factsFailures int    // consecutive failed facts rounds the timer drove
 	factsFailing  bool   // a failed facts round was logged and no round has succeeded since
-	idleReason    string // the ErrNoConfiguration reason last logged
+	idleReason    string // the ErrNoConfiguration or ErrNotReady reason last logged
 }
 
 func newEngine(ctx context.Context, o Options, gather func(context.Context, settings.Settings) (planner.Facts, error)) (*engine, error) {
@@ -379,6 +379,11 @@ func (e *engine) onChange(ctx context.Context) {
 		if reason := err.Error(); reason != e.idleReason {
 			e.idleReason = reason
 			logger.Info("no configuration, waiting for one", "config", e.cfg.Name(), "reason", reason)
+		}
+	case errors.Is(err, ErrNotReady):
+		if reason := err.Error(); reason != e.idleReason {
+			e.idleReason = reason
+			logger.Info("configuration not ready, waiting", "config", e.cfg.Name(), "reason", reason)
 		}
 	case e.plan.current == nil:
 		e.idleReason = ""

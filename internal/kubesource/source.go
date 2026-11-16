@@ -3,6 +3,7 @@
 package kubesource
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -57,11 +58,12 @@ type Source struct {
 	o      Options
 	replan chan struct{} // cap 1: a Cluster or exporter event, or new lastGood refs, asks run to reconcile
 
-	mu       sync.Mutex // covers every field below
-	entries  map[key]*entry
-	subs     map[chan struct{}]struct{} // the wake channel of each Watch call
-	lastGood clusterconfig.Refs         // the references of the last Settings that built
-	log      log.Logger
+	mu        sync.Mutex // covers every field below
+	entries   map[key]*entry
+	subs      map[chan struct{}]struct{} // the wake channel of each Watch call
+	lastGood  clusterconfig.Refs         // the references of the last Settings that built
+	log       log.Logger
+	warnedFor []byte // the settings bytes whose Build warnings were last logged
 }
 
 // New returns a Source.
@@ -534,6 +536,9 @@ func (s *Source) Settings() (settings.Settings, []byte, error) {
 	defer s.mu.Unlock()
 
 	in, err := s.inputsLocked()
+	if errors.Is(err, errNotSynced) || errors.Is(err, sources.ErrDenied) {
+		err = fmt.Errorf("%w: %w", engine.ErrNotReady, err)
+	}
 	if err != nil {
 		if errors.Is(err, engine.ErrNoConfiguration) && s.lastGood.Cluster != "" {
 			s.lastGood = clusterconfig.Refs{}
@@ -545,12 +550,15 @@ func (s *Source) Settings() (settings.Settings, []byte, error) {
 	if err != nil {
 		return settings.Settings{}, nil, fmt.Errorf("settings: %w", err)
 	}
-	for _, w := range warnings {
-		s.log.Info("settings warning", "warning", w)
-	}
 	data, err := json.Marshal(built)
 	if err != nil {
 		return settings.Settings{}, nil, fmt.Errorf("encode settings: %w", err)
+	}
+	if !bytes.Equal(data, s.warnedFor) {
+		s.warnedFor = data
+		for _, w := range warnings {
+			s.log.Warning("settings warning", "warning", w)
+		}
 	}
 	if refs := clusterconfig.References(in.Cluster, in.Params, in.Exporter); !reflect.DeepEqual(refs, s.lastGood) {
 		s.lastGood = refs

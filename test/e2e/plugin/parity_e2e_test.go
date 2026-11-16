@@ -34,6 +34,7 @@ const (
 	cnpgDefaultMonitoring = "cnpg-default-monitoring"
 	cnpgUpdated           = "cnpg_last_update_timestamp"
 	lastSuccess           = "cnpg_otel_query_last_success_timestamp_seconds"
+	queryInterval         = "cnpg_otel_query_interval_seconds"
 	parityPoll            = 500 * time.Millisecond
 	reportDir             = "../../../bin/e2e"
 )
@@ -101,19 +102,20 @@ func parityRound(
 	var (
 		lines  []otlp.Line
 		newest time.Time
+		window = 3*interval + cnpgQueriesTTL
 	)
 	Eventually(func(g Gomega, ctx SpecContext) {
 		all, err := t.reader.Since(ctx, beforeAt)
 		g.Expect(err).NotTo(HaveOccurred())
 		podLines := otlp.ForResource(otlp.ForResource(all, "service.namespace", t.ns), "k8s.pod.name", pod.Name)
 		var stale []string
-		lines, newest, stale = freshExport(podLines, beforeAt.Add(parity.Margin))
+		lines, newest, stale = freshExport(podLines, beforeAt.Add(parity.Margin), interval, beforeAt.Add(window))
 		g.Expect(lines).NotTo(BeEmpty(), "no export of %s newer than %s; the newest one's stale: %v", pod.Name, beforeAt, stale)
-	}).WithContext(ctx).WithTimeout(3*interval + cnpgQueriesTTL).WithPolling(parityPoll).Should(Succeed())
+	}).WithContext(ctx).WithTimeout(window).WithPolling(parityPoll).Should(Succeed())
 
 	// CNPG writes its update time in whole seconds, so the after scrape starts at a whole second Margin past ours;
 	// its cache is rerun on a scrape more than the TTL after the last update.
-	updated := unixTime(seriesValue(before, cnpgUpdated))
+	updated := parity.UnixSeconds(seriesValue(before, cnpgUpdated))
 	waitUntil(ctx, latest(newest.Add(parity.Margin).Truncate(time.Second).Add(time.Second), updated.Add(cnpgQueriesTTL+time.Second)))
 
 	text, afterAt, err := framework.ScrapeCNPG(ctx, t.cfg, pod)
@@ -124,14 +126,17 @@ func parityRound(
 	AddReportEntry("parity round", fmt.Sprintf(
 		"before scrape %s (cnpg_last_update_timestamp %s); our newest sample %s; after scrape %s (cnpg_last_update_timestamp %s)",
 		beforeAt.UTC().Format(time.RFC3339Nano), updated.UTC().Format(time.RFC3339), newest.UTC().Format(time.RFC3339Nano),
-		afterAt.UTC().Format(time.RFC3339Nano), unixTime(seriesValue(after, cnpgUpdated)).UTC().Format(time.RFC3339)))
+		afterAt.UTC().Format(time.RFC3339Nano), parity.UnixSeconds(seriesValue(after, cnpgUpdated)).UTC().Format(time.RFC3339)))
 
 	return parity.Bracket(before, after, parity.Ours(lines, pod.Name, index), o)
 }
 
-// freshExport returns podLines cut to the first export whose time and every last success are after after,
-// with the newest of those times. Without one it returns the newest export's samples at or before after.
-func freshExport(podLines []otlp.Line, after time.Time) ([]otlp.Line, time.Time, []string) {
+// freshExport returns podLines cut to the first export whose time is after after and whose last successes are
+// after after, with the newest of those times. Without one it returns no lines and stale, why the newest export
+// didn't qualify. A query that keeps failing or runs slower than the wait must not hold the spec up: a last
+// success at or before after holds an export back only while the query's next run can still land in it, that is
+// for one query interval plus one export interval past after, and only when that leaves an export before deadline.
+func freshExport(podLines []otlp.Line, after time.Time, exportInterval time.Duration, deadline time.Time) ([]otlp.Line, time.Time, []string) {
 	times := otlp.ExportTimes(podLines)
 	var stale []string
 	for i, at := range times {
@@ -140,12 +145,19 @@ func freshExport(podLines []otlp.Line, after time.Time) ([]otlp.Line, time.Time,
 		if !at.After(after) {
 			stale = append(stale, "the export at "+at.UTC().Format(time.RFC3339Nano))
 		}
-		for _, p := range otlp.Points(otlp.ExportAt(podLines, at), lastSuccess) {
-			success := unixTime(p.Value)
+		export := otlp.ExportAt(podLines, at)
+		intervals := map[string]time.Duration{}
+		for _, p := range otlp.Points(export, queryInterval) {
+			intervals[p.Attrs["query"]] = time.Duration(p.Value * float64(time.Second))
+		}
+		for _, p := range otlp.Points(export, lastSuccess) {
+			success := parity.UnixSeconds(p.Value)
 			newest = latest(newest, success)
-			if !success.After(after) {
-				stale = append(stale, fmt.Sprintf("%s on %s at %s", p.Attrs["query"], p.Attrs["database"], success.UTC().Format(time.RFC3339Nano)))
+			release := after.Add(intervals[p.Attrs["query"]] + exportInterval)
+			if success.After(after) || !at.Before(release) || release.Add(exportInterval).After(deadline) {
+				continue
 			}
+			stale = append(stale, fmt.Sprintf("%s on %s at %s", p.Attrs["query"], p.Attrs["database"], success.UTC().Format(time.RFC3339Nano)))
 		}
 		if len(stale) > 0 {
 			continue
@@ -223,8 +235,4 @@ func latest(a, b time.Time) time.Time {
 	}
 
 	return b
-}
-
-func unixTime(seconds float64) time.Time {
-	return time.Unix(0, int64(seconds*1e9))
 }

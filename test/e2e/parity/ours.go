@@ -74,11 +74,11 @@ func Ours(lines []otlp.Line, pod string, queryOf map[string][]string) []Series {
 func successAt(byDatabase map[string]float64, labels map[string]string) time.Time {
 	for _, key := range []string{"database", "datname"} {
 		if at, ok := byDatabase[labels[key]]; ok {
-			return unixSeconds(at)
+			return UnixSeconds(at)
 		}
 	}
 
-	return unixSeconds(slices.Min(slices.Collect(maps.Values(byDatabase))))
+	return UnixSeconds(slices.Min(slices.Collect(maps.Values(byDatabase))))
 }
 
 // QueryIndex maps each metric of the queries in sets to the keys of the queries that define it, sorted,

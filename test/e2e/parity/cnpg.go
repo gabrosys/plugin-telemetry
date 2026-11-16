@@ -39,7 +39,7 @@ func ParseCNPG(text []byte, at time.Time) ([]Series, error) {
 	if len(update) == 0 {
 		return nil, ErrNoUpdateTime
 	}
-	updated := unixSeconds(update[0].GetGauge().GetValue())
+	updated := UnixSeconds(update[0].GetGauge().GetValue())
 
 	var out []Series
 	for metric, mf := range families {
@@ -92,7 +92,8 @@ func seriesName(metric string, labels map[string]string) string {
 	return metric + "{" + strings.Join(parts, ",") + "}"
 }
 
-func unixSeconds(seconds float64) time.Time {
+// UnixSeconds converts Unix seconds, as CNPG and our timestamp gauges write them, to a time.
+func UnixSeconds(seconds float64) time.Time {
 	whole := math.Floor(seconds)
 	return time.Unix(int64(whole), int64((seconds-whole)*1e9))
 }

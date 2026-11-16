@@ -33,8 +33,6 @@ const (
 	// (api/v1/cluster_defaults.go:36-44 at v1.30.1).
 	cnpgDefaultMonitoring = "cnpg-default-monitoring"
 	cnpgUpdated           = "cnpg_last_update_timestamp"
-	lastSuccess           = "cnpg_otel_query_last_success_timestamp_seconds"
-	queryInterval         = "cnpg_otel_query_interval_seconds"
 	parityPoll            = 500 * time.Millisecond
 	reportDir             = "../../../bin/e2e"
 )
@@ -109,14 +107,17 @@ func parityRound(
 		g.Expect(err).NotTo(HaveOccurred())
 		podLines := otlp.ForResource(otlp.ForResource(all, "service.namespace", t.ns), "k8s.pod.name", pod.Name)
 		var stale []string
-		lines, newest, stale = freshExport(podLines, beforeAt.Add(parity.Margin), interval, beforeAt.Add(window))
+		lines, newest, stale = parity.FreshExport(podLines, parity.Wait{
+			After: beforeAt.Add(parity.Margin), ExportInterval: interval, Deadline: beforeAt.Add(window),
+		})
 		g.Expect(lines).NotTo(BeEmpty(), "no export of %s newer than %s; the newest one's stale: %v", pod.Name, beforeAt, stale)
 	}).WithContext(ctx).WithTimeout(window).WithPolling(parityPoll).Should(Succeed())
 
 	// CNPG writes its update time in whole seconds, so the after scrape starts at a whole second Margin past ours;
 	// its cache is rerun on a scrape more than the TTL after the last update.
 	updated := parity.UnixSeconds(seriesValue(before, cnpgUpdated))
-	waitUntil(ctx, latest(newest.Add(parity.Margin).Truncate(time.Second).Add(time.Second), updated.Add(cnpgQueriesTTL+time.Second)))
+	Expect(framework.WaitUntil(ctx, parity.Latest(
+		newest.Add(parity.Margin).Truncate(time.Second).Add(time.Second), updated.Add(cnpgQueriesTTL+time.Second)))).To(Succeed())
 
 	text, afterAt, err := framework.ScrapeCNPG(ctx, t.cfg, pod)
 	Expect(err).NotTo(HaveOccurred())
@@ -129,50 +130,6 @@ func parityRound(
 		afterAt.UTC().Format(time.RFC3339Nano), parity.UnixSeconds(seriesValue(after, cnpgUpdated)).UTC().Format(time.RFC3339)))
 
 	return parity.Bracket(before, after, parity.Ours(lines, pod.Name, index), o)
-}
-
-// freshExport returns podLines cut to the first export whose time is after after and whose last successes are
-// after after, with the newest of those times. Without one it returns no lines and stale, why the newest export
-// didn't qualify. A query that keeps failing or runs slower than the wait must not hold the spec up: a last
-// success at or before after holds an export back only while the query's next run can still land in it, that is
-// for one query interval plus one export interval past after, and only when that leaves an export before deadline.
-func freshExport(podLines []otlp.Line, after time.Time, exportInterval time.Duration, deadline time.Time) ([]otlp.Line, time.Time, []string) {
-	times := otlp.ExportTimes(podLines)
-	var stale []string
-	for i, at := range times {
-		stale = nil
-		newest := at
-		if !at.After(after) {
-			stale = append(stale, "the export at "+at.UTC().Format(time.RFC3339Nano))
-		}
-		export := otlp.ExportAt(podLines, at)
-		intervals := map[string]time.Duration{}
-		for _, p := range otlp.Points(export, queryInterval) {
-			intervals[p.Attrs["query"]] = time.Duration(p.Value * float64(time.Second))
-		}
-		for _, p := range otlp.Points(export, lastSuccess) {
-			success := parity.UnixSeconds(p.Value)
-			newest = latest(newest, success)
-			release := after.Add(intervals[p.Attrs["query"]] + exportInterval)
-			if success.After(after) || !at.Before(release) || release.Add(exportInterval).After(deadline) {
-				continue
-			}
-			stale = append(stale, fmt.Sprintf("%s on %s at %s", p.Attrs["query"], p.Attrs["database"], success.UTC().Format(time.RFC3339Nano)))
-		}
-		if len(stale) > 0 {
-			continue
-		}
-		var cut []otlp.Line
-		for _, l := range podLines {
-			if i+1 == len(times) || l.Time.Before(times[i+1]) {
-				cut = append(cut, l)
-			}
-		}
-
-		return cut, newest, nil
-	}
-
-	return nil, time.Time{}, stale
 }
 
 // parityIndex indexes the queries behind the metrics both sides export: the namespace's CNPG default
@@ -214,25 +171,4 @@ func seriesValue(series []parity.Series, name string) float64 {
 	Fail("no series " + name)
 
 	return 0
-}
-
-// waitUntil returns at t, or fails when ctx ends first.
-func waitUntil(ctx context.Context, t time.Time) {
-	GinkgoHelper()
-
-	timer := time.NewTimer(time.Until(t))
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-	case <-ctx.Done():
-		Fail(fmt.Sprintf("the spec ended before %s: %v", t, ctx.Err()))
-	}
-}
-
-func latest(a, b time.Time) time.Time {
-	if a.After(b) {
-		return a
-	}
-
-	return b
 }

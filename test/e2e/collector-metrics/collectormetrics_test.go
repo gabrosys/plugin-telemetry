@@ -47,7 +47,7 @@ const (
 	fencedAnnotation = "cnpg.io/fencedInstances"
 
 	builtinPrefix  = "cnpg_collector_"
-	lastSuccess    = "cnpg_otel_query_last_success_timestamp_seconds"
+	exportInterval = 5 * time.Second
 	reportDir      = "../../../bin/e2e"
 	clusterTimeout = 10 * time.Minute
 	freshTimeout   = 3 * time.Minute
@@ -133,69 +133,6 @@ func zero(side map[string]bool) []string {
 	slices.Sort(out)
 
 	return out
-}
-
-// freshExport returns podLines cut to the first export after after in which each of the named queries has a last
-// success and every one of them is after after, with the newest of those times. Without one it returns no lines
-// and what the newest export lacked.
-func freshExport(podLines []otlp.Line, after time.Time, named []string) ([]otlp.Line, time.Time, []string) {
-	times := otlp.ExportTimes(podLines)
-	var stale []string
-	for i, at := range times {
-		stale = nil
-		newest := at
-		if !at.After(after) {
-			stale = append(stale, "the export at "+at.UTC().Format(time.RFC3339Nano))
-		}
-		successes := otlp.Points(otlp.ExportAt(podLines, at), lastSuccess)
-		for _, query := range named {
-			points := otlp.Matching(successes, map[string]string{"query": query})
-			if len(points) == 0 {
-				stale = append(stale, query+" has no last success")
-			}
-			for _, p := range points {
-				success := parity.UnixSeconds(p.Value)
-				newest = latest(newest, success)
-				if !success.After(after) {
-					stale = append(stale, fmt.Sprintf("%s on %s at %s", query, p.Attrs["database"], success.UTC().Format(time.RFC3339Nano)))
-				}
-			}
-		}
-		if len(stale) > 0 {
-			continue
-		}
-		var cut []otlp.Line
-		for _, l := range podLines {
-			if i+1 == len(times) || l.Time.Before(times[i+1]) {
-				cut = append(cut, l)
-			}
-		}
-
-		return cut, newest, nil
-	}
-
-	return nil, time.Time{}, stale
-}
-
-func latest(a, b time.Time) time.Time {
-	if a.After(b) {
-		return a
-	}
-
-	return b
-}
-
-// waitUntil returns at t, or fails when ctx ends first.
-func waitUntil(ctx context.Context, t time.Time) {
-	GinkgoHelper()
-
-	timer := time.NewTimer(time.Until(t))
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-	case <-ctx.Done():
-		Fail(fmt.Sprintf("the spec ended before %s: %v", t, ctx.Err()))
-	}
 }
 
 func monitoring() *apiv1.MonitoringConfiguration {
@@ -314,12 +251,14 @@ var _ = Describe("collector-metrics", Ordered, func() {
 		)
 		Eventually(func(g Gomega, ctx SpecContext) {
 			var stale []string
-			lines, newest, stale = freshExport(podLines(g, ctx, pod, beforeAt), beforeAt.Add(parity.Margin), named)
+			lines, newest, stale = parity.FreshExport(podLines(g, ctx, pod, beforeAt), parity.Wait{
+				After: beforeAt.Add(parity.Margin), Required: named, ExportInterval: exportInterval, Deadline: beforeAt.Add(freshTimeout),
+			})
 			g.Expect(lines).NotTo(BeEmpty(), "no export of %s newer than %s; the newest one's stale: %v", pod, beforeAt, stale)
 		}).WithContext(ctx).WithTimeout(freshTimeout).WithPolling(freshPoll).Should(Succeed())
 
 		// CNPG writes lo_pages' update time in whole seconds, so the after scrape starts at a whole second.
-		waitUntil(ctx, newest.Add(parity.Margin).Truncate(time.Second).Add(time.Second))
+		Expect(framework.WaitUntil(ctx, newest.Add(parity.Margin).Truncate(time.Second).Add(time.Second))).To(Succeed())
 		after, _ := scrape(ctx, pod)
 
 		ours := parity.Ours(lines, pod, index)
@@ -403,7 +342,7 @@ var _ = Describe("collector-metrics", Ordered, func() {
 		ns = namespace.Name
 
 		exporter := framework.ExporterFor(ns, exporterName)
-		exporter.Spec.Metrics.Interval = &metav1.Duration{Duration: 5 * time.Second}
+		exporter.Spec.Metrics.Interval = &metav1.Duration{Duration: exportInterval}
 		exporter.Spec.Metrics.DefaultInterval = &metav1.Duration{Duration: 5 * time.Second}
 		exporter.Spec.Metrics.PlanInterval = &metav1.Duration{Duration: 10 * time.Second}
 		exporter.Spec.Metrics.UseClusterMonitoring = ptr.To(false)
@@ -512,6 +451,10 @@ var _ = Describe("collector-metrics", Ordered, func() {
 	}, SpecTimeout(6*time.Minute))
 
 	It("supervised update: manual_switchover_required is 1 on the primary waiting for a switchover", func(ctx SpecContext) {
+		// A hot standby needs max_connections at least the primary's, or its recovery pauses.
+		patchCluster(ctx, replicaName, map[string]any{"spec": map[string]any{
+			"postgresql": map[string]any{"parameters": map[string]any{"max_connections": "110"}},
+		}})
 		patchCluster(ctx, mainName, map[string]any{"spec": map[string]any{
 			"primaryUpdateStrategy": string(apiv1.PrimaryUpdateStrategySupervised),
 			"postgresql":            map[string]any{"parameters": map[string]any{"max_connections": "110"}},

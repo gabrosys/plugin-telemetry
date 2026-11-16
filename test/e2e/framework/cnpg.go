@@ -37,7 +37,8 @@ func ScrapeCNPG(ctx context.Context, cfg *rest.Config, pod types.NamespacedName)
 
 // Switchover asks CNPG to promote target as `kubectl cnpg promote` does: a status patch locked on cluster's
 // resourceVersion setting targetPrimary, targetPrimaryTimestamp (RFC3339Micro, now), phase "Switchover in progress",
-// phaseReason "Switching over to <target>" and the Ready condition False.
+// phaseReason "Switching over to <target>" and the Ready condition False. It leaves out promote.go's guards: it
+// patches even when target is already the targetPrimary, is fenced, or has no Pod.
 // Ported from CloudNativePG v1.30.1 internal/cmd/plugin/promote/promote.go and pkg/resources/status/transactions.go.
 func Switchover(ctx context.Context, c client.Client, cluster *apiv1.Cluster, target string) error {
 	patched := cluster.DeepCopy()

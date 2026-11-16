@@ -688,7 +688,7 @@ var _ = Describe("Run when the server's role changes", func() {
 		Eventually(func() []point {
 			dropped = time.Now()
 			return points(f.srv, "cnpg_primary_probe_value", dropped.Add(-2*exportInterval))
-		}).WithTimeout(2 * (time.Second + exportInterval + slack)).WithPolling(100 * time.Millisecond).Should(BeEmpty())
+		}).WithTimeout(time.Second + exportInterval + slack + 2*exportInterval).WithPolling(100 * time.Millisecond).Should(BeEmpty())
 		Consistently(func() []point { return points(f.srv, "cnpg_primary_probe_value", dropped) }).
 			WithTimeout(3 * exportInterval).WithPolling(100 * time.Millisecond).Should(BeEmpty())
 

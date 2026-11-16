@@ -198,8 +198,7 @@ func NewHTTPAt(addr string, tlsCfg *tls.Config) (*Server, error) {
 		return nil, fmt.Errorf("listen: %w", err)
 	}
 	s := newServer()
-	hs := httptest.NewUnstartedServer(http.HandlerFunc(s.serveHTTP))
-	hs.Listener = lis
+	hs := &httptest.Server{Listener: lis, Config: &http.Server{Handler: http.HandlerFunc(s.serveHTTP)}} //nolint:gosec // test receiver
 	if tlsCfg != nil {
 		hs.TLS = tlsCfg
 		hs.StartTLS()

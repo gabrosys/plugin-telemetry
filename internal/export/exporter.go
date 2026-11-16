@@ -155,12 +155,13 @@ func (e *Exporter) initHTTP(ctx context.Context, m material) error {
 
 // connectParams are grpc-go's defaults with the reconnect delay capped at half an interval.
 func (e *Exporter) connectParams() grpc.ConnectParams {
+	maxDelay := min(e.s.Interval/2, 120*time.Second)
 	return grpc.ConnectParams{
 		Backoff: backoff.Config{
-			BaseDelay:  time.Second,
+			BaseDelay:  min(time.Second, maxDelay), // grpc waits BaseDelay for the first retry whatever MaxDelay is
 			Multiplier: 1.6,
 			Jitter:     0.2,
-			MaxDelay:   min(e.s.Interval/2, 120*time.Second),
+			MaxDelay:   maxDelay,
 		},
 		MinConnectTimeout: e.s.Timeout,
 	}

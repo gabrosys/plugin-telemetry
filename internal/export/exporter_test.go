@@ -561,7 +561,7 @@ var _ = Describe("Exporter", func() {
 				endpoint += "/v1/metrics"
 			}
 			s := exporterSettings(protocol, endpoint)
-			s.Interval, s.Timeout = time.Second, 400*time.Millisecond
+			s.Interval, s.Timeout = 2*time.Second, 800*time.Millisecond
 			e := newExporter(s)
 
 			refused := make(chan struct{})
@@ -605,10 +605,39 @@ var _ = Describe("Exporter", func() {
 			DeferCleanup(srv.Close)
 
 			Eventually(func() error { return e.Export(ctx, batch(1, 1)) }).
-				WithTimeout(2 * time.Second).WithPolling(50 * time.Millisecond).Should(Succeed())
+				WithTimeout(2 * s.Interval).WithPolling(50 * time.Millisecond).Should(Succeed())
 			Expect(srv.Requests()).NotTo(BeEmpty())
 		},
 		Entry("http/protobuf", settings.ProtocolHTTP),
 		Entry("grpc", settings.ProtocolGRPC),
 	)
+
+	It("reconnects within half an interval after the first failed connection attempt", func(ctx SpecContext) {
+		var lc net.ListenConfig
+		lis, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
+		Expect(err).NotTo(HaveOccurred())
+		addr := lis.Addr().String()
+		s := exporterSettings(settings.ProtocolGRPC, "http://"+addr)
+		s.Interval, s.Timeout = time.Second, 400*time.Millisecond
+		e := newExporter(s)
+
+		refused := make(chan error, 1)
+		go func() {
+			conn, err := lis.Accept()
+			if err != nil {
+				refused <- err
+				return
+			}
+			refused <- errors.Join(conn.Close(), lis.Close())
+		}()
+		first := make(chan error, 1) // the first export fails and only starts the connection
+		go func() { first <- e.Export(ctx, batch(1, 1)) }()
+		Eventually(refused).WithTimeout(10 * time.Second).Should(Receive(BeNil()))
+		srv, err := otlptest.NewGRPCAt(addr, nil)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(srv.Close)
+
+		Eventually(func() error { return e.Export(ctx, batch(1, 1)) }).
+			WithTimeout(800 * time.Millisecond).WithPolling(20 * time.Millisecond).Should(Succeed())
+	})
 })

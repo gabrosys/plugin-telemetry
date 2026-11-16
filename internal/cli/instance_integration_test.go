@@ -18,7 +18,10 @@ import (
 )
 
 var _ = Describe("instance test and print-config against PostgreSQL", Ordered, func() {
-	var config string
+	var (
+		config string
+		server *pgtest.Postgres
+	)
 
 	BeforeAll(func(ctx SpecContext) {
 		image := os.Getenv("POSTGRES_IMAGE")
@@ -26,7 +29,8 @@ var _ = Describe("instance test and print-config against PostgreSQL", Ordered, f
 		pg.ClearEnv()
 		export.ClearEnv()
 
-		server, err := pgtest.Start(ctx, image)
+		var err error
+		server, err = pgtest.Start(ctx, image)
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func(ctx SpecContext) { Expect(server.Terminate(ctx)).To(Succeed()) })
 
@@ -74,5 +78,21 @@ exporter:
 		Expect(err).NotTo(HaveOccurred())
 		Expect(out).To(ContainSubstring("job extra_probe postgres group= interval=30s"))
 		Expect(out).NotTo(ContainSubstring("unplanned"))
+	}, SpecTimeout(time.Minute))
+
+	It("fails test and print-config with the superuser error when the session role is a superuser", func(ctx SpecContext) {
+		const role = "cnpg_super_test"
+		DeferCleanup(func(ctx SpecContext) { Expect(server.Exec(ctx, "DROP ROLE IF EXISTS "+role)).To(Succeed()) })
+		Expect(server.Exec(ctx, "CREATE ROLE "+role+" LOGIN SUPERUSER PASSWORD '"+pgtest.MonitorPassword+"'")).To(Succeed())
+
+		raw, err := os.ReadFile(config) //nolint:gosec // the spec wrote this path
+		Expect(err).NotTo(HaveOccurred())
+		superuser := filepath.Join(filepath.Dir(config), "superuser.yaml")
+		Expect(os.WriteFile(superuser, []byte(strings.Replace(string(raw), "user: "+pgtest.MonitorUser, "user: "+role, 1)), 0o600)).To(Succeed())
+
+		for _, sub := range []string{"test", "print-config"} {
+			_, err := execute(ctx, "instance", sub, "--config", superuser)
+			Expect(err).To(MatchError(ContainSubstring("the session role is a superuser")), sub)
+		}
 	}, SpecTimeout(time.Minute))
 })

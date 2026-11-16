@@ -149,8 +149,9 @@ type engine struct {
 	changed chan struct{}                  // the watch saw a change
 	early   chan struct{}                  // a run lost its connection
 
-	mu     sync.Mutex // guards runner, which only the control goroutine writes
-	runner *runner
+	mu      sync.Mutex // guards runner and refused, which only the control goroutine writes
+	runner  *runner
+	refused bool // the session role is a superuser: runJob runs nothing
 
 	// The fields below belong to the control goroutine.
 	loop          *loopRun
@@ -161,7 +162,6 @@ type engine struct {
 	factsFailing  bool   // a failed facts round was logged and no round has succeeded since
 	checksErr     string // the unreadable-checks error last logged; empty when the checks were readable
 	idleReason    string // the ErrNoConfiguration or ErrNotReady reason last logged
-	refusing      bool   // the last facts round found a superuser session role
 }
 
 func newEngine(ctx context.Context, o Options, gather func(context.Context, settings.Settings) (planner.Facts, error)) (*engine, error) {
@@ -475,11 +475,22 @@ func (e *engine) setRunner(r *runner) *runner {
 	return old
 }
 
-// currentRunner returns the runner, nil without a configuration.
+// currentRunner returns the runner, nil without a configuration or while the session role is a superuser.
 func (e *engine) currentRunner() *runner {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.refused {
+		return nil
+	}
 	return e.runner
+}
+
+// setRefused sets whether the session role is a superuser and returns the previous value.
+func (e *engine) setRefused(v bool) (was bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	was, e.refused = e.refused, v
+	return was
 }
 
 // teardown stops the export loop, the facts rounds and the pool.
@@ -494,7 +505,7 @@ func (e *engine) teardown() {
 	e.factsFailures = 0
 	e.factsFailing = false
 	e.checksErr = ""
-	e.refusing = false
+	e.setRefused(false)
 	if r := e.setRunner(nil); r != nil {
 		r.pool.Close()
 	}
@@ -704,7 +715,7 @@ func (e *engine) gatherRound(ctx context.Context, timed bool) {
 	if err != nil {
 		e.facts.Store(nil)
 		if errors.Is(err, planner.ErrSuperuser) {
-			e.refuse(ctx, cur)
+			e.refuse(ctx, cur, facts.Checks)
 			return
 		}
 		if timed {
@@ -718,7 +729,7 @@ func (e *engine) gatherRound(ctx context.Context, timed bool) {
 		}
 		return
 	}
-	e.refusing = false
+	e.setRefused(false)
 	e.errs.Succeeded(logger.GetLogger(), factsQuery, s.Postgres.Database)
 	e.facts.Store(&builtin.Facts{Version: facts.Version, Primary: !facts.InRecovery, WALSegmentSize: facts.WALSegmentSize})
 	e.factsFailures = 0
@@ -736,22 +747,22 @@ func (e *engine) gatherRound(ctx context.Context, timed bool) {
 	failed = false
 }
 
-// refuse handles a facts round that found a superuser session role: the plan is empty, the pool is new
-// (the old one closes at once), no facts are kept, cnpg_collector_up is unreported and only the superuser
-// check is exported. The next round comes after a planning cycle, with no backoff.
-func (e *engine) refuse(ctx context.Context, cur *configuration) {
+// refuse handles a facts round that found a superuser session role: cnpg_collector_up is unreported and
+// checks (the superuser one) are exported, then, when the refusal starts, the runner stops running jobs, the
+// plan is empty and the pool is new (the old one closes at once). No facts are kept. The next round comes
+// after a planning cycle, with no backoff.
+func (e *engine) refuse(ctx context.Context, cur *configuration, checks map[string]bool) {
 	s := cur.settings
 	logger := log.FromContext(ctx).GetLogger()
-	if !e.refusing {
-		e.refusing = true
+	e.up.Store(-1)
+	e.stats.SetChecks(checks)
+	if !e.setRefused(true) {
 		e.plan.refuse(ctx)
 		e.swapPool(ctx, s, cur.idleTimeout)
 	}
-	e.up.Store(-1)
-	e.stats.SetChecks(map[string]bool{"superuser": true})
 	e.factsFailures = 0
 	e.setFactsTimer(s.PlanInterval)
-	err := fmt.Errorf("%w: %s, no query runs while it is", planner.ErrSuperuser, s.Postgres.User)
+	err := fmt.Errorf("%w: %s; no query runs until the role is not a superuser", planner.ErrSuperuser, s.Postgres.User)
 	e.errs.Failed(logger, factsQuery, s.Postgres.Database, selfmetrics.OutcomeDenied, err)
 }
 

@@ -587,8 +587,8 @@ var _ = Describe("A superuser session role", func() {
 	fromSQL := func(name string) bool {
 		return slices.Contains([]string{
 			"cnpg_collector_up", "cnpg_collector_pg_wal", "cnpg_collector_pg_wal_archive_status",
-			"cnpg_collector_lo_pages", "cnpg_collector_postgres_version", "cnpg_otel_query_runs_total",
-		}, name) || strings.HasPrefix(name, "cnpg_collector_wal_") || strings.HasPrefix(name, "cnpg_alpha_") ||
+			"cnpg_collector_lo_pages", "cnpg_collector_postgres_version",
+		}, name) || strings.HasPrefix(name, "cnpg_collector_wal_") || strings.HasPrefix(name, "cnpg_otel_query_") || strings.HasPrefix(name, "cnpg_alpha_") ||
 			strings.HasPrefix(name, "cnpg_beta_")
 	}
 	// refusedIn checks that req has no series from the database and the collection metrics and the Cluster's built-ins.
@@ -614,9 +614,12 @@ var _ = Describe("A superuser session role", func() {
 	}
 
 	var (
-		h     *harness
-		super atomic.Bool
+		h        *harness
+		super    atomic.Bool
+		override factsFunc // when set, answers the facts rounds in place of super
 	)
+
+	BeforeEach(func() { override = nil })
 
 	// start runs the engine on a role that is a superuser or not.
 	start := func(superuser bool) {
@@ -624,7 +627,10 @@ var _ = Describe("A superuser session role", func() {
 		super.Store(superuser)
 		h = runWith(func(url string) *memConfig {
 			return newMemConfig(strings.Replace(httpSettings(url), "cluster: mem\n", "cluster: c\n", 1), httpFiles())
-		}, func(context.Context, int) (planner.Facts, error) {
+		}, func(ctx context.Context, round int) (planner.Facts, error) {
+			if override != nil {
+				return override(ctx, round)
+			}
 			if super.Load() {
 				return planner.Facts{Checks: map[string]bool{"superuser": true}},
 					fmt.Errorf("gather facts: %w", planner.ErrSuperuser)
@@ -658,7 +664,8 @@ var _ = Describe("A superuser session role", func() {
 		Expect(requestPoints(latest, "cnpg_collector_collections_total")).NotTo(BeEmpty())
 		Expect(requestPoints(latest, "cnpg_collector_replica_mode")).NotTo(BeEmpty())
 		Expect(h.logged(`"msg"="plan updated" "jobs"=0`)).To(Equal(1))
-		Expect(h.loggedAll(`"msg"="query failed"`, `"query"="facts"`, `"outcome"="denied"`, "the session role is a superuser", "cnpg_metrics_exporter")).To(Equal(1))
+		Expect(h.loggedAll(`"msg"="query failed"`, `"query"="facts"`, `"outcome"="denied"`,
+			"the session role is a superuser: cnpg_metrics_exporter; no query runs until the role is not a superuser")).To(Equal(1))
 		Expect(h.loggedAll(`"msg"="query recovered"`, `"query"="facts"`)).To(BeZero())
 
 		By("the role losing the attribute")
@@ -694,5 +701,39 @@ var _ = Describe("A superuser session role", func() {
 		super.Store(false)
 		h.advanceBy(time.Second, h.has("cnpg_collector_up", map[string]string{"cluster": "c"}, 1))
 		h.advance(func() bool { return h.loggedAll(`"msg"="plan updated"`, `"jobs"=8`) == 2 })
+	})
+
+	It("reports up 0 and keeps the superuser check when a round fails for another reason, and does not publish again on the next refusal", func() {
+		override = func(ctx context.Context, round int) (planner.Facts, error) {
+			if round >= 1 && round <= 3 {
+				return unreachable(ctx, round)
+			}
+			return planner.Facts{Checks: map[string]bool{"superuser": true}}, fmt.Errorf("gather facts: %w", planner.ErrSuperuser)
+		}
+		start(true)
+		up := map[string]string{"cluster": "c"}
+		h.advanceBy(time.Second, func() bool { return len(h.roundTimes()) >= 2 })
+		h.advance(h.has("cnpg_collector_up", up, 0))
+		h.advance(h.has("cnpg_otel_check", map[string]string{"check": "superuser"}, 1))
+		_, ok := h.lastValue("cnpg_otel_check", map[string]string{"check": "pg_monitor"})
+		Expect(ok).To(BeFalse())
+
+		h.advanceBy(time.Second, func() bool { return len(h.roundTimes()) >= 5 })
+		h.advance(func() bool {
+			reqs := h.requests()
+			return len(requestPoints(reqs[len(reqs)-1], "cnpg_collector_up")) == 0
+		})
+		Expect(h.logged(`"msg"="plan updated" "jobs"=0`)).To(Equal(1))
+		Expect(h.loggedAll(`"msg"="query failed"`, `"query"="facts"`)).To(Equal(1))
+		reqs := h.requests()
+		got, ok := valueIn(reqs[len(reqs)-1], series{"cnpg_otel_check", map[string]string{"check": "superuser"}})
+		Expect(ok).To(BeTrue())
+		Expect(got).To(Equal(1.0))
+	})
+
+	It("runs no query that was dispatched before the refusal", func(ctx SpecContext) {
+		connections, err := engine.RunJobWhileRefused(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(connections).To(BeZero())
 	})
 })

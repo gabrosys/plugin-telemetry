@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sync/atomic"
 	"time"
 
@@ -257,4 +258,48 @@ func IdleTimeoutAfterIdleOnlyApply(ctx context.Context) (kept bool, idle time.Du
 		return false, 0, errors.Join(err, e.mp.Shutdown(ctx))
 	}
 	return e.runner.pool == pool, pool.IdleTimeout(), e.mp.Shutdown(ctx)
+}
+
+// RunJobWhileRefused refuses a superuser session, then runs a job on the engine's runner, which a
+// listener stands in for PostgreSQL of, and returns how many connections the listener accepted.
+func RunJobWhileRefused(ctx context.Context) (connections int, err error) {
+	lis, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	var accepted atomic.Int32
+	go func() {
+		for {
+			c, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			accepted.Add(1)
+			if err := c.Close(); err != nil {
+				return
+			}
+		}
+	}()
+	defer func() { err = errors.Join(err, lis.Close()) }()
+
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, nil)
+	if err != nil {
+		return 0, err
+	}
+	addr, ok := lis.Addr().(*net.TCPAddr)
+	if !ok {
+		return 0, fmt.Errorf("listener address %v is not TCP", lis.Addr())
+	}
+	s := settings.Settings{
+		Postgres:     settings.Postgres{Host: "127.0.0.1", Port: addr.AddrPort().Port(), User: "u", Database: "app", MaxConnections: 2},
+		Limits:       settings.Limits{QueryTimeout: time.Second, LockTimeout: time.Second},
+		PlanInterval: time.Minute,
+	}
+	e.swapPool(ctx, s, time.Minute)
+	defer e.teardown()
+	cur := &configuration{settings: s, idleTimeout: time.Minute}
+	e.plan.current = cur
+	e.refuse(ctx, cur, map[string]bool{"superuser": true})
+	e.runJob(ctx, planner.Job{Query: "backends", Database: "app", Fingerprint: "f"})
+	return int(accepted.Load()), e.mp.Shutdown(ctx)
 }

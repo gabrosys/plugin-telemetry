@@ -758,4 +758,32 @@ var _ = Describe("Run on a superuser session role", func() {
 			g.Expect(got).To(Equal(0.0))
 		}).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 	}, SpecTimeout(2*time.Minute))
+
+	It("closes its connections and runs no query once the role becomes a superuser, and resumes after NOSUPERUSER", func(ctx SpecContext) {
+		role := pgtest.MonitorUser
+		planInterval := 5 * time.Second
+		DeferCleanup(func(ctx SpecContext) { Expect(server.Exec(ctx, "ALTER ROLE "+role+" NOSUPERUSER")).To(Succeed()) })
+
+		f := newFixture(planInterval)
+		writeFile(f.config, f.valid)
+		f.run()
+		Eventually(expectUp(f.srv, 1)).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+		engineBackends := func() (int, error) { return backends(ctx, "application_name = 'cnpg_otel_engine'") }
+		Eventually(engineBackends).WithTimeout(5 * time.Second).WithPolling(100 * time.Millisecond).Should(BeNumerically(">", 0))
+
+		Expect(server.Exec(ctx, "ALTER ROLE "+role+" SUPERUSER")).To(Succeed())
+		check := map[string]string{"check": "superuser"}
+		Eventually(func(g Gomega) {
+			got, ok := last(f.srv, "cnpg_otel_check", check)
+			g.Expect(ok).To(BeTrue())
+			g.Expect(got).To(Equal(1.0))
+		}).WithTimeout(2*planInterval + slack).WithPolling(100 * time.Millisecond).Should(Succeed())
+		Eventually(engineBackends).WithTimeout(planInterval).WithPolling(250 * time.Millisecond).Should(BeZero())
+
+		Expect(server.Exec(ctx, "ALTER ROLE "+role+" NOSUPERUSER")).To(Succeed())
+		since := time.Now()
+		Eventually(func() []point { return points(f.srv, "cnpg_backends_total", since) }).
+			WithTimeout(2*planInterval + slack).WithPolling(100 * time.Millisecond).ShouldNot(BeEmpty())
+		Eventually(expectUp(f.srv, 1)).WithTimeout(2*planInterval + slack).WithPolling(100 * time.Millisecond).Should(Succeed())
+	}, SpecTimeout(2*time.Minute))
 })

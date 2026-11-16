@@ -37,7 +37,7 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 
 var _ = Describe("GatherFacts", func() {
 	It("reads the version, the recovery state and the connectable databases", func(ctx SpecContext) {
-		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1, time.Minute,
+		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1,
 			clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(pool.Close)
 		conn, release, err := pool.AcquireWithin(ctx, "postgres", 0)
@@ -54,7 +54,7 @@ var _ = Describe("GatherFacts", func() {
 
 	gather := func(ctx SpecContext) planner.Facts {
 		GinkgoHelper()
-		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1, time.Minute,
+		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1,
 			clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(pool.Close)
 		conn, release, err := pool.AcquireWithin(ctx, "postgres", 0)
@@ -107,7 +107,7 @@ var _ = Describe("GatherFacts", func() {
 	})
 
 	It("omits only the check whose setting does not exist and still gathers the facts", func(ctx SpecContext) {
-		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1, time.Minute,
+		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1,
 			clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(pool.Close)
 		conn, release, err := pool.AcquireWithin(ctx, "postgres", 0)
@@ -132,7 +132,7 @@ var _ = Describe("GatherFacts", func() {
 
 		cfg := server.MonitorConfig(GinkgoT().TempDir())
 		cfg.User = role
-		pool := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
+		pool := pg.NewPool(cfg, 1, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(pool.Close)
 		conn, release, err := pool.AcquireWithin(ctx, "postgres", 0)
 		Expect(err).NotTo(HaveOccurred())
@@ -145,7 +145,7 @@ var _ = Describe("GatherFacts", func() {
 	})
 
 	It("returns a wrapped error when the context is cancelled", func(ctx SpecContext) {
-		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1, time.Minute,
+		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1,
 			clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(pool.Close)
 		conn, release, err := pool.AcquireWithin(ctx, "postgres", 0)
@@ -159,7 +159,7 @@ var _ = Describe("GatherFacts", func() {
 	})
 
 	It("fails the round with the guard's error when the guard fails", func(ctx SpecContext) {
-		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1, time.Minute,
+		pool := pg.NewPool(server.MonitorConfig(GinkgoT().TempDir()), 1,
 			clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(pool.Close)
 		conn, release, err := pool.AcquireWithin(ctx, "postgres", 0)
@@ -179,7 +179,7 @@ var _ = Describe("GatherFacts", func() {
 		DeferCleanup(proxy.Close)
 		cfg := server.MonitorConfig(GinkgoT().TempDir())
 		cfg.Host, cfg.Port = proxy.Host, proxy.Port
-		pool := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
+		pool := pg.NewPool(cfg, 1, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(pool.Close)
 		conn, release, err := pool.AcquireWithin(ctx, "postgres", 0)
 		Expect(err).NotTo(HaveOccurred())

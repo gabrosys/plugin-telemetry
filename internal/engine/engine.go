@@ -94,7 +94,7 @@ type runner struct {
 	exec   *executor.Executor
 }
 
-// poolSpec is what a pool is built from besides the limits and the idle timeout.
+// poolSpec is what a pool is built from besides the limits.
 type poolSpec struct {
 	postgres   settings.Postgres
 	maxBackoff time.Duration // the planning cycle
@@ -373,7 +373,7 @@ func (e *engine) onChange(ctx context.Context) {
 
 // apply sets up next in place of prev, which is nil the first time: it builds the exporter when its
 // settings, its files or the resource changed, swaps the pool when the connection settings, the limits
-// or the planning cycle changed (a new idle timeout alone goes to the pool in place), and hands the
+// or the planning cycle changed, and hands the
 // exporter to a new export loop. On error nothing has changed.
 func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 	s := next.settings
@@ -393,9 +393,7 @@ func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 	e.store.SetMaxSeriesTotal(s.Limits.MaxSeriesTotal)
 	newPool := e.runner == nil || e.runner.spec != newPoolSpec(s) || e.runner.limits != s.Limits
 	if newPool {
-		e.swapPool(ctx, s, next.idleTimeout)
-	} else {
-		e.runner.pool.SetIdleTimeout(next.idleTimeout)
+		e.swapPool(ctx, s)
 	}
 	if exp != nil {
 		e.startLoop(ctx, export.Resource(s, e.getenv, e.instance), exp, s.Exporter)
@@ -409,10 +407,10 @@ func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 
 // swapPool makes a pool and an executor for s the runner and closes the old pool at once: its idle
 // connections now, its busy ones when their runs release them.
-func (e *engine) swapPool(ctx context.Context, s settings.Settings, idle time.Duration) {
+func (e *engine) swapPool(ctx context.Context, s settings.Settings) {
 	pc := PostgresConfig(s)
 	pc.ReadFile = e.cfg.ReadFile
-	pool := pg.NewPool(pc, s.Postgres.MaxConnections, idle, e.clk,
+	pool := pg.NewPool(pc, s.Postgres.MaxConnections, e.clk,
 		log.FromContext(ctx).GetLogger(), s.PlanInterval)
 	next := &runner{
 		spec:   newPoolSpec(s),
@@ -729,7 +727,7 @@ func (e *engine) refuse(ctx context.Context, cur *configuration, checks map[stri
 	e.stats.SetChecks(checks)
 	if !e.setRefused(true) {
 		e.plan.refuse(ctx)
-		e.swapPool(ctx, s, cur.idleTimeout)
+		e.swapPool(ctx, s)
 	}
 	e.factsFailures = 0
 	e.setFactsTimer(s.PlanInterval)

@@ -75,8 +75,8 @@ var _ = Describe("Pool", func() {
 		start = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	)
 
-	newPool := func(maxConns int, idle time.Duration) {
-		pool = pg.NewPool(cfg, maxConns, idle, clk, logr.Logger{}, 0)
+	newPool := func(maxConns int) {
+		pool = pg.NewPool(cfg, maxConns, clk, logr.Logger{}, 0)
 		DeferCleanup(pool.Close)
 	}
 
@@ -88,7 +88,7 @@ var _ = Describe("Pool", func() {
 	})
 
 	It("leaves the server's values in the session", func(ctx SpecContext) {
-		newPool(2, time.Minute)
+		newPool(2)
 		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
@@ -107,7 +107,7 @@ var _ = Describe("Pool", func() {
 	})
 
 	It("Guard sets the limits for one transaction", func(ctx SpecContext) {
-		newPool(2, time.Minute)
+		newPool(2)
 		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
@@ -130,7 +130,7 @@ var _ = Describe("Pool", func() {
 	})
 
 	It("ApplyGuard sets the limits and reports a role that is not a superuser", func(ctx SpecContext) {
-		newPool(2, time.Minute)
+		newPool(2)
 		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
@@ -150,7 +150,7 @@ var _ = Describe("Pool", func() {
 		DeferCleanup(func(ctx SpecContext) { Expect(server.Exec(ctx, "DROP ROLE IF EXISTS "+role)).To(Succeed()) })
 		Expect(server.Exec(ctx, "CREATE ROLE "+role+" LOGIN SUPERUSER PASSWORD '"+pgtest.MonitorPassword+"'")).To(Succeed())
 		cfg.User = role
-		newPool(2, time.Minute)
+		newPool(2)
 		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
@@ -165,7 +165,7 @@ var _ = Describe("Pool", func() {
 
 	It("ends a guarded statement past QueryTimeout with SQLSTATE 57014 and keeps the connection", func(ctx SpecContext) {
 		cfg.QueryTimeout = time.Second
-		newPool(2, time.Minute)
+		newPool(2)
 		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
@@ -186,7 +186,7 @@ var _ = Describe("Pool", func() {
 	})
 
 	It("reuses an idle connection of the same database", func(ctx SpecContext) {
-		newPool(2, time.Minute)
+		newPool(2)
 		first, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		pid := backendPID(ctx, first)
@@ -199,7 +199,7 @@ var _ = Describe("Pool", func() {
 	})
 
 	It("closes the least recently used idle connection of another database at the cap", func(ctx SpecContext) {
-		newPool(2, time.Minute)
+		newPool(2)
 		appConn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		release(false)
@@ -217,7 +217,7 @@ var _ = Describe("Pool", func() {
 	})
 
 	It("waits at the cap while every connection is busy", func(ctx SpecContext) {
-		newPool(2, time.Minute)
+		newPool(2)
 		_, releaseApp, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		_, releasePostgres, err := pool.AcquireWithin(ctx, "postgres", 0)
@@ -247,7 +247,7 @@ var _ = Describe("Pool", func() {
 	})
 
 	It("stops waiting when the context ends", func(ctx SpecContext) {
-		newPool(1, time.Minute)
+		newPool(1)
 		_, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
@@ -259,7 +259,7 @@ var _ = Describe("Pool", func() {
 	})
 
 	It("gives up after maxWait with ErrNoSlot while every slot is taken, and not when it has a slot", func(ctx SpecContext) {
-		newPool(1, time.Minute)
+		newPool(1)
 		_, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 
@@ -276,7 +276,7 @@ var _ = Describe("Pool", func() {
 	})
 
 	It("reports the context's end, not ErrNoSlot, when the context ended as well", func(ctx SpecContext) {
-		newPool(1, time.Minute)
+		newPool(1)
 		_, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		defer release(false)
@@ -291,44 +291,8 @@ var _ = Describe("Pool", func() {
 		}
 	})
 
-	It("CloseIdle closes connections idle past idleTimeout", func(ctx SpecContext) {
-		newPool(3, time.Minute)
-		old, release, err := pool.AcquireWithin(ctx, "app", 0)
-		Expect(err).NotTo(HaveOccurred())
-		release(false)
-
-		clk.SetTime(start.Add(55 * time.Second))
-		recent, release, err := pool.AcquireWithin(ctx, "postgres", 0)
-		Expect(err).NotTo(HaveOccurred())
-		release(false)
-
-		clk.SetTime(start.Add(61 * time.Second))
-		pool.CloseIdle(ctx)
-
-		Expect(old.IsClosed()).To(BeTrue())
-		Expect(recent.IsClosed()).To(BeFalse())
-	})
-
-	It("CloseIdle uses the timeout SetIdleTimeout set last", func(ctx SpecContext) {
-		newPool(3, time.Hour)
-		first, release, err := pool.AcquireWithin(ctx, "app", 0)
-		Expect(err).NotTo(HaveOccurred())
-		pid := backendPID(ctx, first)
-		release(false)
-
-		pool.SetIdleTimeout(time.Second)
-		clk.SetTime(start.Add(2 * time.Second))
-		pool.CloseIdle(ctx)
-
-		Expect(first.IsClosed()).To(BeTrue())
-		second, release, err := pool.AcquireWithin(ctx, "app", 0)
-		Expect(err).NotTo(HaveOccurred())
-		defer release(false)
-		Expect(backendPID(ctx, second)).NotTo(Equal(pid))
-	})
-
 	It("replaces a connection whose backend was terminated and handed back broken", func(ctx SpecContext) {
-		newPool(2, time.Minute)
+		newPool(2)
 		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		pid := backendPID(ctx, conn)
@@ -346,7 +310,7 @@ var _ = Describe("Pool", func() {
 	})
 
 	It("closes a live connection handed back broken", func(ctx SpecContext) {
-		newPool(2, time.Minute)
+		newPool(2)
 		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		pid := backendPID(ctx, conn)
@@ -364,7 +328,7 @@ var _ = Describe("Pool", func() {
 
 	DescribeTable("closes a connection handed back inside a transaction instead of reusing it",
 		func(ctx SpecContext, sql string, fails bool) {
-			newPool(2, time.Minute)
+			newPool(2)
 			conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 			Expect(err).NotTo(HaveOccurred())
 			pid := backendPID(ctx, conn)
@@ -391,7 +355,7 @@ var _ = Describe("Pool", func() {
 			defer mu.Unlock()
 			lines = append(lines, prefix+args)
 		}, funcr.Options{Verbosity: verbosity})
-		pool = pg.NewPool(cfg, 2, 0, clk, logger, 0)
+		pool = pg.NewPool(cfg, 2, clk, logger, 0)
 		DeferCleanup(pool.Close)
 
 		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
@@ -399,6 +363,7 @@ var _ = Describe("Pool", func() {
 		release(false)
 		Expect(conn.PgConn().Conn().Close()).To(Succeed())
 
+		clk.SetTime(start.Add(10 * time.Second))
 		pool.CloseIdle(ctx)
 
 		mu.Lock()
@@ -418,7 +383,7 @@ var _ = Describe("Pool", func() {
 	})
 
 	It("answers ErrBackoff after a failed connect until the delay has passed", func(ctx SpecContext) {
-		newPool(2, time.Minute)
+		newPool(2)
 		good, err := os.ReadFile(cfg.PasswordFile)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(os.WriteFile(cfg.PasswordFile, []byte("wrong\n"), 0o600)).To(Succeed())
@@ -454,7 +419,7 @@ var _ = Describe("Pool", func() {
 
 	It("doubles the delay on each failure up to 30s", func(ctx SpecContext) {
 		cfg.Port = 1
-		newPool(2, time.Minute)
+		newPool(2)
 
 		now := start
 		for _, delay := range []time.Duration{
@@ -476,7 +441,7 @@ var _ = Describe("Pool", func() {
 
 	It("caps the delay at the max backoff", func(ctx SpecContext) {
 		cfg.Port = 1
-		pool = pg.NewPool(cfg, 2, time.Minute, clk, logr.Logger{}, 5*time.Second)
+		pool = pg.NewPool(cfg, 2, clk, logr.Logger{}, 5*time.Second)
 		DeferCleanup(pool.Close)
 
 		now := start
@@ -497,7 +462,7 @@ var _ = Describe("Pool", func() {
 	})
 
 	It("AcquireNow dials during the backoff and a success clears it", func(ctx SpecContext) {
-		newPool(2, time.Minute)
+		newPool(2)
 		good, err := os.ReadFile(cfg.PasswordFile)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(os.WriteFile(cfg.PasswordFile, []byte("wrong\n"), 0o600)).To(Succeed())
@@ -528,7 +493,7 @@ var _ = Describe("Pool", func() {
 	})
 
 	It("uses a rotated password file for the next connection", func(ctx SpecContext) {
-		newPool(2, time.Minute)
+		newPool(2)
 		_, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		release(true)
@@ -546,7 +511,7 @@ var _ = Describe("Pool", func() {
 	})
 
 	It("reconnects after the server stops and starts again on the same port", func(ctx SpecContext) {
-		newPool(2, time.Minute)
+		newPool(2)
 		port := server.Port
 		_, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
@@ -566,7 +531,7 @@ var _ = Describe("Pool", func() {
 	}, SpecTimeout(2*time.Minute))
 
 	It("refuses connections to a database the role cannot connect to", func(ctx SpecContext) {
-		newPool(2, time.Minute)
+		newPool(2)
 		_, _, err := pool.AcquireWithin(ctx, "noconnect", 0)
 		Expect(err).To(HaveOccurred())
 		var pgErr *pgconn.PgError
@@ -575,7 +540,7 @@ var _ = Describe("Pool", func() {
 	})
 
 	It("closes a broken connection released after its acquire context ended", func(ctx SpecContext) {
-		newPool(2, time.Minute)
+		newPool(2)
 		acquire, cancel := context.WithCancel(ctx)
 		conn, release, err := pool.AcquireWithin(acquire, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
@@ -587,7 +552,7 @@ var _ = Describe("Pool", func() {
 	})
 
 	It("keeps a connection released before the maximum age and closes one released at it", func(ctx SpecContext) {
-		newPool(2, time.Hour)
+		newPool(2)
 		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		clk.SetTime(start.Add(9 * time.Second))
@@ -608,7 +573,7 @@ var _ = Describe("Pool", func() {
 	})
 
 	It("counts the age from the dial, not from the last reuse", func(ctx SpecContext) {
-		newPool(1, time.Hour)
+		newPool(1)
 		conn, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		clk.SetTime(start.Add(6 * time.Second))
@@ -627,8 +592,8 @@ var _ = Describe("Pool", func() {
 		Expect(next).NotTo(BeIdenticalTo(conn))
 	})
 
-	It("CloseIdle closes an idle connection past the maximum age even when its idle time is short", func(ctx SpecContext) {
-		newPool(3, time.Hour)
+	It("CloseIdle closes an idle connection past the maximum age and keeps a younger one", func(ctx SpecContext) {
+		newPool(3)
 		old, release, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).NotTo(HaveOccurred())
 		clk.SetTime(start.Add(9 * time.Second))
@@ -645,7 +610,7 @@ var _ = Describe("Pool", func() {
 	})
 
 	It("fails AcquireWithin after Close", func(ctx SpecContext) {
-		newPool(2, time.Minute)
+		newPool(2)
 		pool.Close(ctx)
 		_, _, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).To(MatchError(pg.ErrPoolClosed))

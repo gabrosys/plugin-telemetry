@@ -40,8 +40,6 @@ type Pool struct {
 
 	// mu guards every field below.
 	mu sync.Mutex
-	// idleTimeout is how long a connection may sit idle before CloseIdle closes it.
-	idleTimeout time.Duration
 	// total counts open connections, idle or busy, and dials in flight.
 	total int
 	// idle is ordered from least to most recently released.
@@ -56,7 +54,6 @@ type idleConn struct {
 	conn     *pgx.Conn
 	database string
 	dialed   time.Time // when the connection was opened; a reuse keeps it
-	since    time.Time
 }
 
 type backoff struct {
@@ -68,17 +65,16 @@ type backoff struct {
 // NewPool returns a pool that opens no connection until AcquireWithin or AcquireNow. log receives the
 // errors that have no caller to return to; the zero Logger discards them. maxBackoff caps the wait before
 // reconnecting to a failing database; maxBackoff <= 0 keeps the default 30s.
-func NewPool(c Config, maxConns int, idleTimeout time.Duration, clk clock.PassiveClock, log logr.Logger, maxBackoff time.Duration) *Pool {
+func NewPool(c Config, maxConns int, clk clock.PassiveClock, log logr.Logger, maxBackoff time.Duration) *Pool {
 	p := &Pool{
-		cfg:         c,
-		guard:       GuardSQL(c),
-		maxConns:    max(1, maxConns),
-		idleTimeout: idleTimeout,
-		maxBackoff:  defaultMaxBackoff,
-		clk:         clk,
-		failed:      make(map[string]*backoff),
-		changed:     make(chan struct{}),
-		log:         log,
+		cfg:        c,
+		guard:      GuardSQL(c),
+		maxConns:   max(1, maxConns),
+		maxBackoff: defaultMaxBackoff,
+		clk:        clk,
+		failed:     make(map[string]*backoff),
+		changed:    make(chan struct{}),
+		log:        log,
 	}
 	if maxBackoff > 0 {
 		p.maxBackoff = maxBackoff
@@ -265,34 +261,19 @@ func (p *Pool) release(ctx context.Context, conn *pgx.Conn, database string, dia
 		p.closeConn(ctx, conn, database)
 		return
 	}
-	p.idle = append(p.idle, &idleConn{conn: conn, database: database, dialed: dialed, since: p.clk.Now()})
+	p.idle = append(p.idle, &idleConn{conn: conn, database: database, dialed: dialed})
 	p.notifyLocked()
 	p.mu.Unlock()
 }
 
-// SetIdleTimeout sets the idle timeout the next CloseIdle uses.
-func (p *Pool) SetIdleTimeout(d time.Duration) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.idleTimeout = d
-}
-
-// IdleTimeout returns the idle timeout in force.
-func (p *Pool) IdleTimeout() time.Duration {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.idleTimeout
-}
-
-// CloseIdle closes the idle connections that have been unused for the idle timeout or are older than
-// maxConnAge. ctx is accepted for contextcheck; each close uses WithoutCancel(ctx) and the 2 s closeTimeout.
+// CloseIdle closes the idle connections that are older than maxConnAge. ctx is accepted for contextcheck; each close uses WithoutCancel(ctx) and the 2 s closeTimeout.
 func (p *Pool) CloseIdle(ctx context.Context) {
 	p.mu.Lock()
 	now := p.clk.Now()
 	var stale []*idleConn
 	kept := p.idle[:0]
 	for _, ic := range p.idle {
-		if now.Sub(ic.since) >= p.idleTimeout || now.Sub(ic.dialed) >= maxConnAge {
+		if now.Sub(ic.dialed) >= maxConnAge {
 			stale = append(stale, ic)
 			continue
 		}

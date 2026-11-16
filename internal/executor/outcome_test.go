@@ -44,7 +44,7 @@ var _ = Describe("Run", func() {
 		limits := settings.Limits{QueryTimeout: time.Second, LockTimeout: time.Second}
 		clk := clock.RealClock{}
 		pool := pg.NewPool(pg.Config{Host: "127.0.0.1", Port: 1, User: "u", QueryTimeout: time.Second, LockTimeout: time.Second},
-			1, time.Minute, clk, logr.Logger{}, 0)
+			1, clk, logr.Logger{}, 0)
 		pool.Close(ctx)
 
 		res := executor.New(pool, limits, func() *semver.Version { return nil }, clk).

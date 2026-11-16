@@ -599,13 +599,6 @@ func matches(attrs, want map[string]string) bool {
 }
 
 var _ = Describe("An engine on an in-memory Config", func() {
-	It("hands a new idle timeout to the kept pool", func(ctx SpecContext) {
-		kept, idle, err := engine.IdleTimeoutAfterIdleOnlyApply(ctx)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(kept).To(BeTrue())
-		Expect(idle).To(Equal(2 * time.Minute))
-	})
-
 	generation := func(g string) map[string]string { return map[string]string{"generation": g} }
 
 	It("reloads once, Debounce after the first change of a burst", func() {
@@ -657,7 +650,7 @@ var _ = Describe("An engine on an in-memory Config", func() {
 		Expect(h.logged(`"msg"="configuration applied"`)).To(Equal(3))
 	})
 
-	It("keeps the pool when only the idle timeout changes", func() {
+	It("keeps the pool when only the intervals change", func() {
 		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) }, primary)
 		h.advance(func() bool { return h.logged(`"msg"="plan updated"`) == 1 && len(h.timersArmed()) == 2 })
 		timers := len(h.timersArmed())

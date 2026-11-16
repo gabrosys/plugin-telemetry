@@ -16,10 +16,10 @@ const StatsResetSQL = `CASE WHEN stats_reset IS NULL THEN '-infinity' ELSE ` +
 	`pg_catalog.rtrim(pg_catalog.rtrim(pg_catalog.to_char(stats_reset AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US'), '0'), '.') || 'Z' END`
 
 // SyncObservedSQL is the number in synchronous_standby_names (column s): 0 when empty, -1 when it
-// does not match CNPG's regex (pg_collector.go:47, 604-618 at v1.30.1). substring(s, pattern) is the
-// function form of substring(s FROM pattern), which cannot be schema-qualified.
-const SyncObservedSQL = `CASE WHEN s = '' THEN 0 WHEN s ~ '(?:ANY|FIRST) ([0-9]+) \(.*\)' ` +
-	`THEN pg_catalog.substring(s, '(?:ANY|FIRST) ([0-9]+) \(.*\)')::float8 ELSE -1 END`
+// does not match CNPG's regex (pg_collector.go:47, 604-618 at v1.30.1).
+// [^\n] stands for Go's . (PostgreSQL's . matches a newline). substring(s, pattern) is the function form of substring(s FROM pattern), which cannot be schema-qualified.
+const SyncObservedSQL = `CASE WHEN s = '' THEN 0 WHEN s ~ '(?:ANY|FIRST) ([0-9]+) \([^\n]*\)' ` +
+	`THEN pg_catalog.substring(s, '(?:ANY|FIRST) ([0-9]+) \([^\n]*\)')::float8 ELSE -1 END`
 
 const (
 	pgWALSQL = `WITH s AS (SELECT max(setting::float8) FILTER (WHERE name = 'wal_segment_size') AS seg,

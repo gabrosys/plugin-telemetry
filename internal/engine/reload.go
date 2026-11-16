@@ -128,7 +128,7 @@ func (e *engine) reload(ctx context.Context) error {
 		c := *cur
 		next = &c
 	} else {
-		next = define(s, res)
+		next = r.define(s, res)
 	}
 	next.exporterDigest = exporterDigest
 	if err := e.apply(ctx, cur, next); err != nil {
@@ -182,13 +182,24 @@ func loadOutcome(o string) selfmetrics.Outcome {
 	}
 }
 
-// define builds the configuration of s and res.
-func define(s settings.Settings, res sources.Result) *configuration {
-	opts := queries.Options{MaxLabelsPerSeries: s.Limits.MaxLabelsPerSeries}
+// Definitions defines the queries of res; a source cfg marks sensitive gets a definition that quotes no value.
+func Definitions(cfg Config, s settings.Settings, res sources.Result) []queries.Definition {
+	sensitive := func(string) bool { return false }
+	if c, ok := cfg.(sensitiveConfig); ok {
+		sensitive = c.Sensitive
+	}
 	defs := make([]queries.Definition, 0, len(res.Entries))
 	for _, e := range res.Entries {
+		opts := queries.Options{MaxLabelsPerSeries: s.Limits.MaxLabelsPerSeries, Sensitive: sensitive(e.Source)}
 		defs = append(defs, queries.Define(e.Key, e.Query, opts))
 	}
+
+	return defs
+}
+
+// define builds the configuration of s and res.
+func (r *replanner) define(s settings.Settings, res sources.Result) *configuration {
+	defs := Definitions(r.cfg, s, res)
 	return &configuration{settings: s, result: res, defs: defs, idleTimeout: idleTimeout(defs, s)}
 }
 

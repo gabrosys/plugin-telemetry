@@ -96,6 +96,9 @@ type Definition struct {
 type Options struct {
 	// MaxLabelsPerSeries disables a query with more label columns. Zero turns the check off.
 	MaxLabelsPerSeries int
+	// Sensitive marks a query from a Secret: warnings and Disabled name the query and the column and
+	// quote no value, parse error or relation.
+	Sensitive bool
 }
 
 // Builtin is CNPG's hard-coded "collector" query (pg_collector.go:639-665 at v1.30.1).
@@ -140,13 +143,17 @@ func Define(key string, q UserQuery, opts Options) Definition {
 	if q.RunOnServer != "" {
 		constraint, err := semver.NewConstraint(q.RunOnServer)
 		if err != nil {
-			disabled = append(disabled, fmt.Sprintf("invalid runonserver %q: %v", q.RunOnServer, err))
+			if opts.Sensitive {
+				disabled = append(disabled, fmt.Sprintf("query %q: invalid runonserver", key))
+			} else {
+				disabled = append(disabled, fmt.Sprintf("invalid runonserver %q: %v", q.RunOnServer, err))
+			}
 		} else {
 			def.RunOnServer = constraint
 		}
 	}
 
-	sources := def.addColumns(q)
+	sources := def.addColumns(key, q, opts.Sensitive)
 	def.Labels = def.labelColumns(q)
 
 	for _, column := range def.Columns {
@@ -165,9 +172,14 @@ func Define(key string, q UserQuery, opts Options) Definition {
 
 	if selectsSeveralDatabases(q.TargetDatabases) {
 		if relations := clusterWideRelations(q.Query); len(relations) > 0 {
-			def.Warnings = append(def.Warnings, fmt.Sprintf(
-				"cluster-wide relations (%s) are read in every selected database, so each reports the same rows",
-				strings.Join(relations, ", ")))
+			if opts.Sensitive {
+				def.Warnings = append(def.Warnings, fmt.Sprintf(
+					"query %q: cluster-wide relations are read in every selected database, so each reports the same rows", key))
+			} else {
+				def.Warnings = append(def.Warnings, fmt.Sprintf(
+					"cluster-wide relations (%s) are read in every selected database, so each reports the same rows",
+					strings.Join(relations, ", ")))
+			}
 		}
 	}
 
@@ -182,7 +194,7 @@ func Define(key string, q UserQuery, opts Options) Definition {
 
 // addColumns fills Columns as CNPG's ToMetricMap does (mappings.go:79-232 at v1.30.1) and returns
 // the pg_version text each column was built with.
-func (d *Definition) addColumns(q UserQuery) map[string]string {
+func (d *Definition) addColumns(key string, q UserQuery, sensitive bool) map[string]string {
 	sources := make(map[string]string)
 
 	for _, item := range q.Metrics {
@@ -194,7 +206,11 @@ func (d *Definition) addColumns(q UserQuery) map[string]string {
 			if cm.PGVersion != "" {
 				constraint, err := semver.NewConstraint(cm.PGVersion)
 				if err != nil {
-					d.Warnings = append(d.Warnings, fmt.Sprintf("column %q: ignoring invalid pg_version %q: %v", columnName, cm.PGVersion, err))
+					if sensitive {
+						d.Warnings = append(d.Warnings, fmt.Sprintf("query %q column %q: ignoring invalid pg_version", key, columnName))
+					} else {
+						d.Warnings = append(d.Warnings, fmt.Sprintf("column %q: ignoring invalid pg_version %q: %v", columnName, cm.PGVersion, err))
+					}
 				} else {
 					versions, source = constraint, cm.PGVersion
 				}
@@ -231,7 +247,11 @@ func (d *Definition) addColumns(q UserQuery) map[string]string {
 			case UsageDuration:
 				d.setValue(base, source, sources, metricName+"_milliseconds", cm.Description, KindGauge)
 			default:
-				d.Warnings = append(d.Warnings, fmt.Sprintf("column %q: unknown usage %q, the column is not mapped", columnName, cm.Usage))
+				if sensitive {
+					d.Warnings = append(d.Warnings, fmt.Sprintf("query %q column %q: unknown usage, the column is not mapped", key, columnName))
+				} else {
+					d.Warnings = append(d.Warnings, fmt.Sprintf("column %q: unknown usage %q, the column is not mapped", columnName, cm.Usage))
+				}
 			}
 		}
 	}

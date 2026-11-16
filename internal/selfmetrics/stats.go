@@ -158,7 +158,8 @@ func (s *Stats) Series(n int) {
 	s.series, s.seriesSet = n, true
 }
 
-// ConfigLoad records one configuration load, whose outcome is ok, error or denied, and the duplicate queries it found.
+// ConfigLoad records one configuration load of a source, with its outcome (ok, error or denied) and the
+// number of duplicate queries it found.
 func (s *Stats) ConfigLoad(source string, outcome Outcome, duplicates int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

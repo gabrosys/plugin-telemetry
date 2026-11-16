@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -22,7 +21,7 @@ type presence struct {
 	} `yaml:"exporter"`
 }
 
-// Defaults returns the settings Load starts from; Cluster, the endpoint and the exporter timeout are not defaulted here.
+// Defaults returns the settings Parse starts from; Cluster, the endpoint and the exporter timeout are not defaulted here.
 func Defaults() Settings {
 	return Settings{
 		Postgres: Postgres{
@@ -57,26 +56,6 @@ func Defaults() Settings {
 // DefaultExporterTimeout is the exporter timeout when none is set: the lower of 10s and half the interval.
 func DefaultExporterTimeout(interval time.Duration) time.Duration {
 	return min(10*time.Second, interval/2)
-}
-
-// Load reads a YAML file and parses it with Parse. Relative file paths in the file resolve against
-// the file's directory.
-func Load(path string) (Settings, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // the config path is an operator-supplied flag
-	if err != nil {
-		return Settings{}, fmt.Errorf("read settings: %w", err)
-	}
-
-	abs, err := filepath.Abs(filepath.Dir(path))
-	if err != nil {
-		return Settings{}, fmt.Errorf("resolve settings directory: %w", err)
-	}
-
-	s, err := Parse(data, abs)
-	if err != nil {
-		return Settings{}, fmt.Errorf("settings %s: %w", path, err)
-	}
-	return s, nil
 }
 
 // Parse decodes YAML strictly (unknown keys are errors) over the defaults, resolves relative file paths

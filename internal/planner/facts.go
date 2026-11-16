@@ -21,7 +21,8 @@ type Facts struct {
 	// SkippedDatabases are the connectable databases whose names are not valid UTF-8, quoted with
 	// strconv.QuoteToASCII and sorted; they are never planned.
 	SkippedDatabases []string
-	// Checks are pg_monitor, read_only, track_io_timing, track_wal_io_timing and track_functions.
+	// Checks are pg_monitor, read_only, track_io_timing, track_wal_io_timing and track_functions: the
+	// keys are the values of the check attribute and true means the check holds.
 	Checks map[string]bool
 	// ChecksErr joins the errors of the checks that could not be read; they are missing from Checks.
 	ChecksErr error
@@ -46,7 +47,6 @@ const databasesQuery = `SELECT datname, pg_catalog.has_database_privilege(datnam
 // The settings are documented in PostgreSQL 18, "Run-time Statistics", track_io_timing, track_wal_io_timing and
 // track_functions (https://www.postgresql.org/docs/18/runtime-config-statistics.html), and default_transaction_read_only
 // (https://www.postgresql.org/docs/18/runtime-config-client.html).
-
 var checkSettings = map[string]string{
 	"read_only":           "default_transaction_read_only",
 	"track_io_timing":     "track_io_timing",

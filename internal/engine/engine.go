@@ -149,6 +149,7 @@ type engine struct {
 	lastFacts     time.Time
 	factsFailures int    // consecutive failed facts rounds the timer drove
 	factsFailing  bool   // a failed facts round was logged and no round has succeeded since
+	checksErr     string // the unreadable-checks error last logged; empty when the checks were readable
 	idleReason    string // the ErrNoConfiguration or ErrNotReady reason last logged
 }
 
@@ -479,6 +480,7 @@ func (e *engine) teardown() {
 	e.server.Store(nil)
 	e.factsFailures = 0
 	e.factsFailing = false
+	e.checksErr = ""
 	if r := e.setRunner(nil); r != nil {
 		r.pool.Close()
 	}
@@ -692,12 +694,24 @@ func (e *engine) gatherRound(ctx context.Context, timed bool) {
 	}
 	e.setUp(true)
 	e.stats.SetChecks(facts.Checks)
-	if facts.ChecksErr != nil {
-		logger.Info("some live checks could not be read", "error", facts.ChecksErr.Error())
-	}
+	e.logChecks(logger, facts.ChecksErr)
 	v := facts.Version
 	e.server.Store(&v)
 	e.plan.setFacts(ctx, facts)
+}
+
+// logChecks logs unreadable live checks when their error appears or changes, and once when they are readable again.
+func (e *engine) logChecks(logger log.Logger, err error) {
+	switch {
+	case err != nil:
+		if text := err.Error(); text != e.checksErr {
+			e.checksErr = text
+			logger.Info("some live checks could not be read", "error", text)
+		}
+	case e.checksErr != "":
+		e.checksErr = ""
+		logger.Info("live checks readable again")
+	}
 }
 
 // setUp records the outcome of a facts round for upMetric.

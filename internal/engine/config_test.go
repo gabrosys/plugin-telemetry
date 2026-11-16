@@ -844,6 +844,25 @@ var _ = Describe("An engine on an in-memory Config", func() {
 		Expect(h.logged(`"msg"="gather facts"`)).To(Equal(1))
 	})
 
+	It("logs unreadable live checks once until their error changes, and their recovery once", func() {
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) },
+			func(_ context.Context, round int) (planner.Facts, error) {
+				f := memPrimary
+				switch {
+				case round < 3:
+					f.ChecksErr = errors.New("check x broke")
+				case round == 3:
+					f.ChecksErr = errors.New("check y broke")
+				}
+				return f, nil
+			})
+		h.advanceBy(time.Second, func() bool { return h.logged("live checks readable again") == 1 })
+		Expect(h.logged("some live checks could not be read")).To(Equal(2))
+		Expect(h.logged(`"error"="check x broke"`)).To(Equal(1))
+		Expect(h.logged(`"error"="check y broke"`)).To(Equal(1))
+		Expect(len(h.roundTimes())).To(BeNumerically(">=", 5))
+	})
+
 	header := func(h *harness, value string) func() bool {
 		return func() bool {
 			reqs := h.requests()

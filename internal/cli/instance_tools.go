@@ -45,13 +45,8 @@ func loadConfig(cfg engine.Config) (*config, error) {
 		return nil, fmt.Errorf("load settings: %w", err)
 	}
 	res := sources.NewLoader(cfg.ReadFile, s.Sources, engine.LoaderOptions(cfg)...).Load()
-	opts := queries.Options{MaxLabelsPerSeries: s.Limits.MaxLabelsPerSeries}
-	defs := make([]queries.Definition, 0, len(res.Entries))
-	for _, e := range res.Entries {
-		defs = append(defs, queries.Define(e.Key, e.Query, opts))
-	}
 
-	return &config{read: cfg.ReadFile, settings: s, result: res, defs: defs}, nil
+	return &config{read: cfg.ReadFile, settings: s, result: res, defs: engine.Definitions(cfg, s, res)}, nil
 }
 
 func (c *config) keys() []string {

@@ -301,6 +301,22 @@ q:
 		Expect(def.Columns["lo_pages"].Kind).To(Equal(queries.KindGauge))
 	})
 
+	DescribeTable("quotes nothing from a sensitive source",
+		func(doc string, quoted string, named ...string) {
+			def := defineOne("q", doc, queries.Options{MaxLabelsPerSeries: 32, Sensitive: true})
+			text := strings.Join(append(def.Warnings, def.Disabled), "\n")
+			Expect(text).ToNot(BeEmpty())
+			Expect(text).ToNot(ContainSubstring(quoted))
+			for _, n := range named {
+				Expect(text).To(ContainSubstring(n))
+			}
+		},
+		Entry("an invalid pg_version", "q:\n  query: SELECT 1\n  metrics:\n    - v: {usage: GAUGE, pg_version: 'abc!'}\n", "abc!", `"q"`, `"v"`),
+		Entry("an unknown usage", "q:\n  query: SELECT 1\n  metrics:\n    - v: {usage: GAUGES}\n", "GAUGES", `"q"`, `"v"`),
+		Entry("an invalid runonserver", "q:\n  query: SELECT 1\n  runonserver: 'nope!'\n", "nope!", `"q"`),
+		Entry("a cluster-wide relation", "q:\n  query: SELECT 1 AS v FROM pg_stat_database\n  target_databases: ['*']\n  metrics:\n    - v: {usage: GAUGE}\n", "pg_stat_database", `"q"`),
+	)
+
 	DescribeTable("warns when a cluster-wide relation runs in more than one database",
 		func(sql, targets string, warns bool) {
 			doc := "q:\n  query: \"" + sql + "\"\n  target_databases: " + targets + "\n  metrics:\n    - v: {usage: GAUGE}\n"

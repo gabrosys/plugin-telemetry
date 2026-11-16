@@ -11,8 +11,8 @@ func HTTPProxy(e *Exporter) func(*http.Request) (*url.URL, error) {
 }
 
 // SetMaxRequestSize sets the request caps of the HTTP and gRPC exporters built after it, and returns a restore func.
-func SetMaxRequestSize(http, grpc int) (restore func()) {
+func SetMaxRequestSize(httpMax, grpcMax int) (restore func()) {
 	oldHTTP, oldGRPC := maxRequestHTTP, maxRequestGRPC
-	maxRequestHTTP, maxRequestGRPC = http, grpc
+	maxRequestHTTP, maxRequestGRPC = httpMax, grpcMax
 	return func() { maxRequestHTTP, maxRequestGRPC = oldHTTP, oldGRPC }
 }

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"math/rand/v2"
+	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +19,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
+	"google.golang.org/grpc/codes"
 	testingclock "k8s.io/utils/clock/testing"
 
 	"github.com/gabrosys/plugin-telemetry/internal/export"
@@ -203,16 +206,58 @@ func httpExporter(srv *otlptest.Server) *export.Exporter {
 // componentAttrs are the attributes otel.sdk.exporter.* carry for an HTTP exporter sending to srv.
 func componentAttrs(srv *otlptest.Server, extra ...attribute.KeyValue) []attribute.KeyValue {
 	GinkgoHelper()
+	return protocolAttrs(settings.ProtocolHTTP, srv, extra...)
+}
+
+func protocolAttrs(protocol string, srv *otlptest.Server, extra ...attribute.KeyValue) []attribute.KeyValue {
+	GinkgoHelper()
 	u, err := url.Parse(srv.URL)
 	Expect(err).NotTo(HaveOccurred())
 	port, err := strconv.Atoi(u.Port())
 	Expect(err).NotTo(HaveOccurred())
+	component := "otlp_http_metric_exporter"
+	if protocol == settings.ProtocolGRPC {
+		component = "otlp_grpc_metric_exporter"
+	}
 	return append([]attribute.KeyValue{
-		attribute.String("otel.component.type", "otlp_http_metric_exporter"),
-		attribute.String("otel.component.name", "otlp_http_metric_exporter/0"),
+		attribute.String("otel.component.type", component),
+		attribute.String("otel.component.name", component+"/0"),
 		attribute.String("server.address", u.Hostname()),
 		attribute.Int("server.port", port),
 	}, extra...)
+}
+
+// idsOf returns the value of the "i" attribute of every delivered point.
+func idsOf(reqs []otlptest.Request) []int {
+	var ids []int
+	for _, r := range reqs {
+		for _, rm := range r.Metrics.GetResourceMetrics() {
+			for _, sm := range rm.GetScopeMetrics() {
+				for _, m := range sm.GetMetrics() {
+					for _, dp := range m.GetGauge().GetDataPoints() {
+						for _, kv := range dp.GetAttributes() {
+							if kv.GetKey() == "i" {
+								ids = append(ids, int(kv.GetValue().GetIntValue()))
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return ids
+}
+
+// stepUntilTick steps the clock by step until srv has a request or an export failed,
+// then waits for the loop to idle.
+func (h *loopHarness) stepUntilTick(srv *otlptest.Server, step time.Duration) {
+	GinkgoHelper()
+	for i := 0; i < 300 && len(srv.Requests()) == 0 && h.exports("error") == 0; i++ {
+		Eventually(h.clk.HasWaiters).Should(BeTrue())
+		h.clk.Step(step)
+		Eventually(func() bool { return h.clk.HasWaiters() || len(srv.Requests()) > 0 || h.exports("error") > 0 }).Should(BeTrue())
+	}
+	Eventually(h.clk.HasWaiters, 5*time.Second).Should(BeTrue())
 }
 
 func pointsOf(reqs []otlptest.Request) int {
@@ -454,54 +499,86 @@ var _ = Describe("Loop", func() {
 		Expect(e.Export(ctx, batch(1, 1))).To(MatchError(export.ErrExporterShutdown))
 	})
 
-	Context("with a request cap of 64 KiB", func() {
-		BeforeEach(func() { DeferCleanup(export.SetMaxRequestSize(64<<10, 64<<10)) })
+	Context("with a request cap of 16 KiB", func() {
+		const points = 150
+		BeforeEach(func() { DeferCleanup(export.SetMaxRequestSize(16<<10, 16<<10)) })
 
 		for _, protocol := range []string{settings.ProtocolHTTP, settings.ProtocolGRPC} {
-			newSrv := func() *otlptest.Server {
+			// A fresh server and a harness whose tick carries 150 points of 2.4 KiB.
+			setup := func(s settings.Exporter, interval time.Duration) (*otlptest.Server, *loopHarness) {
+				var srv *otlptest.Server
 				if protocol == settings.ProtocolGRPC {
-					return newGRPCServer(nil)
+					srv = newGRPCServer(nil)
+				} else {
+					srv = newHTTPServer(nil)
 				}
-				return newHTTPServer(nil)
+				s.Protocol, s.Endpoint = protocol, srv.URL
+				h := newLoopHarness(1)
+				h.prod.set(points, nil)
+				h.prod.size = 300
+				h.loop.SetExporter(context.Background(), newExporter(s), interval, 5000)
+				h.start()
+				return srv, h
+			}
+			complete := func() []int {
+				ids := make([]int, points)
+				for i := range ids {
+					ids[i] = i
+				}
+				return ids
 			}
 
 			It("delivers a tick over the cap in parts with every point once ("+protocol+")", func() {
-				srv := newSrv()
-				h := newLoopHarness(1)
-				h.prod.set(2000, nil)
-				h.prod.size = 300
-				h.loop.SetExporter(context.Background(), newExporter(exporterSettings(protocol, srv.URL)), 10*time.Second, 5000)
-				h.start()
+				srv, h := setup(exporterSettings(protocol, ""), 10*time.Second)
 
-				for i := 0; i < 10 && h.exports("ok") == 0 && len(srv.Requests()) == 0; i++ {
-					Eventually(h.clk.HasWaiters).Should(BeTrue())
-					h.clk.Step(time.Second)
-					Eventually(func() bool { return h.clk.HasWaiters() || len(srv.Requests()) > 0 }).Should(BeTrue())
-				}
-				Eventually(func() int { return pointsOf(srv.Requests()) }, 20*time.Second).Should(Equal(2000))
-				Eventually(h.clk.HasWaiters, 20*time.Second).Should(BeTrue())
+				h.stepUntilTick(srv, time.Second)
 
-				Expect(len(srv.Requests())).To(BeNumerically(">=", 2))
-				Expect(pointsOf(srv.Requests())).To(Equal(2000))
+				Expect(len(srv.Requests())).To(BeNumerically(">=", 4))
+				Expect(idsOf(srv.Requests())).To(ConsistOf(complete()))
 				Expect(h.exports("error")).To(BeZero())
 				Expect(h.exports("ok")).To(Equal(float64(len(srv.Requests()))))
 			})
 
 			It("counts one point over the cap as request_too_large once ("+protocol+")", func() {
-				srv := newSrv()
-				h := newLoopHarness(1)
+				srv, h := setup(exporterSettings(protocol, ""), 10*time.Second)
 				h.prod.set(1, nil)
 				h.prod.size = 70 << 10
-				h.loop.SetExporter(context.Background(), newExporter(exporterSettings(protocol, srv.URL)), 10*time.Second, 5000)
-				h.start()
 
-				for i := 0; i < 10 && h.exports("error") == 0; i++ {
-					h.step(time.Second)
-				}
+				h.stepUntilTick(srv, time.Second)
 
 				Expect(h.exports("error")).To(Equal(1.0))
 				Expect(h.exports("ok")).To(BeZero())
 				Expect(srv.Requests()).To(BeEmpty())
+				Expect(h.value("otel.sdk.exporter.metric_data_point.exported",
+					protocolAttrs(protocol, srv, attribute.String("error.type", "request_too_large"))...)).To(Equal(1.0))
+			})
+
+			It("delivers the other parts when one part fails ("+protocol+")", func() {
+				srv, h := setup(exporterSettings(protocol, ""), 10*time.Second)
+				// A 400 is not retried; a 503 would be retried within the tick and succeed.
+				srv.Respond(otlptest.Response{HTTPStatus: http.StatusBadRequest, Code: codes.InvalidArgument}, otlptest.Response{})
+
+				h.stepUntilTick(srv, time.Second)
+
+				reqs := srv.Requests()
+				Expect(len(reqs)).To(BeNumerically(">=", 4))
+				Expect(h.exports("error")).To(Equal(1.0))
+				Expect(h.exports("ok")).To(Equal(float64(len(reqs) - 1)))
+				Expect(idsOf(reqs[1:])).To(ConsistOf(slices.DeleteFunc(complete(), func(i int) bool {
+					return slices.Contains(idsOf(reqs[:1]), i)
+				})))
+			})
+
+			It("stops splitting once the tick deadline has passed ("+protocol+")", func() {
+				srv, h := setup(exporterSettings(protocol, ""), 200*time.Millisecond)
+				srv.Respond(otlptest.Response{Delay: time.Second})
+
+				h.stepUntilTick(srv, time.Millisecond)
+
+				Expect(srv.Requests()).To(HaveLen(1))
+				Expect(h.exports("ok")).To(BeZero())
+				Expect(h.exports("error")).To(BeNumerically(">=", 2))
+				Expect(h.exports("error")).To(BeNumerically("<=", 10)) // one per halving level, not one per part
 			})
 		}
 	})

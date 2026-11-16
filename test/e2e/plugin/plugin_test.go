@@ -178,7 +178,7 @@ func sidecarLogs(ctx context.Context, cfg *rest.Config, ns, pod string) (string,
 
 //nolint:maintidx // one Ordered container per mode; the specs share its state
 func describeMode(m mode) {
-	Describe(m.name, Ordered, func() {
+	Describe(m.name, Ordered, Serial, func() {
 		var (
 			env     framework.Env
 			c       client.Client
@@ -309,6 +309,7 @@ func describeMode(m mode) {
 
 			recent := lines(g, ctx, time.Now().Add(-time.Minute))
 			var total float64
+			found := false
 			for _, pod := range pluginPods {
 				latest := map[string]float64{}
 				for _, p := range otlp.Points(otlp.ForResource(recent, "k8s.pod.name", pod), selfmetrics.IdentityReconciles) {
@@ -316,8 +317,11 @@ func describeMode(m mode) {
 				}
 				for _, v := range latest {
 					total += v
+					found = true
 				}
 			}
+
+			g.Expect(found).To(BeTrue(), "the collector holds no %s point", selfmetrics.IdentityReconciles)
 
 			return total
 		}
@@ -955,7 +959,9 @@ func describeMode(m mode) {
 				}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(specPoll).Should(Succeed())
 
 				var reconcilesBefore float64
+				mark := time.Now()
 				Eventually(func(g Gomega, ctx SpecContext) {
+					pluginExported(g, ctx, mark)
 					reconcilesBefore = identityReconciles(g, ctx)
 				}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(specPoll).Should(Succeed())
 

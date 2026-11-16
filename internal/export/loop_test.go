@@ -343,7 +343,7 @@ var _ = Describe("Loop", func() {
 		h.start()
 
 		h.step(offset - time.Nanosecond)
-		Expect(srv.Requests()).To(BeEmpty())
+		Consistently(srv.Requests, 200*time.Millisecond).Should(BeEmpty())
 		h.step(time.Nanosecond)
 		Eventually(srv.Requests).Should(HaveLen(1))
 	})

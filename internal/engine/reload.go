@@ -44,13 +44,12 @@ type replanner struct {
 	errs   *errorLog
 	update func(planner.Plan)
 
-	loader      *sources.Loader
-	loaderFiles []string
-	current     *configuration // nil until the first valid configuration
-	facts       *planner.Facts // nil until the first facts round
-	skipped     []string       // the databases skipped for their names in the last facts round
-	generation  uint64
-	digest      string // of the settings bytes, the sources and the exporter files the last reload read
+	loader     *sources.Loader
+	current    *configuration // nil until the first valid configuration
+	facts      *planner.Facts // nil until the first facts round
+	skipped    []string       // the databases skipped for their names in the last facts round
+	generation uint64
+	digest     string // of the settings bytes, the sources and the exporter files the last reload read
 
 	mu      sync.RWMutex            // guards planned; whilePlanned holds it while a result is written
 	planned map[snapshot.Key]string // the fingerprint of each planned job
@@ -108,8 +107,10 @@ func (e *engine) reload(ctx context.Context) error {
 	r.digest = d
 	r.stats.ConfigLoad(r.cfg.Name(), selfmetrics.OutcomeOK, 0)
 
-	if r.loader == nil || !slices.Equal(r.loaderFiles, s.Sources) {
-		r.loader, r.loaderFiles = sources.NewLoader(read, s.Sources, LoaderOptions(r.cfg)...), slices.Clone(s.Sources)
+	if r.loader == nil {
+		r.loader = sources.NewLoader(read, s.Sources, LoaderOptions(r.cfg)...)
+	} else {
+		r.loader.SetFiles(s.Sources)
 	}
 	res := r.loader.Load()
 	r.recordLoad(logger, res)
@@ -242,7 +243,7 @@ func (r *replanner) replan(ctx context.Context) {
 
 // idle drops the configuration in force and hands the scheduler an empty plan.
 func (r *replanner) idle(ctx context.Context) {
-	r.current, r.facts, r.skipped, r.loader, r.loaderFiles = nil, nil, nil, nil, nil
+	r.current, r.facts, r.skipped, r.loader = nil, nil, nil, nil
 	r.publish(ctx, planner.Plan{})
 }
 

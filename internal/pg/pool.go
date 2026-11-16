@@ -24,17 +24,18 @@ var ErrPoolClosed = errors.New("connection pool is closed")
 
 // Pool hands out connections to databases of one server, with at most maxConns open in total.
 type Pool struct {
-	cfg         Config
-	maxConns    int
-	idleTimeout time.Duration
-	maxBackoff  time.Duration
-	clk         clock.PassiveClock
-	log         logr.Logger
+	cfg        Config
+	maxConns   int
+	maxBackoff time.Duration
+	clk        clock.PassiveClock
+	log        logr.Logger
 	// base is the context connections are closed with; it is never cancelled.
 	base context.Context
 
 	// mu guards every field below.
 	mu sync.Mutex
+	// idleTimeout is how long a connection may sit idle before CloseIdle closes it.
+	idleTimeout time.Duration
 	// total counts open connections, idle or busy, and dials in flight.
 	total int
 	// idle is ordered from least to most recently released.
@@ -253,6 +254,13 @@ func (p *Pool) release(conn *pgx.Conn, database string, broken bool) {
 	p.idle = append(p.idle, &idleConn{conn: conn, database: database, since: p.clk.Now()})
 	p.notifyLocked()
 	p.mu.Unlock()
+}
+
+// SetIdleTimeout sets the idle timeout the next CloseIdle uses.
+func (p *Pool) SetIdleTimeout(d time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.idleTimeout = d
 }
 
 // CloseIdle closes the idle connections that have been unused for the idle timeout.

@@ -159,6 +159,83 @@ var _ = Describe("Loader", func() {
 		Expect(keys(r)).To(Equal([]string{"collector"}))
 	})
 
+	It("keeps a source's last good version when another source is added", func() {
+		write(f1, "a:\n  query: SELECT 1\n")
+		l := sources.NewLoader(os.ReadFile, []string{f1})
+		good := l.Load()
+
+		write(f1, "a: [not, a, map")
+		write(f2, "b:\n  query: SELECT 2\n")
+		l.SetFiles([]string{f1, f2})
+		r := l.Load()
+
+		Expect(r.Status[1].Outcome).To(Equal(sources.OutcomeInvalid))
+		Expect(r.Status[1].UsingPrevious).To(BeTrue())
+		Expect(keys(r)).To(Equal([]string{"a", "b", "collector"}))
+		Expect(entry(r, "a").Query).To(Equal(entry(good, "a").Query))
+	})
+
+	It("forgets the last good version of a file SetFiles drops", func() {
+		write(f1, "a:\n  query: SELECT 1\n")
+		l := sources.NewLoader(os.ReadFile, []string{f1})
+		l.Load()
+
+		l.SetFiles([]string{f2})
+		l.SetFiles([]string{f1})
+		write(f1, "a: [not, a, map")
+		r := l.Load()
+
+		Expect(r.Status[1].Outcome).To(Equal(sources.OutcomeInvalid))
+		Expect(r.Status[1].UsingPrevious).To(BeFalse())
+		Expect(keys(r)).To(Equal([]string{"collector"}))
+	})
+
+	It("loads the files in the order SetFiles gives", func() {
+		write(f1, "a:\n  query: SELECT 1\n")
+		write(f2, "a:\n  query: SELECT 2\n")
+		l := sources.NewLoader(os.ReadFile, []string{f1, f2})
+		Expect(entry(l.Load(), "a").Query.Query).To(Equal("SELECT 2"))
+
+		l.SetFiles([]string{f2, f1})
+		r := l.Load()
+
+		Expect(entry(r, "a").Query.Query).To(Equal("SELECT 1"))
+		Expect(r.Status[1].Source).To(Equal(f2))
+	})
+
+	It("gives the same hash for an empty and an absent target_databases, metrics and metric_mapping", func() {
+		const absent = "a:\n  query: SELECT 1\n  metrics:\n    - v:\n        usage: MAPPEDMETRIC\n        description: V.\n"
+		const empty = "a:\n  query: SELECT 1\n  target_databases: []\n  metrics:\n    - v:\n        usage: MAPPEDMETRIC\n" +
+			"        description: V.\n        metric_mapping: {}\n"
+		const noMetrics = "a:\n  query: SELECT 1\n"
+		const emptyMetrics = "a:\n  query: SELECT 1\n  metrics: []\n"
+		hash := func(content string) string {
+			write(f1, content)
+			return sources.NewLoader(os.ReadFile, []string{f1}).Load().Hash
+		}
+
+		Expect(hash(empty)).To(Equal(hash(absent)))
+		Expect(hash(emptyMetrics)).To(Equal(hash(noMetrics)))
+	})
+
+	It("revives the version from before a file went missing when it comes back invalid", func() {
+		write(f1, "a:\n  query: SELECT 1\n")
+		l := sources.NewLoader(os.ReadFile, []string{f1})
+		good := l.Load()
+
+		Expect(os.Remove(f1)).To(Succeed())
+		gone := l.Load()
+		Expect(gone.Status[1].Outcome).To(Equal(sources.OutcomeMissing))
+		Expect(keys(gone)).To(Equal([]string{"collector"}))
+
+		write(f1, "a: [not, a, map")
+		r := l.Load()
+
+		Expect(r.Status[1].Outcome).To(Equal(sources.OutcomeInvalid))
+		Expect(r.Status[1].UsingPrevious).To(BeTrue())
+		Expect(r.Hash).To(Equal(good.Hash))
+	})
+
 	It("reads through the reader it is given", func() {
 		var read []string
 		files := map[string]string{"mem/one.yaml": "a:\n  query: SELECT 1\n"}

@@ -579,6 +579,24 @@ var _ = Describe("An engine on an in-memory Config", func() {
 		Expect(h.logged(`"msg"="configuration applied"`)).To(Equal(3))
 	})
 
+	It("keeps the pool when only the idle timeout changes", func() {
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) }, primary)
+		h.advance(func() bool { return h.logged(`"msg"="plan updated"`) == 1 && len(h.timersArmed()) == 2 })
+		timers, rounds := len(h.timersArmed()), len(h.roundTimes())
+
+		h.cfg.set(func() { h.cfg.doc = strings.Replace(h.cfg.doc, "defaultInterval: 30s", "defaultInterval: 45s", 1) })
+		h.reload()
+		h.advance(h.has("cnpg_otel_query_interval_seconds", map[string]string{"query": "alpha"}, 45))
+		Expect(h.timersArmed()).To(HaveLen(timers), "a kept pool arms no facts timer")
+		Expect(h.roundTimes()).To(HaveLen(rounds), "a kept pool starts no round")
+
+		h.cfg.set(func() { h.cfg.doc = strings.Replace(h.cfg.doc, "port: 1\n", "port: 2\n", 1) })
+		h.reload()
+		Eventually(func() int { return len(h.timersArmed()) }).Should(BeNumerically(">", timers), "a new pool arms the timer at once")
+		Expect(h.timersArmed()[timers]).To(BeZero())
+		h.advance(func() bool { return len(h.roundTimes()) > rounds })
+	})
+
 	It("keeps the last good configuration when the settings become invalid", func() {
 		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) }, primary)
 		alpha := map[string]string{"query": "alpha"}

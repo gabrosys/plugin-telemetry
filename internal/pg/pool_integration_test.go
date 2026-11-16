@@ -211,6 +211,24 @@ var _ = Describe("Pool", func() {
 		Expect(recent.IsClosed()).To(BeFalse())
 	})
 
+	It("CloseIdle uses the timeout SetIdleTimeout set last", func(ctx SpecContext) {
+		newPool(3, time.Hour)
+		first, release, err := pool.Acquire(ctx, "app")
+		Expect(err).NotTo(HaveOccurred())
+		pid := backendPID(ctx, first)
+		release(false)
+
+		pool.SetIdleTimeout(time.Second)
+		clk.SetTime(start.Add(2 * time.Second))
+		pool.CloseIdle()
+
+		Expect(first.IsClosed()).To(BeTrue())
+		second, release, err := pool.Acquire(ctx, "app")
+		Expect(err).NotTo(HaveOccurred())
+		defer release(false)
+		Expect(backendPID(ctx, second)).NotTo(Equal(pid))
+	})
+
 	It("replaces a connection whose backend was terminated and handed back broken", func(ctx SpecContext) {
 		newPool(2, time.Minute)
 		conn, release, err := pool.Acquire(ctx, "app")

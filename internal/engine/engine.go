@@ -99,15 +99,14 @@ type runner struct {
 	exec   *executor.Executor
 }
 
-// poolSpec is what a pool is built from besides the limits.
+// poolSpec is what a pool is built from besides the limits and the idle timeout.
 type poolSpec struct {
-	postgres    settings.Postgres
-	idleTimeout time.Duration
-	maxBackoff  time.Duration // the planning cycle
+	postgres   settings.Postgres
+	maxBackoff time.Duration // the planning cycle
 }
 
-func newPoolSpec(s settings.Settings, idle time.Duration) poolSpec {
-	return poolSpec{postgres: s.Postgres, idleTimeout: idle, maxBackoff: s.PlanInterval}
+func newPoolSpec(s settings.Settings) poolSpec {
+	return poolSpec{postgres: s.Postgres, maxBackoff: s.PlanInterval}
 }
 
 // loopRun is a running export loop.
@@ -391,8 +390,8 @@ func (e *engine) onChange(ctx context.Context) {
 }
 
 // apply sets up next in place of prev, which is nil the first time: it builds the exporter when its
-// settings, its files or the resource changed, swaps the pool when the connection settings, the limits,
-// the idle timeout or the planning cycle changed, and hands the exporter to the export loop. On error
+// settings, its files or the resource changed, swaps the pool when the connection settings, the limits
+// or the planning cycle changed (a new idle timeout alone goes to the pool in place), and hands the exporter to the export loop. On error
 // nothing has changed.
 func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 	s := next.settings
@@ -410,9 +409,11 @@ func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 	cluster := s.Cluster
 	e.cluster.Store(&cluster)
 	e.store.SetMaxSeriesTotal(s.Limits.MaxSeriesTotal)
-	newPool := e.runner == nil || e.runner.spec != newPoolSpec(s, next.idleTimeout) || e.runner.limits != s.Limits
+	newPool := e.runner == nil || e.runner.spec != newPoolSpec(s) || e.runner.limits != s.Limits
 	if newPool {
 		e.swapPool(ctx, s, next.idleTimeout)
+	} else {
+		e.runner.pool.SetIdleTimeout(next.idleTimeout)
 	}
 	if exp != nil {
 		if resourceChanged {
@@ -436,7 +437,7 @@ func (e *engine) swapPool(ctx context.Context, s settings.Settings, idle time.Du
 	pool := pg.NewPool(pc, s.Postgres.MaxConnections, idle, e.clk,
 		pg.WithLogger(log.FromContext(ctx).GetLogger()), pg.WithMaxBackoff(s.PlanInterval))
 	next := &runner{
-		spec:   newPoolSpec(s, idle),
+		spec:   newPoolSpec(s),
 		limits: s.Limits,
 		pool:   pool,
 		exec:   executor.New(pool, s.Limits, e.serverVersion, e.clk),

@@ -87,9 +87,24 @@ func NewLoader(read ReadFile, files []string, opts ...LoaderOption) *Loader {
 	return l
 }
 
+// SetFiles makes files the sources, in order after the builtin query. A file that stays listed keeps its
+// last good version; one that is dropped forgets it.
+func (l *Loader) SetFiles(files []string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.files = slices.Clone(files)
+	for file := range l.previous {
+		if !slices.Contains(l.files, file) {
+			delete(l.previous, file)
+		}
+	}
+}
+
 // Load reads the builtin query, then each file in order. A later source overwrites an earlier key.
 // A missing file, or one that has never parsed or been readable, is skipped; one that stops parsing or
-// becomes unreadable keeps its last good version.
+// becomes unreadable keeps its last good version. A file that goes missing keeps its last good version
+// too: it serves again if the file comes back invalid.
 func (l *Loader) Load() Result {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -170,11 +185,40 @@ func (l *Loader) previousFor(st *Status, file string) queries.UserQueries {
 	return prev
 }
 
-// hashEntries hashes fmt's %#v form, which prints maps sorted by key and so is deterministic.
+// hashEntries hashes fmt's %#v form, which prints maps sorted by key and so is deterministic. An empty
+// TargetDatabases, Metrics or MetricMapping hashes as an absent one.
 func hashEntries(entries []Entry) string {
-	sum := sha256.Sum256(fmt.Appendf(nil, "%#v", entries))
+	norm := make([]Entry, len(entries))
+	for i, e := range entries {
+		if len(e.Query.TargetDatabases) == 0 {
+			e.Query.TargetDatabases = nil
+		}
+		if len(e.Query.Metrics) == 0 {
+			e.Query.Metrics = nil
+		} else {
+			e.Query.Metrics = normalizeMappings(e.Query.Metrics)
+		}
+		norm[i] = e
+	}
+	sum := sha256.Sum256(fmt.Appendf(nil, "%#v", norm))
 
 	return hex.EncodeToString(sum[:])
+}
+
+// normalizeMappings copies metrics with every empty MetricMapping set to nil.
+func normalizeMappings(metrics []queries.Mapping) []queries.Mapping {
+	out := make([]queries.Mapping, len(metrics))
+	for i, m := range metrics {
+		out[i] = make(queries.Mapping, len(m))
+		for name, col := range m {
+			if len(col.MetricMapping) == 0 {
+				col.MetricMapping = nil
+			}
+			out[i][name] = col
+		}
+	}
+
+	return out
 }
 
 // redactedParseError describes a YAML error by its line numbers only: the library's messages quote the

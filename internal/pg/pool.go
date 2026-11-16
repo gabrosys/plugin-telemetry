@@ -33,8 +33,6 @@ type Pool struct {
 	maxBackoff time.Duration
 	clk        clock.PassiveClock
 	log        logr.Logger
-	// base is the context connections are closed with; it is never cancelled.
-	base context.Context
 
 	// mu guards every field below.
 	mu sync.Mutex
@@ -73,7 +71,6 @@ func NewPool(c Config, maxConns int, idleTimeout time.Duration, clk clock.Passiv
 		idleTimeout: idleTimeout,
 		maxBackoff:  defaultMaxBackoff,
 		clk:         clk,
-		base:        context.Background(),
 		failed:      make(map[string]*backoff),
 		changed:     make(chan struct{}),
 		log:         log,
@@ -117,7 +114,7 @@ func (p *Pool) acquire(ctx context.Context, database string, withBackoff bool, m
 
 		if conn := p.takeIdleLocked(database); conn != nil {
 			p.mu.Unlock()
-			return conn, p.releaser(conn, database), nil
+			return conn, p.releaser(ctx, conn, database), nil
 		}
 
 		if b := p.failed[database]; withBackoff && b != nil && p.clk.Now().Before(b.retryAt) {
@@ -152,7 +149,7 @@ func (p *Pool) acquire(ctx context.Context, database string, withBackoff bool, m
 		p.mu.Unlock()
 
 		if evicted != nil {
-			p.closeConn(context.WithoutCancel(ctx), evicted.conn, evicted.database)
+			p.closeConn(ctx, evicted.conn, evicted.database)
 		}
 		return p.dial(ctx, database)
 	}
@@ -211,10 +208,10 @@ func (p *Pool) dial(ctx context.Context, database string) (*pgx.Conn, func(bool)
 	p.mu.Unlock()
 
 	if closed {
-		p.closeConn(context.WithoutCancel(ctx), conn, database)
+		p.closeConn(ctx, conn, database)
 		return nil, nil, ErrPoolClosed
 	}
-	return conn, p.releaser(conn, database), nil
+	return conn, p.releaser(ctx, conn, database), nil
 }
 
 func (p *Pool) connect(ctx context.Context, database string) (*pgx.Conn, error) {
@@ -241,22 +238,23 @@ func BackoffDelay(failures int, maxBackoff time.Duration) time.Duration {
 	return min(delay, maxBackoff)
 }
 
-// releaser returns the function that hands conn back; only its first call has an effect.
-func (p *Pool) releaser(conn *pgx.Conn, database string) func(bool) {
+// releaser returns the function that hands conn back; only its first call has an effect. ctx only
+// supplies the values (the logger) for closing conn, not a cancellation.
+func (p *Pool) releaser(ctx context.Context, conn *pgx.Conn, database string) func(bool) {
 	var once sync.Once
 	return func(broken bool) {
-		once.Do(func() { p.release(conn, database, broken) })
+		once.Do(func() { p.release(ctx, conn, database, broken) })
 	}
 }
 
-func (p *Pool) release(conn *pgx.Conn, database string, broken bool) {
+func (p *Pool) release(ctx context.Context, conn *pgx.Conn, database string, broken bool) {
 	p.mu.Lock()
 	// A connection left inside a transaction, open or failed, would carry it into the next run.
 	if broken || conn.IsClosed() || conn.PgConn().TxStatus() != 'I' || p.closed {
 		p.total--
 		p.notifyLocked()
 		p.mu.Unlock()
-		p.closeConn(p.base, conn, database)
+		p.closeConn(ctx, conn, database)
 		return
 	}
 	p.idle = append(p.idle, &idleConn{conn: conn, database: database, since: p.clk.Now()})
@@ -278,8 +276,9 @@ func (p *Pool) IdleTimeout() time.Duration {
 	return p.idleTimeout
 }
 
-// CloseIdle closes the idle connections that have been unused for the idle timeout.
-func (p *Pool) CloseIdle() {
+// CloseIdle closes the idle connections that have been unused for the idle timeout. ctx only supplies
+// values: each close is bounded by closeTimeout, whatever ctx.
+func (p *Pool) CloseIdle(ctx context.Context) {
 	p.mu.Lock()
 	now := p.clk.Now()
 	var stale []*idleConn
@@ -299,13 +298,13 @@ func (p *Pool) CloseIdle() {
 	p.mu.Unlock()
 
 	for _, ic := range stale {
-		p.closeConn(p.base, ic.conn, ic.database)
+		p.closeConn(ctx, ic.conn, ic.database)
 	}
 }
 
 // Close closes the idle connections and makes AcquireWithin fail. Connections still in use are
-// closed when they are released.
-func (p *Pool) Close() {
+// closed when they are released. ctx only supplies values: each close is bounded by closeTimeout.
+func (p *Pool) Close(ctx context.Context) {
 	p.mu.Lock()
 	p.closed = true
 	stale := make([]*idleConn, 0, len(p.idle))
@@ -316,7 +315,7 @@ func (p *Pool) Close() {
 	p.mu.Unlock()
 
 	for _, ic := range stale {
-		p.closeConn(p.base, ic.conn, ic.database)
+		p.closeConn(ctx, ic.conn, ic.database)
 	}
 }
 
@@ -326,8 +325,9 @@ func (p *Pool) notifyLocked() {
 }
 
 // closeConn ends the session; the socket is closed even when the goodbye fails, so the error is only logged.
+// A cancelled ctx must not cut the goodbye short, so only its values are kept.
 func (p *Pool) closeConn(ctx context.Context, conn *pgx.Conn, database string) {
-	ctx, cancel := context.WithTimeout(ctx, closeTimeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
 	defer cancel()
 	if err := conn.Close(ctx); err != nil {
 		p.log.V(1).Info("close connection", "database", database, "error", err.Error())

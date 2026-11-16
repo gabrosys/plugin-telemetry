@@ -45,6 +45,8 @@ type Scheduler struct {
 	run  RunFunc
 	skip SkipFunc
 
+	wg sync.WaitGroup // counts the workers
+
 	mu      sync.Mutex // guards every field below, including rnd
 	rnd     *rand.Rand
 	jobs    map[jobKey]*entry
@@ -52,10 +54,9 @@ type Scheduler struct {
 	ctx     context.Context //nolint:containedctx // set by Run and used to start workers from Update
 	started bool
 	stopped bool
-	wg      sync.WaitGroup
 }
 
-// New returns a Scheduler. rnd is only used while holding the Scheduler's lock.
+// New returns a Scheduler that owns rnd: nothing else may use it, as the Scheduler draws from it under its lock.
 func New(clk clock.Clock, rnd *rand.Rand, run RunFunc, skip SkipFunc) *Scheduler {
 	return &Scheduler{
 		clk:     clk,
@@ -96,7 +97,7 @@ func (s *Scheduler) Update(p planner.Plan) {
 	}
 	s.jobs = next
 
-	if !s.started || s.stopped {
+	if !s.started || s.stopped || s.ctx.Err() != nil {
 		return
 	}
 	for db := range touched {
@@ -179,6 +180,10 @@ func (s *Scheduler) work(ctx context.Context, db string, w *worker) {
 	defer s.wg.Done()
 	logger := log.FromContext(ctx).GetLogger()
 	for {
+		if ctx.Err() != nil {
+			s.exit(db)
+			return
+		}
 		s.mu.Lock()
 		select {
 		case <-w.wake:
@@ -205,10 +210,6 @@ func (s *Scheduler) work(ctx context.Context, db string, w *worker) {
 			s.mu.Lock()
 			w.timer = nil
 			s.mu.Unlock()
-			if ctx.Err() != nil {
-				s.exit(db)
-				return
-			}
 			continue
 		}
 		j, due := e.job, e.due
@@ -248,9 +249,9 @@ func (s *Scheduler) reschedule(e *entry, due, start, end time.Time) int {
 		next = floor
 	}
 	missed := 0
-	for !next.After(end) {
-		missed++
-		next = next.Add(interval)
+	if !next.After(end) {
+		missed = int(end.Sub(next)/interval) + 1
+		next = next.Add(time.Duration(missed) * interval)
 	}
 	e.due = next
 	return missed

@@ -75,7 +75,7 @@ func (e *engine) reload(ctx context.Context) error {
 		r.digest = hex.EncodeToString(h.Sum(nil))
 		e.files.Store(nil)
 		if r.current != nil {
-			e.teardown()
+			e.teardown(ctx)
 			r.idle(ctx)
 		}
 		return fmt.Errorf("load settings: %w", err)

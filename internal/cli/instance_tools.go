@@ -163,13 +163,13 @@ func connect(ctx context.Context, c *config) (*pg.Pool, planner.Facts, error) {
 	defer cancel()
 	conn, release, err := pool.AcquireNow(ctx, s.Postgres.Database)
 	if err != nil {
-		pool.Close()
+		pool.Close(ctx)
 		return nil, planner.Facts{}, fmt.Errorf("connect to PostgreSQL: %w", err)
 	}
 	facts, err := planner.GatherFacts(ctx, conn, pool.Guard())
 	release(err != nil)
 	if err != nil {
-		pool.Close()
+		pool.Close(ctx)
 		return nil, planner.Facts{}, fmt.Errorf("gather facts: %w", err)
 	}
 
@@ -186,7 +186,7 @@ func runTest(ctx context.Context, w io.Writer, open func(context.Context) (engin
 	if err != nil {
 		return err
 	}
-	defer pool.Close()
+	defer pool.Close(ctx)
 
 	plan := planner.Build(c.defs, c.settings, facts)
 	server := facts.Version
@@ -316,7 +316,7 @@ func printConfig(ctx context.Context, w io.Writer, open func(context.Context) (e
 	clearEnv(ctx)
 	pool, facts, connectErr := connect(ctx, c)
 	if connectErr == nil {
-		pool.Close()
+		pool.Close(ctx)
 		b.WriteString("# plan\n")
 		b.WriteString(livePlan(planner.Build(c.defs, c.settings, facts)))
 	}

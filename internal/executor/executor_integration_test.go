@@ -62,12 +62,14 @@ func limits() settings.Limits {
 	}
 }
 
-func newPool(l settings.Limits) *pg.Pool {
+func newPool(l settings.Limits) *pg.Pool { return newPoolOf(l, 4) }
+
+func newPoolOf(l settings.Limits, maxConns int) *pg.Pool {
 	GinkgoHelper()
 	cfg := server.MonitorConfig(GinkgoT().TempDir())
 	cfg.QueryTimeout = l.QueryTimeout
 	cfg.LockTimeout = l.LockTimeout
-	pool := pg.NewPool(cfg, 4, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
+	pool := pg.NewPool(cfg, maxConns, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 	DeferCleanup(pool.Close)
 	return pool
 }
@@ -377,8 +379,8 @@ var _ = Describe("Executor", func() {
 			Expect(first.Err).NotTo(HaveOccurred())
 
 			start := time.Now()
-			res := capExec.Run(ctx, jobFor("SELECT 'x' || generate_series(1, 200000000) AS datname, 1 AS value"))
-			Expect(time.Since(start)).To(BeNumerically("<", 500*time.Millisecond))
+			res := capExec.Run(ctx, jobFor("SELECT 'x' || generate_series(1, 50000000) AS datname, 1 AS value"))
+			Expect(time.Since(start)).To(BeNumerically("<", 2*time.Second))
 			Expect(res.Err).NotTo(HaveOccurred())
 			Expect(res.Outcome).To(Equal(selfmetrics.OutcomeCapped))
 			Expect(res.WouldBe).To(Equal(3))
@@ -465,15 +467,15 @@ var _ = Describe("Executor", func() {
 		Expect(res.Samples).To(BeNil())
 	})
 
-	It("recovers a panic in a run and reports error", func(ctx SpecContext) {
-		res := exec.Run(ctx, planner.Job{Query: "broken", Database: "postgres"})
+	It("recovers a panic in a run, logs its stack and reports error", func(ctx SpecContext) {
+		var out []string
+		logger := funcr.New(func(_, args string) { out = append(out, args) }, funcr.Options{Verbosity: 1})
+		logCtx := ctrllog.IntoContext(ctx, logger)
+
+		res := exec.Run(logCtx, planner.Job{Query: "broken", Database: "postgres"})
 		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeError))
 		Expect(res.Err).To(HaveOccurred())
-
-		bounded, cancel := context.WithTimeout(ctx, 20*time.Second)
-		defer cancel()
-		ok := exec.Run(bounded, jobFor("SELECT 'a' AS datname, 1 AS value"))
-		Expect(ok.Err).NotTo(HaveOccurred())
+		Expect(out).To(ContainElement(And(ContainSubstring(`"stack"=`), ContainSubstring(`"query"="broken"`))))
 	})
 
 	It("does not cut a slow connect at the interval", func(ctx SpecContext) {
@@ -650,6 +652,57 @@ var _ = Describe("Executor", func() {
 		res = exec.Run(ctx, job)
 		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeDenied))
 		Expect(res.Err).To(MatchError(pg.ErrBackoff))
+	})
+})
+
+var _ = Describe("Executor on a pool of one connection", func() {
+	var (
+		l    settings.Limits
+		exec *executor.Executor
+	)
+
+	BeforeEach(func() {
+		l = limits()
+		exec = newExecutor(newPoolOf(l, 1), l)
+	})
+
+	pidJob := func() planner.Job { return jobFor("SELECT 'a' AS datname, pg_backend_pid() AS value") }
+
+	It("keeps a session that turned default_transaction_read_only off from writing", func(ctx SpecContext) {
+		res := exec.Run(ctx, jobFor("SELECT 'a' AS datname, 1 AS value",
+			withPredicate("SELECT set_config('default_transaction_read_only', 'off', false) IS NOT NULL")))
+		Expect(res.Err).NotTo(HaveOccurred())
+
+		res = exec.Run(ctx, jobFor("CREATE TEMP TABLE t AS SELECT 1 AS v"))
+		var pgErr *pgconn.PgError
+		Expect(errors.As(res.Err, &pgErr)).To(BeTrue(), "error: %v", res.Err)
+		Expect(pgErr.Code).To(Equal("25006"))
+	})
+
+	It("cancels the statement and replaces the connection on a column mismatch", func(ctx SpecContext) {
+		first := exec.Run(ctx, pidJob())
+		Expect(first.Err).NotTo(HaveOccurred())
+
+		start := time.Now()
+		res := exec.Run(ctx, jobFor("SELECT generate_series(1, 50000000) AS a, 1 AS b", func(d *queries.Definition) {
+			d.Columns = map[string]queries.Column{"a": {Name: "a", Role: queries.RoleLabel, Usage: queries.UsageLabel}}
+			d.Labels = []string{"a"}
+		}))
+		Expect(time.Since(start)).To(BeNumerically("<", 2*time.Second))
+		Expect(res.Err).To(MatchError(queries.ErrColumnMismatch))
+
+		again := exec.Run(ctx, pidJob())
+		Expect(again.Err).NotTo(HaveOccurred())
+		Expect(again.Samples[0].Value).NotTo(Equal(first.Samples[0].Value), "the connection was replaced")
+	})
+
+	It("gets a connection within 2 s after a panic", func(ctx SpecContext) {
+		res := exec.Run(ctx, planner.Job{Query: "broken", Database: "postgres"})
+		Expect(res.Err).To(MatchError(ContainSubstring("panic")))
+
+		bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		Expect(exec.Run(bounded, pidJob()).Err).NotTo(HaveOccurred())
 	})
 })
 

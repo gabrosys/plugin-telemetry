@@ -303,7 +303,7 @@ var _ = Describe("Pool", func() {
 		release(false)
 
 		clk.SetTime(start.Add(70 * time.Second))
-		pool.CloseIdle()
+		pool.CloseIdle(ctx)
 
 		Expect(old.IsClosed()).To(BeTrue())
 		Expect(recent.IsClosed()).To(BeFalse())
@@ -318,7 +318,7 @@ var _ = Describe("Pool", func() {
 
 		pool.SetIdleTimeout(time.Second)
 		clk.SetTime(start.Add(2 * time.Second))
-		pool.CloseIdle()
+		pool.CloseIdle(ctx)
 
 		Expect(first.IsClosed()).To(BeTrue())
 		second, release, err := pool.AcquireWithin(ctx, "app", 0)
@@ -399,7 +399,7 @@ var _ = Describe("Pool", func() {
 		release(false)
 		Expect(conn.PgConn().Conn().Close()).To(Succeed())
 
-		pool.CloseIdle()
+		pool.CloseIdle(ctx)
 
 		mu.Lock()
 		defer mu.Unlock()
@@ -574,9 +574,21 @@ var _ = Describe("Pool", func() {
 		Expect(pgErr.Code).To(Equal("42501"))
 	})
 
+	It("closes a broken connection released after its acquire context ended", func(ctx SpecContext) {
+		newPool(2, time.Minute)
+		acquire, cancel := context.WithCancel(ctx)
+		conn, release, err := pool.AcquireWithin(acquire, "app", 0)
+		Expect(err).NotTo(HaveOccurred())
+		cancel()
+
+		release(true)
+
+		Eventually(conn.IsClosed).WithTimeout(time.Second).Should(BeTrue())
+	})
+
 	It("fails AcquireWithin after Close", func(ctx SpecContext) {
 		newPool(2, time.Minute)
-		pool.Close()
+		pool.Close(ctx)
 		_, _, err := pool.AcquireWithin(ctx, "app", 0)
 		Expect(err).To(MatchError(pg.ErrPoolClosed))
 	})

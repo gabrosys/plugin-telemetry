@@ -26,6 +26,7 @@ const (
 	// MonitorPassword is the password of MonitorUser.
 	MonitorPassword = "monitor-password"
 
+	dataDir    = "/tmp/pgdata"
 	holdFile   = "/tmp/pg-hold"
 	socketDir  = "/var/run/postgresql"
 	readyTries = 300
@@ -47,6 +48,7 @@ type Postgres struct {
 func Start(ctx context.Context, image string) (*Postgres, error) {
 	c, err := testcontainers.Run(ctx, image,
 		testcontainers.WithCmd("bash", "-c", serverScript),
+		testcontainers.WithEnv(map[string]string{"PGDATA": dataDir, "HOLD": holdFile}),
 		testcontainers.WithExposedPorts("5432/tcp"),
 		testcontainers.WithWaitStrategy(wait.ForLog("database system is ready to accept connections")),
 	)
@@ -134,7 +136,7 @@ func (p *Postgres) StopServer(ctx context.Context) error {
 	if err := p.run(ctx, "touch", holdFile); err != nil {
 		return err
 	}
-	return p.run(ctx, "pg_ctl", "-D", "/tmp/pgdata", "stop", "-m", "fast")
+	return p.run(ctx, "pg_ctl", "-D", dataDir, "stop", "-m", "fast")
 }
 
 // StartServer starts PostgreSQL again and returns once it accepts connections on the same port.

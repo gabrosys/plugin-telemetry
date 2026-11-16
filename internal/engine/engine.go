@@ -325,7 +325,7 @@ func (e *engine) shutdown(ctx context.Context, stopSched context.CancelFunc, sch
 	stopSched()
 	<-schedDone
 	if r := e.setRunner(nil); r != nil {
-		r.pool.Close()
+		r.pool.Close(ctx)
 	}
 	<-watchDone
 
@@ -415,7 +415,7 @@ func (e *engine) swapPool(ctx context.Context, s settings.Settings, idle time.Du
 		exec:   executor.New(pool, s.Limits, e.serverVersion, e.clk),
 	}
 	if old := e.setRunner(next); old != nil {
-		old.pool.Close()
+		old.pool.Close(ctx)
 	}
 }
 
@@ -447,7 +447,7 @@ func (e *engine) setRefused(v bool) (was bool) {
 }
 
 // teardown stops the export loop, the facts rounds and the pool.
-func (e *engine) teardown() {
+func (e *engine) teardown(ctx context.Context) {
 	stopTimer(&e.factsTimer)
 	stopTimer(&e.earlyTimer)
 	e.stopLoop()
@@ -460,7 +460,7 @@ func (e *engine) teardown() {
 	e.checksErr = ""
 	e.setRefused(false)
 	if r := e.setRunner(nil); r != nil {
-		r.pool.Close()
+		r.pool.Close(ctx)
 	}
 }
 
@@ -668,13 +668,13 @@ func (e *engine) gatherRound(ctx context.Context, timed bool) {
 	}
 	took := e.clk.Since(start)
 	if err != nil && ctx.Err() != nil {
-		e.runner.pool.CloseIdle()
+		e.runner.pool.CloseIdle(ctx)
 		return
 	}
 	// A round that returns early or panics before its last statement counts as failed.
 	failed := true
 	defer func() { e.stats.Collection(failed, took) }()
-	e.runner.pool.CloseIdle()
+	e.runner.pool.CloseIdle(ctx)
 	if err != nil {
 		e.facts.Store(nil)
 		if errors.Is(err, planner.ErrSuperuser) {

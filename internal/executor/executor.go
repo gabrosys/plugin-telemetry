@@ -7,14 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime/debug"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/cloudnative-pg/machinery/pkg/log"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"k8s.io/utils/clock"
-
-	"github.com/cloudnative-pg/machinery/pkg/log"
 
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
@@ -95,6 +95,7 @@ func (e *Executor) Run(ctx context.Context, job planner.Job) (res Result) {
 			res.Outcome = selfmetrics.OutcomeError
 			res.Err = fmt.Errorf("panic in query %s on %s: %v", job.Query, job.Database, r)
 			res.Samples = nil
+			logCleanup(ctx, job, "recover a panic in a run", res.Err, "stack", string(debug.Stack()))
 		}
 		res.Duration = e.clk.Since(res.Started)
 	}()
@@ -191,7 +192,7 @@ func (e *Executor) inTransaction(ctx context.Context, conn *pgx.Conn, job planne
 
 	capped, err := e.collect(ctx, tx, job, res, &discard)
 	if err != nil {
-		return false, err
+		return discard, err
 	}
 	if capped {
 		res.Outcome = selfmetrics.OutcomeCapped
@@ -285,16 +286,15 @@ func (e *Executor) collect(ctx context.Context, tx pgx.Tx, job planner.Job, res 
 	for rows.Next() {
 		if rowCount == 0 {
 			if err := checkColumns(); err != nil {
+				// The rest of the result is not read, and the cancel request may land on a later statement.
+				*discard = true
+				e.stopStatement(ctx, tx, job, discard, "send the cancel request at a column mismatch")
 				return false, err
 			}
 		}
 		if maxRows > 0 && rowCount >= maxRows {
 			res.WouldBe = series
-			if err := e.cancel(ctx, tx.Conn()); err != nil {
-				// An undelivered or late cancel request could stop the next statement on this connection.
-				*discard = true
-				logCleanup(ctx, job, "send the cancel request at the row cap", err)
-			}
+			e.stopStatement(ctx, tx, job, discard, "send the cancel request at the row cap")
 			return true, nil
 		}
 		rowCount++
@@ -340,6 +340,15 @@ func (e *Executor) collect(ctx context.Context, tx pgx.Tx, job planner.Job, res 
 	return false, nil
 }
 
+// stopStatement cancels the statement so that closing the rows does not read the rest of the result.
+// An undelivered or late cancel request could stop the next statement on this connection, so then it is discarded.
+func (e *Executor) stopStatement(ctx context.Context, tx pgx.Tx, job planner.Job, discard *bool, msg string) {
+	if err := e.cancel(ctx, tx.Conn()); err != nil {
+		*discard = true
+		logCleanup(ctx, job, msg, err)
+	}
+}
+
 // cancelStatement asks the server to stop the running statement, so closing the rows does not
 // read the rest of the result. Delivery is not guaranteed (pgconn.PgConn.CancelRequest).
 func cancelStatement(ctx context.Context, conn *pgx.Conn) error {
@@ -352,8 +361,9 @@ func cancelStatement(ctx context.Context, conn *pgx.Conn) error {
 }
 
 // logCleanup logs an error that does not change the outcome of the run.
-func logCleanup(ctx context.Context, job planner.Job, msg string, err error) {
-	log.FromContext(ctx).GetLogger().V(1).Info(msg, "query", job.Query, "database", job.Database, "error", err.Error())
+func logCleanup(ctx context.Context, job planner.Job, msg string, err error, kv ...any) {
+	kv = append([]any{"query", job.Query, "database", job.Database, "error", err.Error()}, kv...)
+	log.FromContext(ctx).GetLogger().V(1).Info(msg, kv...)
 }
 
 // connectionFailed reports whether the connection must be discarded: the pool does not ping idle

@@ -83,7 +83,7 @@ func RunWithBrokenBookkeeping(ctx context.Context, job planner.Job, n int) (erro
 	}
 	errorRuns, err = queryRuns(ctx, e, job, selfmetrics.OutcomeError)
 	if r := e.setRunner(nil); r != nil {
-		r.pool.Close()
+		r.pool.Close(ctx)
 	}
 	return errorRuns, kept, errors.Join(err, e.mp.Shutdown(ctx))
 }
@@ -204,7 +204,7 @@ func FactsRoundOnStop(ctx context.Context) (up int64) {
 	e.swapPool(ctx, s, time.Minute)
 	defer func() {
 		if r := e.setRunner(nil); r != nil {
-			r.pool.Close()
+			r.pool.Close(ctx)
 		}
 	}()
 	e.plan.current = &configuration{settings: s}
@@ -234,7 +234,7 @@ func FactsFailuresAfterPanicOnStop(ctx context.Context) int {
 	e.swapPool(ctx, s, time.Minute)
 	defer func() {
 		if r := e.setRunner(nil); r != nil {
-			r.pool.Close()
+			r.pool.Close(ctx)
 		}
 	}()
 	e.plan.current = &configuration{settings: s}
@@ -262,7 +262,7 @@ func IdleTimeoutAfterIdleOnlyApply(ctx context.Context) (kept bool, idle time.Du
 	}
 	first := &configuration{settings: s, idleTimeout: time.Minute}
 	second := &configuration{settings: s, idleTimeout: 2 * time.Minute}
-	defer e.teardown()
+	defer e.teardown(ctx)
 	if err := e.apply(ctx, nil, first); err != nil {
 		return false, 0, errors.Join(err, e.mp.Shutdown(ctx))
 	}
@@ -319,7 +319,7 @@ func RunJobWhileRefused(ctx context.Context) (connections int, err error) {
 		PlanInterval: time.Minute,
 	}
 	e.swapPool(ctx, s, time.Minute)
-	defer e.teardown()
+	defer e.teardown(ctx)
 	cur := &configuration{settings: s, idleTimeout: time.Minute}
 	e.plan.current = cur
 	e.refuse(ctx, cur, map[string]bool{"superuser": true})

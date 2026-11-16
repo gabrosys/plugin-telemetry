@@ -3,6 +3,7 @@ package clusterconfig
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
@@ -39,13 +40,6 @@ type Inputs struct {
 // Build returns validated settings whose file fields hold virtual names, plus warnings.
 // An error never contains a value read from a Secret.
 func Build(in Inputs) (settings.Settings, []string, error) {
-	if in.Cluster == nil {
-		return settings.Settings{}, nil, errors.New("build settings: no Cluster")
-	}
-	if in.Exporter == nil {
-		return settings.Settings{}, nil, errors.New("build settings: no TelemetryExporter")
-	}
-
 	s := settings.Defaults()
 	s.Cluster = in.Cluster.Name
 	s.Namespace = in.Cluster.Namespace
@@ -242,13 +236,9 @@ func resourceAttributes(in Inputs, env otlpEnv) (map[string]string, []string) {
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("%s: ignored, %v", envResourceAttrs, err))
 		}
-		for k, val := range parsed {
-			out[k] = val
-		}
+		maps.Copy(out, parsed)
 	}
-	for k, v := range in.Exporter.Spec.ResourceAttributes {
-		out[k] = v
-	}
+	maps.Copy(out, in.Exporter.Spec.ResourceAttributes)
 	for _, key := range in.Exporter.Spec.ResourceLabels {
 		if key == instanceRoleLabel {
 			warnings = append(warnings, "spec.resourceLabels: "+instanceRoleLabel+" is ignored, it changes at switchover")

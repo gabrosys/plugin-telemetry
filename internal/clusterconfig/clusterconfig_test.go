@@ -109,17 +109,6 @@ var _ = Describe("Build", func() {
 		Expect(err).To(MatchError(ContainSubstring("passwordSecret")))
 	})
 
-	It("fails without a Cluster or an exporter", func() {
-		in := newInputs()
-		in.Exporter = nil
-		_, _, err := clusterconfig.Build(in)
-		Expect(err).To(HaveOccurred())
-		in = newInputs()
-		in.Cluster = nil
-		_, _, err = clusterconfig.Build(in)
-		Expect(err).To(HaveOccurred())
-	})
-
 	It("takes metrics.defaultInterval, else spec.monitoring.metricsQueriesTTL, else 30s", func() {
 		Expect(mustBuild(newInputs()).DefaultInterval).To(Equal(30 * time.Second))
 

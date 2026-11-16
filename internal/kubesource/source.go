@@ -113,16 +113,16 @@ func (s *Source) open(ctx context.Context, wait time.Duration, start func(contex
 	waitCtx, stopWait := context.WithTimeout(ctx, wait)
 	defer stopWait()
 
-	for !s.synced() {
+	for pending := s.pending(); len(pending) > 0; pending = s.pending() {
 		select {
 		case err := <-started:
 			if err != nil {
 				return nil, err
 			}
 			// Start returns without an error only when ctx has ended.
-			return nil, s.notReady(ctx.Err())
+			return nil, s.notReady(pending, ctx.Err())
 		case <-waitCtx.Done():
-			return nil, s.notReady(waitCtx.Err())
+			return nil, s.notReady(pending, waitCtx.Err())
 		case <-s.o.Clock.After(pollReady):
 		}
 	}
@@ -130,27 +130,37 @@ func (s *Source) open(ctx context.Context, wait time.Duration, start func(contex
 	return s, nil
 }
 
-// synced reports whether every watch the wanted set has has reported or been denied.
-func (s *Source) synced() bool {
+// pending lists, sorted, each watch the wanted set has that has neither reported nor been denied, with
+// the text of its last watch error: "<kind> <name>: <error>".
+func (s *Source) pending() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var out []string
 	for k := range s.wantedLocked() {
-		if e := s.entries[k]; e == nil || !e.synced && e.denied == nil {
-			return false
+		e := s.entries[k]
+		if e != nil && (e.synced || e.denied != nil) {
+			continue
 		}
+		reason := "no answer yet"
+		if e != nil && e.lastErr != "" {
+			reason = e.lastErr
+		}
+		out = append(out, fmt.Sprintf("%s %s: %s", k.kind, k.name, reason))
 	}
+	slices.Sort(out)
 
-	return true
+	return out
 }
 
-// notReady is the error of an open that ended before the watches synced: no token, or ErrNotReady.
-func (s *Source) notReady(cause error) error {
+// notReady is the error of an open that ended before the watches synced: no token, or ErrNotReady
+// naming what is pending.
+func (s *Source) notReady(pending []string, cause error) error {
 	token := filepath.Join(s.o.TokenDir, "token")
 	if _, err := os.Stat(token); err != nil {
 		return fmt.Errorf("sidecar token %s did not appear: %w", token, cause)
 	}
 
-	return fmt.Errorf("the watched objects did not sync: %w: %w", engine.ErrNotReady, cause)
+	return fmt.Errorf("the watched objects did not sync (%s): %w: %w", strings.Join(pending, "; "), engine.ErrNotReady, cause)
 }
 
 // client waits for the token and returns the dynamic client; nil when ctx ended first.

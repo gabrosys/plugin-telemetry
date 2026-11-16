@@ -140,7 +140,9 @@ var _ = Describe("Snapshot", func() {
 	)
 
 	BeforeEach(func() {
-		ctx = logr.NewContext(context.Background(), logr.Discard())
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(logr.NewContext(context.Background(), logr.Discard()))
+		DeferCleanup(cancel)
 		gvrs := map[schema.GroupVersionResource]string{
 			{Group: "postgresql.cnpg.io", Version: "v1", Resource: "clusters"}:                           "ClusterList",
 			{Group: "telemetry.gabrosys.github.io", Version: "v1alpha1", Resource: "telemetryexporters"}: "TelemetryExporterList",
@@ -205,6 +207,8 @@ var _ = Describe("Snapshot", func() {
 		Expect(time.Since(start)).To(BeNumerically(">=", 400*time.Millisecond))
 		Expect(err).To(MatchError(engine.ErrNotReady))
 		Expect(err).To(MatchError(context.DeadlineExceeded))
+		Expect(err).To(MatchError(ContainSubstring("etcd is down")))
+		Expect(err).To(MatchError(ContainSubstring("configmap envcm")))
 	})
 
 	It("returns one context error promptly when ctx has ended", func() {

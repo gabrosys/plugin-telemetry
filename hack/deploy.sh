@@ -4,6 +4,7 @@
 # Applies the CRDs, then config/ with the image pinned to IMAGE_REF (REPO@DIGEST), the sidecar image set to IMAGE_REF and
 # the plugin exporting its self-metrics to the e2e collector (hack/collector.yaml, whose reader container runs POSTGRES_IMAGE),
 # waits for both rollouts and annotates the plugin Service so CloudNativePG rebuilds its connection and reloads the capabilities.
+# The overlay sets --log-level=debug on the plugin: framework.HookCalls reads the debug-level "lifecycle hook" line.
 set -euo pipefail
 
 : "${KUBECTL:?}" "${KIND_CLUSTER:?}" "${BIN:?}" "${COLLECTOR_IMAGE:?}" "${POSTGRES_IMAGE:?}"

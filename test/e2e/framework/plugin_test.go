@@ -160,13 +160,13 @@ var _ = Describe("ParseHookCalls", func() {
 	It("returns the hook lines logged after since", func() {
 		logs := strings.Join([]string{
 			`{"level":"info","ts":"2026-11-13T18:25:30.476Z","msg":"Starting plugin","name":"telemetry.gabrosys.github.io"}`,
-			`{"level":"info","ts":"2026-11-13T18:25:34.900Z","msg":"lifecycle hook","namespace":"ns",` +
+			`{"level":"debug","ts":"2026-11-13T18:25:34.900Z","msg":"lifecycle hook","namespace":"ns",` +
 				`"cluster":"c","operation":"EVALUATE","pod":"c-1","outcome":"patched"}`,
 			`goroutine 1 [running]:`,
-			`{"level":"info","ts":"2026-11-13T18:25:34.990123Z","msg":"lifecycle hook","namespace":"ns",` +
+			`{"level":"debug","ts":"2026-11-13T18:25:34.990123Z","msg":"lifecycle hook","namespace":"ns",` +
 				`"cluster":"c","operation":"EVALUATE","pod":"c-1","outcome":"patched"}`,
 			`{"level":"error","ts":"2026-11-13T18:25:35Z","msg":"sidecar not injected, returning no patch","error":"x"}`,
-			`{"level":"info","ts":"2026-11-13T18:25:35.5Z","msg":"lifecycle hook","namespace":"ns",` +
+			`{"level":"debug","ts":"2026-11-13T18:25:35.5Z","msg":"lifecycle hook","namespace":"ns",` +
 				`"cluster":"d","operation":"CREATE","pod":"d-1","outcome":"unchanged"}`,
 			``,
 		}, "\n")

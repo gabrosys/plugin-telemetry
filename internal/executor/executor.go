@@ -114,14 +114,18 @@ func (e *Executor) Run(ctx context.Context, job planner.Job) (res Result) {
 // RunTimeout is the deadline of one run, which starts when the run has a pool slot.
 func RunTimeout(l settings.Limits) time.Duration { return l.QueryTimeout + deadlineGrace }
 
-// run waits for a pool slot for at most the job's interval, then runs the job under a deadline that starts at the slot.
+// run waits for a pool slot for at most the job's interval (the query timeout without one), then runs the job under a deadline that starts at the slot.
 // pastDeadline reports that this deadline had passed when run returned.
 func (e *Executor) run(ctx context.Context, job planner.Job, res *Result) (pastDeadline bool, err error) {
-	conn, release, err := e.pool.AcquireWithin(ctx, job.Database, job.Interval)
+	maxWait := job.Interval
+	if maxWait <= 0 {
+		maxWait = e.limits.QueryTimeout
+	}
+	conn, release, err := e.pool.AcquireWithin(ctx, job.Database, maxWait)
 	if err != nil {
 		if errors.Is(err, pg.ErrNoSlot) {
-			return false, fmt.Errorf("query %s on database %s could not get a connection within its interval %s: %w",
-				job.Query, job.Database, job.Interval, pg.ErrNoSlot)
+			return false, fmt.Errorf("query %s on database %s could not get a connection within %s: %w",
+				job.Query, job.Database, maxWait, pg.ErrNoSlot)
 		}
 		// A cancelled wait, the backoff after a failed connect and a closed pool lose no connection.
 		res.ConnectionLost = ctx.Err() == nil && !errors.Is(err, pg.ErrBackoff) && !errors.Is(err, pg.ErrPoolClosed)

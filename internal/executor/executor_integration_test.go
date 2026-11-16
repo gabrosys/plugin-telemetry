@@ -554,7 +554,7 @@ var _ = Describe("Executor", func() {
 		Expect(time.Since(start)).To(BeNumerically("<", time.Second))
 		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeSkipped))
 		Expect(res.Err).To(MatchError(pg.ErrNoSlot))
-		Expect(res.Err).To(MatchError(ContainSubstring("query probe on database postgres could not get a connection within its interval 200ms")))
+		Expect(res.Err).To(MatchError(ContainSubstring("query probe on database postgres could not get a connection within 200ms")))
 		Expect(res.ConnectionLost).To(BeFalse())
 		Expect(res.Samples).To(BeNil())
 
@@ -563,6 +563,28 @@ var _ = Describe("Executor", func() {
 		again := newExecutor(one, l).Run(ctx, job)
 		Expect(again.Outcome).To(Equal(selfmetrics.OutcomeOK), "error: %v", again.Err)
 	})
+
+	It("gives up waiting for a connection after QueryTimeout when the job has no interval", func(ctx SpecContext) {
+		l.QueryTimeout = 500 * time.Millisecond
+		cfg := server.MonitorConfig(GinkgoT().TempDir())
+		cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout
+		one := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()))
+		DeferCleanup(one.Close)
+
+		_, release, err := one.Acquire(ctx, "postgres")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { release(false) })
+
+		job := jobFor("SELECT 'a' AS datname, 1 AS value")
+		Expect(job.Interval).To(BeZero())
+		start := time.Now()
+		res := newExecutor(one, l).Run(ctx, job)
+
+		Expect(time.Since(start)).To(BeNumerically("<", 3*time.Second))
+		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeSkipped))
+		Expect(res.Err).To(MatchError(pg.ErrNoSlot))
+		Expect(res.Err).To(MatchError(ContainSubstring("within 500ms")))
+	}, SpecTimeout(30*time.Second))
 
 	Describe("with a session role that is a superuser", func() {
 		const role = "cnpg_exec_super"

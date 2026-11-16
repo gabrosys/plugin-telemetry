@@ -87,7 +87,7 @@ Replacement replica: one replica deleted with the 1000 Clusters cached. The new 
 | Working set | 44109824 B (42.1 MiB) | 47292416 B (45.1 MiB) | 58773504 B (56.1 MiB) | <= 67108864 B | yes |
 | `rssBytes` | 43020288 B | 46202880 B | 57683968 B | | |
 
-Both targets are met with the change in place. The headroom to 64 MiB is 3.8 MiB on the highest idle reading.
+Both targets are met with the change in place. The headroom to 64 MiB is 6.5 MiB (6856704 B) on the highest idle reading.
 
 ## API load of the sidecars' watches
 

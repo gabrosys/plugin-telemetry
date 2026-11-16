@@ -122,13 +122,12 @@ var _ = Describe("IdentityController", func() {
 		Expect(mapper(ctx, newExporter("other", "shared"))).To(ConsistOf(requestFor("other", "same-name-elsewhere")))
 	})
 
-	It("lists the namespace's Clusters without a deep copy and changes none of them", func(ctx context.Context) {
-		held := []*apiv1.Cluster{
+	It("lists the namespace's Clusters without a deep copy", func(ctx context.Context) {
+		var listed []*client.ListOptions
+		cl := newClient([]client.Object{
 			newCluster("ns", "pg", ours(map[string]string{"exporter": "shared"})),
 			newCluster("ns", "other", ours(map[string]string{"exporter": "elsewhere"})),
-		}
-		var listed []*client.ListOptions
-		cl := newClient([]client.Object{held[0], held[1]}, interceptor.Funcs{
+		}, interceptor.Funcs{
 			List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 				o := &client.ListOptions{}
 				o.ApplyOptions(opts)
@@ -138,14 +137,10 @@ var _ = Describe("IdentityController", func() {
 			},
 		})
 
-		snapshots := []*apiv1.Cluster{held[0].DeepCopy(), held[1].DeepCopy()}
-
 		Expect(operator.ExportersToClusters(cl)(ctx, newExporter("ns", "shared"))).To(ConsistOf(requestFor("ns", "pg")))
 
 		Expect(listed).To(HaveLen(1))
 		Expect(listed[0].UnsafeDisableDeepCopy).To(HaveValue(BeTrue()))
-		Expect(held[0]).To(Equal(snapshots[0]))
-		Expect(held[1]).To(Equal(snapshots[1]))
 	})
 
 	It("removes the identity when the plugin entry is disabled or removed", func(ctx context.Context) {

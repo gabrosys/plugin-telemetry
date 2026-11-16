@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -94,7 +93,7 @@ func renamed[T any](in *T, old, name string) (*T, error) {
 	return &out, nil
 }
 
-var _ = Describe("the plugin replica with 1000 Clusters", Ordered, func() {
+var _ = Describe("the plugin replica with 1000 Clusters", Ordered, ContinueOnFailure, func() {
 	var (
 		c          client.Client
 		cfg        *rest.Config
@@ -161,22 +160,18 @@ var _ = Describe("the plugin replica with 1000 Clusters", Ordered, func() {
 	}
 
 	BeforeAll(func(ctx SpecContext) {
-		env, err := framework.LoadEnv(os.Getenv)
-		Expect(err).NotTo(HaveOccurred())
-		out = os.Getenv("MEASURE_OUT")
-		Expect(out).NotTo(BeEmpty(), "MEASURE_OUT")
+		var (
+			env  framework.Env
+			base client.Client
+		)
+		env, out, base, cfg = measureEnv(ctx)
 		m.CNPGVersion = env.CNPGVersion
 
-		var base client.Client
-		base, cfg, err = framework.NewClients(env.KubeContext)
-		Expect(err).NotTo(HaveOccurred())
 		fast := rest.CopyConfig(cfg)
 		fast.QPS, fast.Burst = 50, 100
+		var err error
 		c, err = client.New(fast, client.Options{Scheme: base.Scheme()})
 		Expect(err).NotTo(HaveOccurred())
-
-		Eventually(framework.PluginAvailable).WithContext(ctx).WithArguments(c).
-			WithTimeout(3 * time.Minute).WithPolling(statePoll).Should(BeTrue())
 
 		refNS, err := framework.CreateNamespace(ctx, c, "measure-plugin-ref")
 		Expect(err).NotTo(HaveOccurred())
@@ -213,6 +208,7 @@ var _ = Describe("the plugin replica with 1000 Clusters", Ordered, func() {
 		Expect(n).To(Equal(m.Clusters))
 		m.ClusterBytes = total / n
 		identityStart = start
+		writeMeasurement(out, "plugin", m.CNPGVersion, m)
 	}, NodeTimeout(30*time.Minute))
 
 	AfterAll(func(ctx SpecContext) {

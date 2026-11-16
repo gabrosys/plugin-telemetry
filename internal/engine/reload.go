@@ -212,8 +212,13 @@ func (r *replanner) commit(logger log.Logger, next *configuration) {
 
 // setFacts records the facts of a round and replans when they changed.
 func (r *replanner) setFacts(ctx context.Context, f planner.Facts) {
-	if !slices.Equal(r.skipped, f.SkippedDatabases) && len(f.SkippedDatabases) > 0 {
-		log.FromContext(ctx).Warning("databases not monitored, their names are not valid UTF-8", "databases", f.SkippedDatabases)
+	if !slices.Equal(r.skipped, f.SkippedDatabases) {
+		logger := log.FromContext(ctx)
+		if len(f.SkippedDatabases) > 0 {
+			logger.Warning("databases not monitored, their names are not valid UTF-8", "databases", f.SkippedDatabases)
+		} else {
+			logger.Info("all databases are monitored again")
+		}
 	}
 	r.skipped = f.SkippedDatabases
 	if r.facts != nil && sameFacts(*r.facts, f) {

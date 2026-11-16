@@ -92,18 +92,34 @@ var _ = Describe("cnpg_collector_up", func() {
 	})
 })
 
-var _ = Describe("Databases whose names are not valid UTF-8", func() {
-	It("log one warning while the list stays the same, none when it empties", func() {
+var _ = DescribeTable("Databases whose names are not valid UTF-8",
+	func(lists [][]string, warnings, recoveries int) {
 		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) },
 			func(_ context.Context, round int) (planner.Facts, error) {
 				f := memPrimary
-				if round < 3 {
-					f.SkippedDatabases = []string{`"bad\xffname"`}
-				}
+				f.SkippedDatabases = lists[min(round, len(lists)-1)]
 				return f, nil
 			})
-		h.advance(func() bool { return len(h.roundTimes()) >= 6 })
-		Expect(h.logged("databases not monitored, their names are not valid UTF-8")).To(Equal(1))
+		h.advance(func() bool { return len(h.roundTimes()) >= len(lists)+3 })
+		Expect(h.logged("databases not monitored, their names are not valid UTF-8")).To(Equal(warnings))
+		Expect(h.logged("all databases are monitored again")).To(Equal(recoveries))
+	},
+	Entry("the same list three times, then none: one warning, one recovery",
+		[][]string{{`"a"`}, {`"a"`}, {`"a"`}, nil}, 1, 1),
+	Entry("a different list warns again", [][]string{{`"a"`}, {`"b"`}}, 2, 0),
+	Entry("a list, none, the list again: two warnings, one recovery", [][]string{{`"a"`}, nil, {`"a"`}}, 2, 1),
+	Entry("never a list: nothing logged", [][]string{nil}, 0, 0),
+)
+
+var _ = Describe("The databases not monitored warning", func() {
+	It("names the databases", func() {
+		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) },
+			func(context.Context, int) (planner.Facts, error) {
+				f := memPrimary
+				f.SkippedDatabases = []string{`"bad\xffname"`}
+				return f, nil
+			})
+		h.advance(func() bool { return h.logged("databases not monitored") >= 1 })
 		Expect(h.loggedAll("databases not monitored", `"databases"=["\"bad\\xffname\""]`)).To(Equal(1))
 	})
 })

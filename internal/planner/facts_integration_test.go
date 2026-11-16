@@ -4,6 +4,7 @@ package planner_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"time"
 
@@ -123,29 +124,40 @@ var _ = Describe("GatherFacts", func() {
 
 	// renameBad renames a database from a SQL_ASCII database, whose sessions pass bytes above 127 unchecked
 	// (PostgreSQL 18, "Character Set Support"); the docker exec API cannot carry such a byte in an argument.
+	// from and to are SQL expressions.
 	renameBad := func(from, to string) string {
-		return "SET client_encoding = 'SQL_ASCII'; DO $$ BEGIN EXECUTE format('ALTER DATABASE %I RENAME TO %I', '" +
-			from + "', '" + to + "'); END $$"
+		return "SET client_encoding = 'SQL_ASCII'; DO $$ BEGIN EXECUTE format('ALTER DATABASE %I RENAME TO %I', " +
+			from + ", " + to + "); END $$"
 	}
 
 	It("skips connectable databases whose names are not valid UTF-8", func(ctx SpecContext) {
+		const (
+			plain   = "'bad' || chr(255) || 'name'"
+			control = "'bad' || chr(10) || '\"name' || chr(255)"
+		)
 		Expect(server.Exec(ctx, "CREATE DATABASE sqlascii TEMPLATE template0 ENCODING 'SQL_ASCII' LOCALE_PROVIDER libc LOCALE 'C'")).To(Succeed())
-		DeferCleanup(func(ctx SpecContext) {
-			Expect(server.Exec(ctx, "DROP DATABASE sqlascii")).To(Succeed())
-		})
 		Expect(server.Exec(ctx, "CREATE DATABASE badname")).To(Succeed())
+		Expect(server.Exec(ctx, "CREATE DATABASE badname2")).To(Succeed())
 		renamed := false
 		DeferCleanup(func(ctx SpecContext) {
+			var errs error
 			if renamed {
-				Expect(server.ExecIn(ctx, "sqlascii", renameBad("bad' || chr(255) || 'name", "badname"))).To(Succeed())
+				errs = errors.Join(
+					server.ExecIn(ctx, "sqlascii", renameBad(plain, "'badname'")),
+					server.ExecIn(ctx, "sqlascii", renameBad(control, "'badname2'")))
 			}
-			Expect(server.Exec(ctx, "DROP DATABASE badname")).To(Succeed())
+			errs = errors.Join(errs,
+				server.Exec(ctx, "DROP DATABASE IF EXISTS badname"),
+				server.Exec(ctx, "DROP DATABASE IF EXISTS badname2"),
+				server.Exec(ctx, "DROP DATABASE sqlascii"))
+			Expect(errs).NotTo(HaveOccurred())
 		})
-		Expect(server.ExecIn(ctx, "sqlascii", renameBad("badname", "bad' || chr(255) || 'name"))).To(Succeed())
+		Expect(server.ExecIn(ctx, "sqlascii", renameBad("'badname'", plain))).To(Succeed())
+		Expect(server.ExecIn(ctx, "sqlascii", renameBad("'badname2'", control))).To(Succeed())
 		renamed = true
 
 		f := gather(ctx)
 		Expect(f.Databases).To(Equal([]string{"app", "postgres", "sqlascii"}))
-		Expect(f.SkippedDatabases).To(Equal([]string{`"bad\xffname"`}))
+		Expect(f.SkippedDatabases).To(Equal([]string{`"bad\n\"name\xff"`, `"bad\xffname"`}))
 	})
 })

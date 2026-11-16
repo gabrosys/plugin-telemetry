@@ -187,7 +187,16 @@ var _ = Describe("Watch", func() {
 	})
 
 	It("reloads at least once a second under a steady stream of updates", func() {
-		start(file)
+		var seen atomic.Value // the file as the latest notify read it
+		startWith(func(ctx context.Context, notify func()) error {
+			return sources.WatchWith(ctx, clk, files, func() {
+				defer GinkgoRecover()
+				b, err := os.ReadFile(filepath.Clean(file))
+				Expect(err).NotTo(HaveOccurred())
+				seen.Store(string(b))
+				notify()
+			})
+		}, file)
 		for i := range 60 {
 			// An event that lands after the timer fired and before Watch took the fire is covered by that fire's notify, so write again.
 			Eventually(func() bool {
@@ -196,8 +205,11 @@ var _ = Describe("Watch", func() {
 			}, 5*time.Second).Should(BeTrue())
 			settle()
 			clk.Step(500 * time.Millisecond)
+			if (i+1)%2 == 0 {
+				Eventually(count.Load, 5*time.Second).Should(BeNumerically(">=", 1+(i+1)/2), "a notify every second")
+			}
 		}
-		Eventually(count.Load, 5*time.Second).Should(BeNumerically(">=", 30))
+		Eventually(seen.Load, 5*time.Second).Should(Equal("a:\n  query: SELECT 59\n"))
 	})
 
 	It("notifies once after files() adds a directory, then watches it", func() {

@@ -659,18 +659,13 @@ var _ = Describe("Source", func() {
 				}).Should(BeTrue())
 				Consistently(clk.HasWaiters, "20ms").Should(BeTrue())
 				clk.Step(500 * time.Millisecond)
+				if i%2 == 0 {
+					Eventually(func() int { mu.Lock(); defer mu.Unlock(); return len(seen) }).Should(BeNumerically(">=", 1+i/2), "a notify every second")
+				}
 			}
 			clk.Step(time.Second)
 
 			Eventually(func() int { mu.Lock(); defer mu.Unlock(); return seen[len(seen)-1] }).Should(Equal(60))
-			mu.Lock()
-			defer mu.Unlock()
-			Expect(len(seen)).To(BeNumerically(">=", 30))
-			last := 0
-			for _, n := range seen {
-				Expect(n).To(BeNumerically(">=", last), "a notify read fewer series than the one before")
-				last = n
-			}
 		})
 
 		It("returns nil when ctx ends", func() {

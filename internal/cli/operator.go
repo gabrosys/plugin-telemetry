@@ -65,7 +65,7 @@ func newOperatorCommand() *cobra.Command {
 
 			ctx := cmd.Context()
 			store := operator.NewImageStore()
-			if err := operator.WatchSidecarImage(ctx, mgr.GetCache(), store); err != nil {
+			if err := operator.WatchSidecarImage(ctx, mgr.GetCache(), store, namespace, configMap); err != nil {
 				return fmt.Errorf("watch sidecar image: %w", err)
 			}
 

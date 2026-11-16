@@ -27,9 +27,9 @@ func configMap(data map[string]string) *corev1.ConfigMap {
 	}
 }
 
-var _ = DescribeTable("ParseImageRef",
+var _ = DescribeTable("ImageStore.Set image references",
 	func(in string, ok bool) {
-		_, err := operator.ParseImageRef(in)
+		err := operator.NewImageStore().Set(configMap(map[string]string{operator.SidecarImageKey: in}))
 		if ok {
 			Expect(err).NotTo(HaveOccurred())
 		} else {
@@ -111,7 +111,7 @@ var _ = Describe("image event handler", func() {
 		var logCtx context.Context
 		logCtx, logs = captureAll(ctx, 2)
 		store = operator.NewImageStore()
-		handler = operator.ImageEventHandler(log.FromContext(logCtx), store)
+		handler = operator.ImageEventHandler(log.FromContext(logCtx), store, "cnpg-system", "sidecar-image")
 	})
 
 	It("sets the image on add", func() {
@@ -168,7 +168,7 @@ var _ = Describe("WatchSidecarImage", func() {
 		store := operator.NewImageStore()
 		image := "ghcr.io/x@sha256:" + hex64
 
-		Expect(operator.WatchSidecarImage(ctx, informers, store)).To(Succeed())
+		Expect(operator.WatchSidecarImage(ctx, informers, store, "cnpg-system", "sidecar-image")).To(Succeed())
 
 		informer, err := informers.FakeInformerFor(ctx, &corev1.ConfigMap{})
 		Expect(err).NotTo(HaveOccurred())
@@ -180,6 +180,6 @@ var _ = Describe("WatchSidecarImage", func() {
 		boom := errors.New("boom")
 		informers := &informertest.FakeInformers{Error: boom}
 
-		Expect(operator.WatchSidecarImage(ctx, informers, operator.NewImageStore())).To(MatchError(boom))
+		Expect(operator.WatchSidecarImage(ctx, informers, operator.NewImageStore(), "cnpg-system", "sidecar-image")).To(MatchError(boom))
 	})
 })

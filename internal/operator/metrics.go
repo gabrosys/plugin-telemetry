@@ -6,14 +6,11 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
-	"slices"
-	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/exemplar"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
@@ -48,10 +45,7 @@ const (
 	outcomeInTheWay = "in the way"
 )
 
-const (
-	pluginServiceName  = "plugin-telemetry"
-	metricsCardinality = 10000
-)
+const pluginServiceName = "plugin-telemetry"
 
 var errNoFiles = errors.New("the plugin's metrics exporter reads no files")
 
@@ -71,71 +65,37 @@ type PluginMetrics struct {
 // MeterProvider that only Run reads.
 func NewPluginMetrics() *PluginMetrics {
 	m := &PluginMetrics{reader: sdkmetric.NewManualReader()}
-	m.mp = sdkmetric.NewMeterProvider(
-		sdkmetric.WithReader(m.reader),
-		sdkmetric.WithView(selfmetrics.Views()...),
-		sdkmetric.WithExemplarFilter(exemplar.AlwaysOffFilter),
-		sdkmetric.WithCardinalityLimit(metricsCardinality),
-	)
+	m.mp = selfmetrics.NewMeterProvider(m.reader)
 	m.initErr = m.register(m.mp.Meter(export.ScopeName, metric.WithInstrumentationVersion(version.Version)))
 
 	return m
 }
 
-// register creates the instruments of the catalogue's plugin section on meter.
+// register creates the three plugin instruments on meter, with the unit and description of their
+// catalogue entries.
 func (m *PluginMetrics) register(meter metric.Meter) error {
+	defs := map[string]selfmetrics.Metric{}
 	for _, def := range selfmetrics.ByComponent(selfmetrics.ComponentPlugin) {
-		switch selfmetrics.Instrument(def.Instrument) {
-		case selfmetrics.InstrumentCounter:
-			c, err := meter.Int64Counter(def.Name, metric.WithUnit(def.Unit), metric.WithDescription(def.Description))
-			if err != nil {
-				return fmt.Errorf("create counter %s: %w", def.Name, err)
-			}
-			switch def.Name {
-			case selfmetrics.HookCalls:
-				m.hookCalls = c
-			case selfmetrics.IdentityReconciles:
-				m.reconciles = c
-			default:
-				return fmt.Errorf("counter %s: no recorder", def.Name)
-			}
-		case selfmetrics.InstrumentHistogram:
-			if def.Name != selfmetrics.HookDuration {
-				return fmt.Errorf("histogram %s: no recorder", def.Name)
-			}
-			h, err := meter.Float64Histogram(def.Name, metric.WithUnit(def.Unit), metric.WithDescription(def.Description),
-				metric.WithExplicitBucketBoundaries())
-			if err != nil {
-				return fmt.Errorf("create histogram %s: %w", def.Name, err)
-			}
-			m.duration = h
-		case selfmetrics.InstrumentGauge:
-			return fmt.Errorf("metric %s: gauges are not used by the plugin", def.Name)
-		default:
-			return fmt.Errorf("metric %s: unknown instrument %q", def.Name, def.Instrument)
+		defs[def.Name] = def
+	}
+	var errs []error
+	counter := func(name string) metric.Int64Counter {
+		c, err := meter.Int64Counter(name, metric.WithUnit(defs[name].Unit), metric.WithDescription(defs[name].Description))
+		if err != nil {
+			errs = append(errs, fmt.Errorf("create counter %s: %w", name, err))
 		}
+		return c
 	}
-	return m.missingInstruments()
-}
+	m.hookCalls = counter(selfmetrics.HookCalls)
+	m.reconciles = counter(selfmetrics.IdentityReconciles)
+	h, err := meter.Float64Histogram(selfmetrics.HookDuration, metric.WithUnit(defs[selfmetrics.HookDuration].Unit),
+		metric.WithDescription(defs[selfmetrics.HookDuration].Description), metric.WithExplicitBucketBoundaries())
+	if err != nil {
+		errs = append(errs, fmt.Errorf("create histogram %s: %w", selfmetrics.HookDuration, err))
+	}
+	m.duration = h
 
-// missingInstruments fails naming, sorted, each plugin metric that has no instrument.
-func (m *PluginMetrics) missingInstruments() error {
-	var missing []string
-	for name, absent := range map[string]bool{
-		selfmetrics.HookCalls:          m.hookCalls == nil,
-		selfmetrics.HookDuration:       m.duration == nil,
-		selfmetrics.IdentityReconciles: m.reconciles == nil,
-	} {
-		if absent {
-			missing = append(missing, name)
-		}
-	}
-	if len(missing) == 0 {
-		return nil
-	}
-	slices.Sort(missing)
-
-	return fmt.Errorf("the catalogue has no plugin metric %s", strings.Join(missing, ", "))
+	return errors.Join(errs...)
 }
 
 // Hook records one hook call and its duration. A nil receiver records nothing.

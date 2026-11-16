@@ -33,7 +33,7 @@ import (
 var _ = Describe("The meter provider", func() {
 	It("exports 3000 series of one self-metric without the overflow attribute", func(ctx SpecContext) {
 		reader := sdkmetric.NewManualReader()
-		mp := engine.NewMeterProvider(reader)
+		mp := selfmetrics.NewMeterProvider(reader)
 		DeferCleanup(mp.Shutdown)
 		stats := selfmetrics.NewStats()
 		Expect(selfmetrics.Register(mp.Meter("test"), stats)).To(Succeed())

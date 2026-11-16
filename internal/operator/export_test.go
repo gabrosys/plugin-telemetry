@@ -21,9 +21,6 @@ var (
 // Exposed for metrics_test.go.
 var CollectMetrics = (*PluginMetrics).collect
 
-// MissingInstruments exposes missingInstruments to metrics_test.go.
-func (m *PluginMetrics) MissingInstruments() error { return m.missingInstruments() }
-
 // SetDrainTimeout sets drainTimeout for run_test.go and returns a func that restores it.
 func SetDrainTimeout(d time.Duration) (restore func()) {
 	previous := drainTimeout

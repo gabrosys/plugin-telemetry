@@ -19,7 +19,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/exemplar"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"k8s.io/utils/clock"
 
@@ -47,9 +46,6 @@ const (
 	earlyFactsGap = time.Second
 	// shutdownTimeout bounds each shutdown step that can block.
 	shutdownTimeout = 5 * time.Second
-
-	// cardinalityLimit is the most series one instrument reports per collection (the SDK default is 2000).
-	cardinalityLimit = 10000
 
 	// factsQuery names the facts round in errorLog.
 	factsQuery = "facts"
@@ -181,7 +177,7 @@ func newEngine(ctx context.Context, o Options, gather func(context.Context, sett
 	e.pod = e.getenv("POD_NAME")
 
 	e.reader = sdkmetric.NewManualReader(sdkmetric.WithProducer(export.NewProducer(e.store, e.clk, e.duplicates, e.builtins)))
-	e.mp = newMeterProvider(e.reader)
+	e.mp = selfmetrics.NewMeterProvider(e.reader)
 	meter := e.mp.Meter(export.ScopeName, metric.WithInstrumentationVersion(version.Version))
 	if err := e.instrument(meter); err != nil {
 		return nil, errors.Join(err, e.mp.Shutdown(ctx))
@@ -190,16 +186,6 @@ func newEngine(ctx context.Context, o Options, gather func(context.Context, sett
 	e.sched = scheduler.New(e.clk, e.newRand(), e.runJob, e.skipped)
 	e.plan = newReplanner(o.Config, e.stats, e.store, &e.errs, e.sched.Update)
 	return e, nil
-}
-
-// newMeterProvider returns the engine's MeterProvider over reader.
-func newMeterProvider(reader sdkmetric.Reader) *sdkmetric.MeterProvider {
-	return sdkmetric.NewMeterProvider(
-		sdkmetric.WithReader(reader),
-		sdkmetric.WithView(selfmetrics.Views()...),
-		sdkmetric.WithExemplarFilter(exemplar.AlwaysOffFilter),
-		sdkmetric.WithCardinalityLimit(cardinalityLimit),
-	)
 }
 
 // instrument registers the self-metrics, the Go runtime metrics and upMetric on meter's provider.

@@ -16,10 +16,6 @@ import (
 )
 
 var (
-	// ErrInvalidOptions is returned when an Options field is empty.
-	ErrInvalidOptions = errors.New("server address, server cert, server key and client CA are all required")
-	// ErrInvalidDeps is returned when a Deps field the server needs is nil.
-	ErrInvalidDeps = errors.New("cache and status are required")
 	// ErrCacheNotSynced is returned when the cache stops without syncing while ctx is still live.
 	ErrCacheNotSynced = errors.New("cache did not sync")
 	// ErrServerStopped is returned when the server stops while ctx is still live.
@@ -57,13 +53,6 @@ type Deps struct {
 // It returns nil when ctx ends and ErrServerStopped if the server stops first.
 // The cache must be started by the caller.
 func Run(ctx context.Context, opts Options, images ImageWaiter, deps Deps) error {
-	if opts.ServerAddress == "" || opts.ServerCertPath == "" || opts.ServerKeyPath == "" || opts.ClientCAPath == "" {
-		return ErrInvalidOptions
-	}
-	if deps.Cache == nil || deps.Status == nil {
-		return ErrInvalidDeps
-	}
-
 	logger := log.FromContext(ctx)
 	logger.Info("waiting for the sidecar image")
 	if err := images.Wait(ctx); err != nil {

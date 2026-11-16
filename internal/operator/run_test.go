@@ -493,39 +493,4 @@ var _ = Describe("Run", func() {
 		Eventually(done, 5*time.Second).Should(Receive(BeNil()))
 		done <- nil
 	})
-
-	DescribeTable("refuses to start without its dependencies",
-		func(mutate func(*operator.Deps)) {
-			d := deps()
-			mutate(&d)
-			close(waiter.ready)
-			Expect(operator.Run(context.Background(), operator.Options{
-				ServerAddress:  addr,
-				ServerCertPath: pki.serverCert,
-				ServerKeyPath:  pki.serverKey,
-				ClientCAPath:   pki.clientCert,
-			}, waiter, d)).To(MatchError(operator.ErrInvalidDeps))
-		},
-		Entry("no cache", func(d *operator.Deps) { d.Cache = nil }),
-		Entry("no status", func(d *operator.Deps) { d.Status = nil }),
-	)
-
-	DescribeTable("refuses to start without TLS material",
-		func(mutate func(*operator.Options)) {
-			opts := operator.Options{
-				ServerAddress:  addr,
-				ServerCertPath: pki.serverCert,
-				ServerKeyPath:  pki.serverKey,
-				ClientCAPath:   pki.clientCert,
-			}
-			mutate(&opts)
-			close(waiter.ready)
-			Expect(operator.Run(context.Background(), opts, waiter, deps())).To(MatchError(operator.ErrInvalidOptions))
-			Consistently(func() bool { return canDial(addr) }, 200*time.Millisecond, 50*time.Millisecond).Should(BeFalse())
-		},
-		Entry("empty server address", func(o *operator.Options) { o.ServerAddress = "" }),
-		Entry("empty server cert", func(o *operator.Options) { o.ServerCertPath = "" }),
-		Entry("empty server key", func(o *operator.Options) { o.ServerKeyPath = "" }),
-		Entry("empty client CA", func(o *operator.Options) { o.ClientCAPath = "" }),
-	)
 })

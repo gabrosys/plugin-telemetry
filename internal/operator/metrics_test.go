@@ -139,13 +139,6 @@ var _ = Describe("PluginMetrics", func() {
 		}))
 	})
 
-	It("names every missing instrument, sorted", func() {
-		err := (&operator.PluginMetrics{}).MissingInstruments()
-
-		Expect(err).To(MatchError(ContainSubstring(
-			"cnpg_otel_plugin_hook_calls_total, cnpg_otel_plugin_hook_duration_seconds, cnpg_otel_plugin_identity_reconciles_total")))
-	})
-
 	It("records nothing on a nil receiver", func(ctx context.Context) {
 		var m *operator.PluginMetrics
 

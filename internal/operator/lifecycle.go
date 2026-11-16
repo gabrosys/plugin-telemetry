@@ -138,7 +138,7 @@ func (l *Lifecycle) hook(
 		return nil, outcomeSkipped, nil
 	}
 
-	pluginConfig, ok := ourPlugin(cluster)
+	pluginConfig, ok := clusterconfig.EnabledPlugin(cluster)
 	if !ok {
 		return nil, outcomeSkipped, nil
 	}
@@ -221,8 +221,4 @@ func podJSONPatch(original, mutated *corev1.Pod) ([]byte, error) {
 	}
 
 	return patch, nil
-}
-
-func ourPlugin(cluster *apiv1.Cluster) (apiv1.PluginConfiguration, bool) {
-	return clusterconfig.EnabledPlugin(cluster)
 }

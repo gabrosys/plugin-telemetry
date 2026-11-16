@@ -10,7 +10,6 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"go.opentelemetry.io/otel/attribute"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/gabrosys/plugin-telemetry/internal/executor"
@@ -34,11 +33,6 @@ func RunWith(ctx context.Context, o Options, gather func(context.Context, settin
 
 // ErrorLog is errorLog.
 type ErrorLog = errorLog
-
-// NewMeterProvider returns the engine's MeterProvider over reader.
-func NewMeterProvider(reader sdkmetric.Reader) *sdkmetric.MeterProvider {
-	return newMeterProvider(reader)
-}
 
 // FactsWait is the wait before the next facts round after failures consecutive failed ones.
 func FactsWait(failures int, planInterval time.Duration) time.Duration {

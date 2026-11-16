@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"go.opentelemetry.io/otel/sdk/metric/exemplar"
+
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
@@ -20,6 +22,20 @@ const (
 
 // contextForRecord is the context for histogram recordings; Export has no caller context.
 var contextForRecord = context.Background()
+
+// cardinalityLimit is the most series one instrument reports per collection (the SDK default is 2000).
+const cardinalityLimit = 10000
+
+// NewMeterProvider returns a MeterProvider over reader with the catalogue's views, exemplars off and
+// a cardinality limit of 10000.
+func NewMeterProvider(reader sdkmetric.Reader) *sdkmetric.MeterProvider {
+	return sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(reader),
+		sdkmetric.WithView(Views()...),
+		sdkmetric.WithExemplarFilter(exemplar.AlwaysOffFilter),
+		sdkmetric.WithCardinalityLimit(cardinalityLimit),
+	)
+}
 
 // Views returns the views a MeterProvider needs for the catalogue: the duration
 // histograms have no bucket boundaries, which an instrument option cannot express.

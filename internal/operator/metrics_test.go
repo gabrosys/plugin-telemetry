@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
@@ -122,6 +123,18 @@ var _ = Describe("PluginMetrics", func() {
 			"outcome=ok":                     2,
 			"outcome=error,reason=Unknown":   1,
 			"outcome=error,reason=Timeout":   1,
+			"outcome=error,reason=Forbidden": 1,
+		}))
+	})
+
+	It("records Unknown for a server-supplied reason outside the API's list", func(ctx context.Context) {
+		m := operator.NewPluginMetrics()
+
+		m.IdentityReconcile(ctx, fmt.Errorf("ensure: %w", &apierrors.StatusError{ErrStatus: metav1.Status{Reason: "SomethingCustom"}}))
+		m.IdentityReconcile(ctx, fmt.Errorf("ensure: %w", apierrors.NewForbidden(schema.GroupResource{Resource: "roles"}, "pg", errors.New("denied"))))
+
+		Expect(counts(m, identityCount)).To(Equal(map[string]int64{
+			"outcome=error,reason=Unknown":   1,
 			"outcome=error,reason=Forbidden": 1,
 		}))
 	})

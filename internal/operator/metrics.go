@@ -113,8 +113,14 @@ func (m *PluginMetrics) register(meter metric.Meter) error {
 			return fmt.Errorf("metric %s: unknown instrument %q", def.Name, def.Instrument)
 		}
 	}
-	if m.hookCalls == nil || m.duration == nil || m.reconciles == nil {
-		return errors.New("the catalogue lacks a plugin metric")
+	for name, missing := range map[string]bool{
+		selfmetrics.HookCalls:          m.hookCalls == nil,
+		selfmetrics.HookDuration:       m.duration == nil,
+		selfmetrics.IdentityReconciles: m.reconciles == nil,
+	} {
+		if missing {
+			return fmt.Errorf("the catalogue has no plugin metric %s", name)
+		}
 	}
 
 	return nil
@@ -148,16 +154,48 @@ func (m *PluginMetrics) IdentityReconcile(ctx context.Context, err error) {
 		attribute.String("outcome", outcomeError), attribute.String("reason", failureReason(err))))
 }
 
-// failureReason names why err failed: the API status reason, Timeout for a deadline, else Unknown.
+// reasonUnknown is the reason of an error with no known cause.
+const reasonUnknown = "Unknown"
+
+// apiReasons are the reasons the API defines (apimachinery v0.37.2 pkg/apis/meta/v1/types.go:919-1067, bar
+// Unknown), which bound the reason attribute.
+var apiReasons = map[metav1.StatusReason]struct{}{
+	metav1.StatusReasonUnauthorized:          {},
+	metav1.StatusReasonForbidden:             {},
+	metav1.StatusReasonNotFound:              {},
+	metav1.StatusReasonAlreadyExists:         {},
+	metav1.StatusReasonConflict:              {},
+	metav1.StatusReasonGone:                  {},
+	metav1.StatusReasonInvalid:               {},
+	metav1.StatusReasonServerTimeout:         {},
+	metav1.StatusReasonStoreReadError:        {},
+	metav1.StatusReasonTimeout:               {},
+	metav1.StatusReasonTooManyRequests:       {},
+	metav1.StatusReasonBadRequest:            {},
+	metav1.StatusReasonMethodNotAllowed:      {},
+	metav1.StatusReasonNotAcceptable:         {},
+	metav1.StatusReasonRequestEntityTooLarge: {},
+	metav1.StatusReasonUnsupportedMediaType:  {},
+	metav1.StatusReasonInternalError:         {},
+	metav1.StatusReasonExpired:               {},
+	metav1.StatusReasonServiceUnavailable:    {},
+}
+
+// failureReason names why err failed: the API status reason when the API defines it, Timeout for a
+// deadline, else Unknown. A server-supplied reason outside the API's list is Unknown.
 func failureReason(err error) string {
 	if reason := apierrors.ReasonForError(err); reason != metav1.StatusReasonUnknown {
-		return string(reason)
+		if _, ok := apiReasons[reason]; ok {
+			return string(reason)
+		}
+
+		return reasonUnknown
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return string(metav1.StatusReasonTimeout)
 	}
 
-	return "Unknown"
+	return reasonUnknown
 }
 
 // collect reads the current metrics.

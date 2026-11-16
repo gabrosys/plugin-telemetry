@@ -88,6 +88,7 @@ func newGRPCServer(cfg *tls.Config) *otlptest.Server {
 	srv, err := otlptest.NewGRPC(cfg)
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(srv.Close)
+	DeferCleanup(func() { Expect(srv.Err()).NotTo(HaveOccurred()) })
 	return srv
 }
 
@@ -95,6 +96,7 @@ func newHTTPServer(cfg *tls.Config) *otlptest.Server {
 	GinkgoHelper()
 	srv := otlptest.NewHTTP(cfg)
 	DeferCleanup(srv.Close)
+	DeferCleanup(func() { Expect(srv.Err()).NotTo(HaveOccurred()) })
 	return srv
 }
 
@@ -592,6 +594,7 @@ var _ = Describe("Exporter", func() {
 			}
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(srv.Close)
+			DeferCleanup(func() { Expect(srv.Err()).NotTo(HaveOccurred()) })
 
 			Eventually(func() error { return e.Export(ctx, batch(1, 1)) }).
 				WithTimeout(2 * s.Interval).WithPolling(50 * time.Millisecond).Should(Succeed())
@@ -625,8 +628,28 @@ var _ = Describe("Exporter", func() {
 		srv, err := otlptest.NewGRPCAt(addr, nil)
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(srv.Close)
+		DeferCleanup(func() { Expect(srv.Err()).NotTo(HaveOccurred()) })
 
 		Eventually(func() error { return e.Export(ctx, batch(1, 1)) }).
 			WithTimeout(800 * time.Millisecond).WithPolling(20 * time.Millisecond).Should(Succeed())
+	})
+
+	It("waits for an export in flight when it shuts down", func(ctx SpecContext) {
+		srv := newHTTPServer(nil)
+		release := make(chan struct{})
+		srv.Respond(otlptest.Response{Block: release})
+		e := newExporter(exporterSettings(settings.ProtocolHTTP, srv.URL))
+
+		exported := make(chan error, 1)
+		go func() { exported <- e.Export(ctx, batch(1, 1)) }()
+		Eventually(srv.Requests).Should(HaveLen(1))
+
+		shut := make(chan error, 1)
+		go func() { shut <- e.Shutdown(ctx) }()
+		Consistently(shut, 300*time.Millisecond).ShouldNot(Receive())
+
+		close(release)
+		Eventually(shut).Should(Receive(Succeed()))
+		Eventually(exported).Should(Receive())
 	})
 })

@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/cloudnative-pg/machinery/pkg/log"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -194,7 +195,11 @@ func (m *PluginMetrics) Run(ctx context.Context, s settings.Exporter) error {
 	}
 
 	rnd := rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())) //nolint:gosec // jitter, not security
-	loop := export.NewLoop(m.reader, pluginResource(os.Getenv), clock.RealClock{}, rnd, selfmetrics.NewStats(), exp, s.Interval, s.MaxPointsPerRequest)
+	instance, err := export.Instance(os.Getenv, os.Hostname)
+	if err != nil {
+		log.FromContext(ctx).Info("naming the instance unknown", "error", err.Error())
+	}
+	loop := export.NewLoop(m.reader, pluginResource(os.Getenv, instance), clock.RealClock{}, rnd, selfmetrics.NewStats(), exp, s.Interval, s.MaxPointsPerRequest)
 
 	runErr := loop.Run(ctx)
 	if err := m.mp.Shutdown(context.WithoutCancel(ctx)); err != nil {
@@ -207,17 +212,9 @@ func (m *PluginMetrics) Run(ctx context.Context, s settings.Exporter) error {
 	return nil
 }
 
-// pluginResource builds the resource of the plugin's metrics from the downward-API env.
-func pluginResource(getenv func(string) string) *resource.Resource {
+// pluginResource builds the resource of the plugin's metrics from the downward-API env and the instance name.
+func pluginResource(getenv func(string) string, instance string) *resource.Resource {
 	namespace, pod := getenv("POD_NAMESPACE"), getenv("POD_NAME")
-	instance := pod
-	if instance == "" {
-		host, err := os.Hostname()
-		if err != nil {
-			host = "unknown"
-		}
-		instance = host
-	}
 
 	attrs := []attribute.KeyValue{
 		semconv.ServiceName(pluginServiceName),

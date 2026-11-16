@@ -333,6 +333,21 @@ var _ = Describe("Loop", func() {
 		Expect(a).NotTo(Equal(b))
 	})
 
+	It("exports first at the start plus the seeded offset", func() {
+		const interval = 100 * time.Second
+		offset := time.Duration(rand.New(rand.NewPCG(7, 7)).Int64N(int64(interval))) //nolint:gosec // the seed under test
+		Expect(offset).To(BeNumerically(">", time.Nanosecond))
+		srv := newHTTPServer(nil)
+		h := newLoopHarness(7)
+		h.use(httpExporter(srv), interval, 1000)
+		h.start()
+
+		h.step(offset - time.Nanosecond)
+		Expect(srv.Requests()).To(BeEmpty())
+		h.step(time.Nanosecond)
+		Eventually(srv.Requests).Should(HaveLen(1))
+	})
+
 	It("exports once per interval, independent of query intervals", func() {
 		srv := newHTTPServer(nil)
 		h := newLoopHarness(1)

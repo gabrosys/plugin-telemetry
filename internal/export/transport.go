@@ -106,10 +106,12 @@ func ParseHeaders(s string) (map[string]string, error) {
 	return out, nil
 }
 
+// isKeyChar reports whether r may appear in a header name.
 func isKeyChar(r rune) bool {
 	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.'
 }
 
+// tlsConfig builds the client TLS configuration from t and the loaded material.
 func tlsConfig(t settings.TLS, m material) *tls.Config {
 	cfg := &tls.Config{
 		MinVersion: tls.VersionTLS12,
@@ -166,12 +168,14 @@ type attempts struct {
 	final atomic.Int64 // status of the last attempt, 0 when it got no response
 }
 
+// begin forgets the status of the previous attempt.
 func (a *attempts) begin() {
 	if a != nil {
 		a.final.Store(0)
 	}
 }
 
+// response records the status code of an HTTP response.
 func (a *attempts) response(code int) {
 	if a != nil {
 		a.last.Store(int64(code))
@@ -179,12 +183,15 @@ func (a *attempts) response(code int) {
 	}
 }
 
+// attemptsKey is the context key of the export's attempts.
 type attemptsKey struct{}
 
+// withAttempts returns ctx carrying a.
 func withAttempts(ctx context.Context, a *attempts) context.Context {
 	return context.WithValue(ctx, attemptsKey{}, a)
 }
 
+// attemptsFrom returns the attempts in ctx, or nil.
 func attemptsFrom(ctx context.Context) *attempts {
 	a, _ := ctx.Value(attemptsKey{}).(*attempts)
 	return a

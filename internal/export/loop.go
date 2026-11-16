@@ -66,6 +66,7 @@ func (l *Loop) Run(ctx context.Context) error {
 	}
 }
 
+// sleepUntil waits for t on the loop's clock and reports false when ctx ends first.
 func (l *Loop) sleepUntil(ctx context.Context, t time.Time) bool {
 	d := t.Sub(l.clk.Now())
 	if d <= 0 {
@@ -81,6 +82,7 @@ func (l *Loop) sleepUntil(ctx context.Context, t time.Time) bool {
 	}
 }
 
+// record returns the ExportRecord of an export with outcome o, stamped with the time and the endpoint.
 func (l *Loop) record(o selfmetrics.Outcome) selfmetrics.ExportRecord {
 	return selfmetrics.ExportRecord{
 		Outcome:       o,
@@ -161,6 +163,7 @@ func (l *Loop) failed(kind string, logFn func()) {
 	logFn()
 }
 
+// points counts the data points in rm.
 func points(rm *metricdata.ResourceMetrics) int {
 	n := 0
 	for _, sm := range rm.ScopeMetrics {
@@ -171,6 +174,7 @@ func points(rm *metricdata.ResourceMetrics) int {
 	return n
 }
 
+// shutdown stops the exporter within shutdownTimeout and logs a failure.
 func (l *Loop) shutdown(ctx context.Context) {
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 	defer cancel()

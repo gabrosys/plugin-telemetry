@@ -62,6 +62,7 @@ func Classify(err error) (errorType string, rejected int) {
 	return errorTypeOther, 0
 }
 
+// rejectedPoints returns the data points a partial-success error says the backend rejected.
 func rejectedPoints(err error) (int, bool) {
 	n, found := 0, false
 	anyInTree(err, func(e error) bool {

@@ -71,6 +71,7 @@ func pointCount(a metricdata.Aggregation) int {
 	}
 }
 
+// slicePoints returns a with only its data points from..to.
 func slicePoints(a metricdata.Aggregation, from, to int) metricdata.Aggregation {
 	switch d := a.(type) {
 	case metricdata.Gauge[int64]:

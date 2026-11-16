@@ -118,6 +118,8 @@ type engine struct {
 	gather func(context.Context, settings.Settings) (planner.Facts, error)
 	pod    string // POD_NAME, the instance the built-ins describe
 
+	instance string // the instance name of the resource, see export.Instance
+
 	stats  *selfmetrics.Stats
 	store  *snapshot.Store
 	reader *sdkmetric.ManualReader
@@ -175,8 +177,12 @@ func newEngine(ctx context.Context, o Options, gather func(context.Context, sett
 		e.gather = e.gatherFacts
 	}
 	e.pod = e.getenv("POD_NAME")
+	var err error
+	if e.instance, err = export.Instance(e.getenv, os.Hostname); err != nil {
+		log.FromContext(ctx).Info("naming the instance unknown", "error", err.Error())
+	}
 
-	e.reader = sdkmetric.NewManualReader(sdkmetric.WithProducer(export.NewProducer(e.store, e.clk, e.duplicates, e.builtins)))
+	e.reader = sdkmetric.NewManualReader(sdkmetric.WithProducer(export.NewProducer(e.store, e.clk, e.drops, e.builtins)))
 	e.mp = selfmetrics.NewMeterProvider(e.reader)
 	meter := e.mp.Meter(export.ScopeName, metric.WithInstrumentationVersion(version.Version))
 	if err := e.instrument(meter); err != nil {
@@ -392,7 +398,7 @@ func (e *engine) apply(ctx context.Context, prev, next *configuration) error {
 		e.runner.pool.SetIdleTimeout(next.idleTimeout)
 	}
 	if exp != nil {
-		e.startLoop(ctx, export.Resource(s, e.getenv), exp, s.Exporter)
+		e.startLoop(ctx, export.Resource(s, e.getenv, e.instance), exp, s.Exporter)
 	}
 	if newPool {
 		e.factsFailures = 0
@@ -583,10 +589,12 @@ func (e *engine) skipped(job planner.Job, missed int) {
 	})
 }
 
-// duplicates counts the series the producer dropped because an earlier entry has them.
-func (e *engine) duplicates(dropped map[snapshot.Key]int) {
-	for k, n := range dropped {
-		e.stats.SeriesDropped(k.Query, k.Database, string(queries.DropDuplicate), n)
+// drops counts the series the producer dropped, by query, database and reason.
+func (e *engine) drops(dropped map[snapshot.Key]map[queries.DropReason]int) {
+	for k, reasons := range dropped {
+		for reason, n := range reasons {
+			e.stats.SeriesDropped(k.Query, k.Database, string(reason), n)
+		}
 	}
 }
 

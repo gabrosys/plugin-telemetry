@@ -255,12 +255,6 @@ var _ = Describe("Store", func() {
 		Expect(points[0].Metric).To(Equal("g"))
 		Expect(points[0].Labels[0].Value).To(Equal("a"))
 		Expect(points[1].Histogram.Cumulative[0]).To(Equal(uint64(3)))
-
-		points[0].Labels[0].Value = "mutated"
-		points[1].Histogram.Cumulative[0] = 77
-		again, _ := s.Points()
-		Expect(again[0].Labels[0].Value).To(Equal("a"))
-		Expect(again[1].Histogram.Cumulative[0]).To(Equal(uint64(3)))
 	})
 
 	It("does not write into a caller's label slice", func() {
@@ -268,6 +262,79 @@ var _ = Describe("Store", func() {
 		backing[0] = queries.Label{Key: "x", Value: "a"}
 		Expect(s.Put(k1, "f", []queries.Sample{gauge("g", 1, backing...)}, at(10))).To(Succeed())
 		Expect(backing[:2][1]).To(Equal(queries.Label{}))
+	})
+
+	It("gives each Point the series id of Put", func() {
+		labels := []queries.Label{{Key: "x", Value: "a"}}
+		Expect(s.Put(k1, "f", []queries.Sample{counter("c", 1, labels...), gauge("g", 1)}, at(10))).To(Succeed())
+
+		points, _ := s.Points()
+		Expect(points).To(HaveLen(2))
+		Expect(points[0].ID).To(Equal(queries.SeriesID("c", labels)))
+		Expect(points[1].ID).To(Equal(queries.SeriesID("g", nil)))
+	})
+
+	It("keeps two series that differ only where a separator byte would join them", func() {
+		joined := queries.Label{Key: "x", Value: "1\x00y\x012"}
+		split := []queries.Label{{Key: "x", Value: "1"}, {Key: "y", Value: "2"}}
+		Expect(s.Put(k1, "f", []queries.Sample{gauge("m", 1, joined)}, at(10))).To(Succeed())
+		Expect(s.Put(k2, "f", []queries.Sample{gauge("m", 2, split...)}, at(10))).To(Succeed())
+
+		points, dups := s.Points()
+		Expect(points).To(HaveLen(2))
+		Expect(dups).To(BeEmpty())
+	})
+
+	It("restarts a series whose kind changes", func() {
+		Expect(s.Put(k1, "f", []queries.Sample{counter("h", 5)}, at(10))).To(Succeed())
+		Expect(s.Put(k1, "f", []queries.Sample{histogram(3)}, at(20))).To(Succeed())
+
+		Expect(only(s).Start).To(Equal(at(20)))
+	})
+
+	It("keeps the start of a histogram that arrives without data", func() {
+		Expect(s.Put(k1, "f", []queries.Sample{histogram(3)}, at(10))).To(Succeed())
+		empty := queries.Sample{Metric: "h", Kind: queries.KindHistogram}
+		Expect(s.Put(k1, "f", []queries.Sample{empty}, at(20))).To(Succeed())
+		Expect(s.Put(k1, "f", []queries.Sample{histogram(4)}, at(30))).To(Succeed())
+
+		Expect(only(s).Start).To(Equal(at(10)))
+	})
+
+	It("forgets start times of an entry that Retain drops", func() {
+		Expect(s.Put(k1, "f", []queries.Sample{counter("c", 5)}, at(10))).To(Succeed())
+		s.Retain(func(snapshot.Key, string) bool { return false })
+		Expect(s.Put(k1, "f", []queries.Sample{counter("c", 6)}, at(20))).To(Succeed())
+
+		Expect(only(s).Start).To(Equal(at(20)))
+	})
+
+	It("counts a series repeated inside one entry against that entry", func() {
+		Expect(s.Put(k1, "f", []queries.Sample{gauge("m", 1), gauge("m", 2)}, at(10))).To(Succeed())
+
+		points, dups := s.Points()
+		Expect(points).To(HaveLen(1))
+		Expect(dups).To(Equal(map[snapshot.Key]int{k1: 1}))
+	})
+
+	It("never mixes two Puts of one entry in a Points", func() {
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer GinkgoRecover()
+			defer wg.Done()
+			for n := range 500 {
+				v := float64(n)
+				Expect(s.Put(k1, "f", []queries.Sample{gauge("a", v), gauge("b", v), gauge("c", v)}, at(n))).To(Succeed())
+			}
+		}()
+		for range 500 {
+			points, _ := s.Points()
+			for _, p := range points {
+				Expect(p.Value).To(Equal(points[0].Value))
+			}
+		}
+		wg.Wait()
 	})
 
 	It("is safe for concurrent use", func() {

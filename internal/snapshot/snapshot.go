@@ -16,9 +16,11 @@ import (
 // Key identifies a query running against a database.
 type Key struct{ Query, Database string }
 
-// Point is one series ready to export.
+// Point is one series ready to export. Points hands out the entry's own slices and histogram, which
+// are immutable after Put: read them, never write.
 type Point struct {
-	Key                 Key // set by Points
+	Key                 Key    // set by Points
+	ID                  string // queries.SeriesID of Metric and Labels, set by Put
 	Metric, Description string
 	Kind                queries.Kind
 	Labels              []queries.Label
@@ -103,7 +105,9 @@ func (s *Store) Put(k Key, fingerprint string, samples []queries.Sample, observe
 		state:       make(map[string]seriesState, len(samples)),
 	}
 	for _, sample := range samples {
+		id := queries.SeriesID(sample.Metric, sample.Labels)
 		p := Point{
+			ID:          id,
 			Metric:      sample.Metric,
 			Description: sample.Description,
 			Kind:        sample.Kind,
@@ -113,7 +117,7 @@ func (s *Store) Put(k Key, fingerprint string, samples []queries.Sample, observe
 			Observed:    observed,
 		}
 		if sample.Kind != queries.KindGauge {
-			p.Start = e.advance(old, seriesID(sample), sample, observed)
+			p.Start = e.advance(old, id, sample, observed)
 		}
 		e.points = append(e.points, p)
 	}
@@ -177,8 +181,9 @@ func (s *Store) Retain(keep func(k Key, fingerprint string) bool) {
 	}
 }
 
-// Points returns copies of every series, sorted by Metric then labels; across entries, the first
-// by (Query, Database) keeps a duplicate series and the others are counted.
+// Points returns every series, sorted by Metric then labels; across entries, the first
+// by (Query, Database) keeps a duplicate series and the others are counted. The points share
+// the store's memory: read only.
 func (s *Store) Points() (points []Point, duplicates map[Key]int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -200,16 +205,13 @@ func (s *Store) Points() (points []Point, duplicates map[Key]int) {
 	points = make([]Point, 0, exported)
 	for _, k := range keys {
 		for _, p := range s.entries[k].points {
-			id := seriesID(queries.Sample{Metric: p.Metric, Labels: p.Labels})
-			if _, dup := seen[id]; dup {
+			if _, dup := seen[p.ID]; dup {
 				duplicates[k]++
 
 				continue
 			}
-			seen[id] = struct{}{}
+			seen[p.ID] = struct{}{}
 			p.Key = k
-			p.Labels = slices.Clone(p.Labels)
-			p.Histogram = cloneHistogram(p.Histogram)
 			points = append(points, p)
 		}
 	}
@@ -219,20 +221,6 @@ func (s *Store) Points() (points []Point, duplicates map[Key]int) {
 	})
 
 	return points, duplicates
-}
-
-// seriesID joins the metric and labels with NUL and SOH separators.
-func seriesID(sample queries.Sample) string {
-	var b strings.Builder
-	b.WriteString(sample.Metric)
-	for _, l := range sample.Labels {
-		b.WriteString("\x00")
-		b.WriteString(l.Key)
-		b.WriteString("\x01")
-		b.WriteString(l.Value)
-	}
-
-	return b.String()
 }
 
 func cloneHistogram(h *queries.Histogram) *queries.Histogram {

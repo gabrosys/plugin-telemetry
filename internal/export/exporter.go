@@ -92,10 +92,12 @@ func NewExporter(ctx context.Context, s settings.Exporter, read sources.ReadFile
 // exportTimeout bounds one export with its retries.
 func (e *Exporter) exportTimeout() time.Duration { return e.s.Interval * 9 / 10 }
 
+// retry returns the backoff of one export: the first and the longest wait, and the time left for waits after one attempt.
 func (e *Exporter) retry() (initial, maxInterval, maxElapsed time.Duration) {
 	return time.Second, 5 * time.Second, e.exportTimeout() - e.s.Timeout
 }
 
+// initHTTP builds the OTLP/HTTP exporter on e's own transport.
 func (e *Exporter) initHTTP(ctx context.Context, m material) error {
 	tlsCfg := tlsConfig(e.s.TLS, m)
 	if !e.secure {
@@ -151,6 +153,7 @@ func (e *Exporter) connectParams() grpc.ConnectParams {
 	}
 }
 
+// initGRPC builds the OTLP/gRPC exporter on e's own connection.
 func (e *Exporter) initGRPC(ctx context.Context, m material) error {
 	creds := insecure.NewCredentials()
 	if e.secure {

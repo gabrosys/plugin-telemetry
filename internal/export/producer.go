@@ -4,7 +4,6 @@ package export
 import (
 	"context"
 	"math"
-	"slices"
 	"time"
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
@@ -25,22 +24,24 @@ const ScopeName = "github.com/gabrosys/plugin-telemetry"
 // Producer is an sdkmetric.Producer over the snapshot. It never returns an error: an
 // error from a Producer drops the whole collection (sdk/metric v1.47.0 periodic_reader.go:265-277).
 type Producer struct {
-	store        *snapshot.Store
-	clk          clock.PassiveClock
-	onDuplicates func(map[snapshot.Key]int)
-	extra        func() []queries.Sample
+	store   *snapshot.Store
+	clk     clock.PassiveClock
+	onDrops func(map[snapshot.Key]map[queries.DropReason]int)
+	extra   func() []queries.Sample
 }
 
-// NewProducer returns a Producer reading store. onDuplicates may be nil; it receives the
-// dropped series per Key once per Produce when there are any.
+// NewProducer returns a Producer reading store. onDrops may be nil; it receives the series dropped
+// per Key and reason once per Produce when there are any: duplicate for a repeated series or a kind
+// that conflicts with the metric's first, conversion for a histogram without data or an unknown kind.
 // extra, when not nil, is called once per Produce; its samples join the snapshot's points of the same name.
 // A panic in extra drops only its samples (safe.Call): a Producer error drops the whole collection.
 // An extra sample wins over a snapshot series of its name and labels, or of its name and another kind;
 // the snapshot's series counts as a duplicate. Of repeated extra samples the first is kept.
 func NewProducer(
-	store *snapshot.Store, clk clock.PassiveClock, onDuplicates func(map[snapshot.Key]int), extra func() []queries.Sample,
+	store *snapshot.Store, clk clock.PassiveClock, onDrops func(map[snapshot.Key]map[queries.DropReason]int),
+	extra func() []queries.Sample,
 ) *Producer {
-	return &Producer{store: store, clk: clk, onDuplicates: onDuplicates, extra: extra}
+	return &Producer{store: store, clk: clk, onDrops: onDrops, extra: extra}
 }
 
 // metricBuilder collects the data points of one metric name.
@@ -58,8 +59,15 @@ func (p *Producer) Produce(ctx context.Context) ([]metricdata.ScopeMetrics, erro
 		safe.Call(log.FromContext(ctx).GetLogger(), "extra samples", func() { extra = p.extra() })
 	}
 	points, duplicates := p.store.Points()
-	if duplicates == nil {
-		duplicates = make(map[snapshot.Key]int)
+	drops := make(map[snapshot.Key]map[queries.DropReason]int)
+	drop := func(k snapshot.Key, reason queries.DropReason, n int) {
+		if drops[k] == nil {
+			drops[k] = make(map[queries.DropReason]int)
+		}
+		drops[k][reason] += n
+	}
+	for k, n := range duplicates {
+		drop(k, queries.DropDuplicate, n)
 	}
 	now := p.clk.Now()
 
@@ -77,7 +85,7 @@ func (p *Producer) Produce(ctx context.Context) ([]metricdata.ScopeMetrics, erro
 	}
 	for _, pt := range points {
 		if _, dup := extraIDs[queries.SeriesID(pt.Metric, pt.Labels)]; dup {
-			duplicates[pt.Key]++
+			drop(pt.Key, queries.DropDuplicate, 1)
 
 			continue
 		}
@@ -87,6 +95,11 @@ func (p *Producer) Produce(ctx context.Context) ([]metricdata.ScopeMetrics, erro
 	var order []*metricBuilder
 	byName := make(map[string]*metricBuilder)
 	for _, pt := range all {
+		if pt.Kind != queries.KindCounter && pt.Kind != queries.KindGauge && pt.Kind != queries.KindHistogram {
+			drop(pt.Key, queries.DropConversion, 1)
+
+			continue
+		}
 		b, ok := byName[pt.Metric]
 		switch {
 		case !ok:
@@ -94,7 +107,7 @@ func (p *Producer) Produce(ctx context.Context) ([]metricdata.ScopeMetrics, erro
 			byName[pt.Metric] = b
 			order = append(order, b)
 		case b.kind != pt.Kind:
-			duplicates[pt.Key]++
+			drop(pt.Key, queries.DropDuplicate, 1)
 
 			continue
 		}
@@ -102,6 +115,8 @@ func (p *Producer) Produce(ctx context.Context) ([]metricdata.ScopeMetrics, erro
 		attrs := labelSet(pt.Labels)
 		if pt.Kind == queries.KindHistogram {
 			if pt.Histogram == nil {
+				drop(pt.Key, queries.DropConversion, 1)
+
 				continue
 			}
 			b.histograms = append(b.histograms, histogramPoint(pt, attrs, now))
@@ -116,8 +131,8 @@ func (p *Producer) Produce(ctx context.Context) ([]metricdata.ScopeMetrics, erro
 		})
 	}
 
-	if len(duplicates) > 0 && p.onDuplicates != nil {
-		p.onDuplicates(duplicates)
+	if len(drops) > 0 && p.onDrops != nil {
+		p.onDrops(drops)
 	}
 
 	metrics := make([]metricdata.Metrics, 0, len(order))
@@ -136,6 +151,7 @@ func (p *Producer) Produce(ctx context.Context) ([]metricdata.ScopeMetrics, erro
 	}}, nil
 }
 
+// build returns the metric and false when it holds no data point or has an unknown kind.
 func (b *metricBuilder) build() (metricdata.Metrics, bool) {
 	m := metricdata.Metrics{Name: b.name, Description: b.description}
 	switch b.kind {
@@ -159,6 +175,7 @@ func (b *metricBuilder) build() (metricdata.Metrics, bool) {
 	return m, len(b.scalars)+len(b.histograms) > 0
 }
 
+// labelSet turns labels into an attribute set.
 func labelSet(labels []queries.Label) attribute.Set {
 	kvs := make([]attribute.KeyValue, len(labels))
 	for i, l := range labels {
@@ -173,8 +190,7 @@ func labelSet(labels []queries.Label) attribute.Set {
 // bucket is what remains of Count.
 func histogramPoint(pt snapshot.Point, attrs attribute.Set, now time.Time) metricdata.HistogramDataPoint[float64] {
 	h := pt.Histogram
-	bounds := slices.Clone(h.Bounds)
-	cumulative := slices.Clone(h.Cumulative)
+	bounds, cumulative := h.Bounds, h.Cumulative
 	if n := len(bounds); n > 0 && math.IsInf(bounds[n-1], 1) {
 		bounds = bounds[:n-1]
 		if len(cumulative) >= n {
@@ -204,6 +220,7 @@ func histogramPoint(pt snapshot.Point, attrs attribute.Set, now time.Time) metri
 	}
 }
 
+// satSub returns a-b, or 0 when b is larger.
 func satSub(a, b uint64) uint64 {
 	if a < b {
 		return 0

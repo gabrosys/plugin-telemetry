@@ -61,7 +61,7 @@
   name: cnpg_otel_check
   instrument: gauge
   unit: ""
-  description: 1 if a live check holds, 0 otherwise, from the last facts round (pg_monitor, read_only, track_io_timing, track_wal_io_timing, track_functions). read_only checks the engine's transactions, so it is 1 while they run read-only (transaction_read_only=on).
+  description: 1 if a live check holds, 0 otherwise, from the last facts round (pg_monitor, read_only, track_io_timing, track_wal_io_timing, track_functions, superuser). read_only checks the engine's transactions, so it is 1 while they run read-only (transaction_read_only=on). superuser is 1 while the session role is a superuser; the sidecar then runs no query.
   attributes: [check]
 - component: engine
   name: cnpg_otel_exports_total

@@ -262,6 +262,12 @@ func (r *replanner) idle(ctx context.Context) {
 	r.publish(ctx, planner.Plan{})
 }
 
+// refuse drops the facts in force and hands the scheduler an empty plan; the next good round replans.
+func (r *replanner) refuse(ctx context.Context) {
+	r.facts, r.skipped = nil, nil
+	r.publish(ctx, planner.Plan{})
+}
+
 // publish makes p the plan: it drops the snapshot entries, self-metrics and failures p no longer has
 // and hands p to the scheduler.
 func (r *replanner) publish(ctx context.Context, p planner.Plan) {

@@ -70,6 +70,7 @@ var _ = Describe("GatherFacts", func() {
 			"track_io_timing":     false,
 			"track_wal_io_timing": false,
 			"track_functions":     false,
+			"superuser":           false,
 		}))
 	})
 
@@ -99,6 +100,7 @@ var _ = Describe("GatherFacts", func() {
 			"track_io_timing":     true,
 			"track_wal_io_timing": true,
 			"track_functions":     true,
+			"superuser":           false,
 		}))
 	})
 
@@ -119,6 +121,25 @@ var _ = Describe("GatherFacts", func() {
 		Expect(f.Checks).NotTo(HaveKey("track_wal_io_timing"))
 		Expect(f.Checks).To(HaveKey("pg_monitor"))
 		Expect(f.Databases).To(Equal([]string{"app", "postgres"}))
+	})
+
+	It("refuses a superuser session with ErrSuperuser and reports the check", func(ctx SpecContext) {
+		const role = "cnpg_super_test"
+		DeferCleanup(func(ctx SpecContext) { Expect(server.Exec(ctx, "DROP ROLE IF EXISTS "+role)).To(Succeed()) })
+		Expect(server.Exec(ctx, "CREATE ROLE "+role+" LOGIN SUPERUSER PASSWORD '"+pgtest.MonitorPassword+"'")).To(Succeed())
+
+		cfg := server.MonitorConfig(GinkgoT().TempDir())
+		cfg.User = role
+		pool := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()))
+		DeferCleanup(pool.Close)
+		conn, release, err := pool.Acquire(ctx, "postgres")
+		Expect(err).NotTo(HaveOccurred())
+		defer release(true)
+
+		f, err := planner.GatherFacts(ctx, conn, pool.Guard())
+		Expect(errors.Is(err, planner.ErrSuperuser)).To(BeTrue(), "%v", err)
+		Expect(f.Checks).To(Equal(map[string]bool{"superuser": true}))
+		Expect(f.Databases).To(BeEmpty())
 	})
 
 	It("returns a wrapped error when the context is cancelled", func(ctx SpecContext) {

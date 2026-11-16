@@ -122,6 +122,7 @@ var _ = Describe("Catalogue", func() {
 		Expect(text).To(ContainSubstring("| `cnpg_otel_check` | gauge |  | `check` |"))
 		Expect(text).To(ContainSubstring("pg_monitor, read_only, track_io_timing, track_wal_io_timing, track_functions"))
 		Expect(text).To(ContainSubstring("read_only checks the engine's transactions"))
+		Expect(text).To(ContainSubstring("superuser is 1 while the session role is a superuser; the sidecar then runs no query"))
 	})
 
 	It("renders the committed markdown", func() {

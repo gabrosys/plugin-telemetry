@@ -264,8 +264,8 @@ var _ = Describe("Run", Ordered, func() {
 	})
 })
 
-// sessions counts the backends of user in state, other than the probe's own; an empty state counts every one.
-func sessions(ctx context.Context, user, state string) (n int, err error) {
+// backends counts the backends that match cond, other than the probe's own.
+func backends(ctx context.Context, cond string, args ...any) (n int, err error) {
 	cc, err := pg.ConnConfig(server.MonitorConfig(GinkgoT().TempDir()), "postgres")
 	if err != nil {
 		return 0, err
@@ -275,9 +275,13 @@ func sessions(ctx context.Context, user, state string) (n int, err error) {
 		return 0, err
 	}
 	defer func() { err = errors.Join(err, conn.Close(context.WithoutCancel(ctx))) }()
-	err = conn.QueryRow(ctx, "SELECT count(*) FROM pg_stat_activity WHERE usename = $1 AND ($2 = '' OR state = $2) AND pid <> pg_backend_pid()",
-		user, state).Scan(&n)
+	err = conn.QueryRow(ctx, "SELECT count(*) FROM pg_stat_activity WHERE ("+cond+") AND pid <> pg_backend_pid()", args...).Scan(&n)
 	return n, err
+}
+
+// sessions counts the backends of user in state, other than the probe's own; an empty state counts every one.
+func sessions(ctx context.Context, user, state string) (int, error) {
+	return backends(ctx, "usename = $1 AND ($2 = '' OR state = $2)", user, state)
 }
 
 // holdQuery keeps a connection of the pool busy for 5 s.
@@ -720,5 +724,38 @@ var _ = Describe("Run when the server's role changes", func() {
 		since := time.Now()
 		Eventually(func() []point { return points(f.srv, "cnpg_primary_probe_value", since) }).
 			WithTimeout(time.Second + queryInterval + exportInterval + 2*slack).WithPolling(100 * time.Millisecond).ShouldNot(BeEmpty())
+	}, SpecTimeout(2*time.Minute))
+})
+
+var _ = Describe("Run on a superuser session role", func() {
+	It("refuses a superuser session, closes its connections, and resumes after NOSUPERUSER", func(ctx SpecContext) {
+		const role = "cnpg_super_test"
+		planInterval := 5 * time.Second
+		DeferCleanup(func(ctx SpecContext) { Expect(server.Exec(ctx, "DROP ROLE IF EXISTS "+role)).To(Succeed()) })
+		Expect(server.Exec(ctx, "CREATE ROLE "+role+" LOGIN SUPERUSER PASSWORD '"+pgtest.MonitorPassword+"'")).To(Succeed())
+
+		f := newFixture(planInterval)
+		superuser := strings.Replace(f.valid, "user: "+pgtest.MonitorUser+"\n", "user: "+role+"\n", 1)
+		Expect(superuser).NotTo(Equal(f.valid))
+		writeFile(f.config, superuser)
+		f.run()
+
+		check := map[string]string{"check": "superuser"}
+		Eventually(func(g Gomega) {
+			got, ok := last(f.srv, "cnpg_otel_check", check)
+			g.Expect(ok).To(BeTrue())
+			g.Expect(got).To(Equal(1.0))
+		}).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+		Expect(points(f.srv, "cnpg_collector_up", time.Time{})).To(BeEmpty())
+		Eventually(func() (int, error) { return backends(ctx, "application_name = 'cnpg_otel_engine'") }).
+			WithTimeout(planInterval).WithPolling(250 * time.Millisecond).Should(BeZero())
+
+		Expect(server.Exec(ctx, "ALTER ROLE "+role+" NOSUPERUSER")).To(Succeed())
+		Eventually(expectUp(f.srv, 1)).WithTimeout(2*planInterval + slack).WithPolling(100 * time.Millisecond).Should(Succeed())
+		Eventually(func(g Gomega) {
+			got, ok := last(f.srv, "cnpg_otel_check", check)
+			g.Expect(ok).To(BeTrue())
+			g.Expect(got).To(Equal(0.0))
+		}).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 	}, SpecTimeout(2*time.Minute))
 })

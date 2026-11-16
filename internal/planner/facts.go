@@ -23,7 +23,7 @@ type Facts struct {
 	// SkippedDatabases are the connectable databases whose names are not valid UTF-8, quoted with
 	// strconv.QuoteToASCII and sorted; they are never planned.
 	SkippedDatabases []string
-	// Checks are pg_monitor, read_only, track_io_timing, track_wal_io_timing and track_functions: the
+	// Checks are pg_monitor, read_only, track_io_timing, track_wal_io_timing, track_functions and superuser: the
 	// keys are the values of the check attribute and true means the check holds.
 	Checks map[string]bool
 	// WALSegmentSize is wal_segment_size from pg_settings, in bytes; always positive.
@@ -56,6 +56,12 @@ func parseWALSegmentSize(setting string) (float64, error) {
 	}
 	return v, nil
 }
+
+// ErrSuperuser comes with Facts{Checks: {"superuser": true}} when the session role is a superuser.
+var ErrSuperuser = errors.New("the session role is a superuser")
+
+// superuserSQL reads rolsuper of the session role (PostgreSQL 18, pg_roles and session_user).
+const superuserSQL = "SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = session_user"
 
 // rollbackTimeout bounds the rollback of an unfinished facts transaction.
 const rollbackTimeout = 2 * time.Second
@@ -126,7 +132,8 @@ func rollbackSavepoint(ctx context.Context, check string, sp pgx.Tx) error {
 
 // GatherFacts reads the server version, the recovery state, wal_segment_size, the live checks and the connectable
 // databases in one read-only transaction on conn, which must be connected to the default database.
-// guard (pg.Pool.Guard) runs first and sets the transaction's limits.
+// guard (pg.Pool.Guard) runs first and sets the transaction's limits. A session role that is a superuser
+// gives ErrSuperuser and Facts with only the superuser check.
 func GatherFacts(ctx context.Context, conn *pgx.Conn, guard string) (Facts, error) {
 	return gatherFacts(ctx, conn, guard, checkSettings)
 }
@@ -145,6 +152,14 @@ func gatherFacts(ctx context.Context, conn *pgx.Conn, guard string, settings map
 	}()
 	if _, err := tx.Exec(ctx, guard); err != nil {
 		return Facts{}, fmt.Errorf("set the facts transaction limits: %w", err)
+	}
+
+	var superuser bool
+	if err := tx.QueryRow(ctx, superuserSQL).Scan(&superuser); err != nil {
+		return Facts{}, fmt.Errorf("read rolsuper of the session role: %w", err)
+	}
+	if superuser {
+		return Facts{Checks: map[string]bool{"superuser": true}}, ErrSuperuser
 	}
 
 	var versionNum string
@@ -171,6 +186,7 @@ func gatherFacts(ctx context.Context, conn *pgx.Conn, guard string, settings map
 	}
 
 	checks, checksErr := readChecks(ctx, tx, settings)
+	checks["superuser"] = false
 
 	rows, err := tx.Query(ctx, databasesQuery)
 	if err != nil {

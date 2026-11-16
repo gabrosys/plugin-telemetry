@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -560,5 +561,120 @@ var _ = Describe("The self-measuring metrics", func() {
 		} {
 			Expect(points(h.srv, name, time.Time{})).To(BeEmpty(), name)
 		}
+	})
+})
+
+var _ = Describe("A superuser session role", func() {
+	// fromSQL are the series the database gives: the superuser refusal exports none of them.
+	fromSQL := func(name string) bool {
+		return slices.Contains([]string{
+			"cnpg_collector_up", "cnpg_collector_pg_wal", "cnpg_collector_pg_wal_archive_status",
+			"cnpg_collector_lo_pages", "cnpg_collector_postgres_version", "cnpg_otel_query_runs_total",
+		}, name) || strings.HasPrefix(name, "cnpg_collector_wal_") || strings.HasPrefix(name, "cnpg_alpha_") ||
+			strings.HasPrefix(name, "cnpg_beta_")
+	}
+	// refusedIn checks that req has no series from the database and the collection metrics and the Cluster's built-ins.
+	refusedIn := func(req otlptest.Request) {
+		GinkgoHelper()
+		var names []string
+		for _, rm := range req.Metrics.GetResourceMetrics() {
+			for _, sm := range rm.GetScopeMetrics() {
+				for _, m := range sm.GetMetrics() {
+					names = append(names, m.GetName())
+				}
+			}
+		}
+		for _, name := range names {
+			Expect(fromSQL(name)).To(BeFalse(), "%s exported to a superuser session", name)
+		}
+		for _, p := range requestPoints(req, "cnpg_collector_sync_replicas") {
+			Expect(p.attrs["value"]).NotTo(Equal("observed"))
+		}
+		for _, p := range requestPoints(req, "cnpg_otel_check") {
+			Expect(p.attrs["check"]).To(Equal("superuser"))
+		}
+	}
+
+	var (
+		h     *harness
+		super atomic.Bool
+	)
+
+	// start runs the engine on a role that is a superuser or not.
+	start := func(superuser bool) {
+		GinkgoHelper()
+		super.Store(superuser)
+		h = runWith(func(url string) *memConfig {
+			return newMemConfig(strings.Replace(httpSettings(url), "cluster: mem\n", "cluster: c\n", 1), httpFiles())
+		}, func(context.Context, int) (planner.Facts, error) {
+			if super.Load() {
+				return planner.Facts{Checks: map[string]bool{"superuser": true}},
+					fmt.Errorf("gather facts: %w", planner.ErrSuperuser)
+			}
+			f := builtinFacts
+			f.Checks = map[string]bool{"superuser": false}
+			return f, nil
+		}, runOptions{
+			env: map[string]string{"POD_NAME": "c-1"},
+			config: func(m *memConfig) engine.Config {
+				cfg := &clusterConfig{memConfig: m}
+				cfg.cluster.Store(builtinCluster())
+				return cfg
+			},
+		})
+	}
+
+	It("runs no query, exports the check and the Cluster's built-ins, waits a planning cycle and logs the start and the end", func() {
+		start(true)
+		h.advanceBy(time.Second, func() bool { return len(h.roundTimes()) >= 4 })
+		for _, gap := range gaps(h.roundTimes()) {
+			Expect(gap).To(BeNumerically("~", 30*time.Second, time.Second))
+		}
+		h.advance(h.has("cnpg_otel_check", map[string]string{"check": "superuser"}, 1))
+		reqs := h.requests()
+		for _, req := range reqs {
+			refusedIn(req)
+		}
+		latest := reqs[len(reqs)-1]
+		Expect(requestPoints(latest, "cnpg_collector_collection_errors_total")).NotTo(BeEmpty())
+		Expect(requestPoints(latest, "cnpg_collector_collections_total")).NotTo(BeEmpty())
+		Expect(requestPoints(latest, "cnpg_collector_replica_mode")).NotTo(BeEmpty())
+		Expect(h.logged(`"msg"="plan updated" "jobs"=0`)).To(Equal(1))
+		Expect(h.loggedAll(`"msg"="query failed"`, `"query"="facts"`, `"outcome"="denied"`, "the session role is a superuser", "cnpg_metrics_exporter")).To(Equal(1))
+		Expect(h.loggedAll(`"msg"="query recovered"`, `"query"="facts"`)).To(BeZero())
+
+		By("the role losing the attribute")
+		super.Store(false)
+		h.advanceBy(time.Second, h.has("cnpg_collector_up", map[string]string{"cluster": "c"}, 1))
+		h.advance(h.has("cnpg_otel_check", map[string]string{"check": "superuser"}, 0))
+		Expect(h.loggedAll(`"msg"="query recovered"`, `"query"="facts"`)).To(Equal(1))
+		Expect(h.loggedAll(`"msg"="plan updated"`, `"jobs"=8`)).To(Equal(1))
+		h.advance(func() bool {
+			_, ok := h.lastValue("cnpg_otel_query_runs_total", map[string]string{"query": "alpha"})
+			return ok
+		})
+	})
+
+	It("empties the plan of a session that turns superuser and plans it again after", func() {
+		start(false)
+		h.advance(h.has("cnpg_otel_query_runs_total", map[string]string{"query": "alpha"}, 1))
+		Expect(h.loggedAll(`"msg"="plan updated"`, `"jobs"=8`)).To(Equal(1))
+
+		super.Store(true)
+		h.advanceBy(time.Second, func() bool { return h.loggedAll(`"msg"="query failed"`, `"query"="facts"`) >= 1 })
+		Expect(h.logged(`"msg"="plan updated" "jobs"=0`)).To(Equal(1))
+		h.advance(func() bool {
+			reqs := h.requests()
+			return len(reqs) > 0 && len(requestPoints(reqs[len(reqs)-1], "cnpg_otel_query_runs_total")) == 0
+		})
+		since := len(h.requests())
+		h.advance(func() bool { return len(h.requests()) >= since+3 })
+		for _, req := range h.requests()[since:] {
+			refusedIn(req)
+		}
+
+		super.Store(false)
+		h.advanceBy(time.Second, h.has("cnpg_collector_up", map[string]string{"cluster": "c"}, 1))
+		h.advance(func() bool { return h.loggedAll(`"msg"="plan updated"`, `"jobs"=8`) == 2 })
 	})
 })

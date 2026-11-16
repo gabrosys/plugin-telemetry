@@ -50,6 +50,9 @@ const (
 	// cardinalityLimit is the most series one instrument reports per collection (the SDK default is 2000).
 	cardinalityLimit = 10000
 
+	// factsQuery names the facts round in errorLog.
+	factsQuery = "facts"
+
 	// upMetric and upDescription are CloudNativePG v1.30.1's (pg_collector.go:130-135), which sets no unit.
 	upMetric      = "cnpg_collector_up"
 	upDescription = "1 if PostgreSQL is up, 0 otherwise."
@@ -158,6 +161,7 @@ type engine struct {
 	factsFailing  bool   // a failed facts round was logged and no round has succeeded since
 	checksErr     string // the unreadable-checks error last logged; empty when the checks were readable
 	idleReason    string // the ErrNoConfiguration or ErrNotReady reason last logged
+	refusing      bool   // the last facts round found a superuser session role
 }
 
 func newEngine(ctx context.Context, o Options, gather func(context.Context, settings.Settings) (planner.Facts, error)) (*engine, error) {
@@ -490,6 +494,7 @@ func (e *engine) teardown() {
 	e.factsFailures = 0
 	e.factsFailing = false
 	e.checksErr = ""
+	e.refusing = false
 	if r := e.setRunner(nil); r != nil {
 		r.pool.Close()
 	}
@@ -695,6 +700,10 @@ func (e *engine) gatherRound(ctx context.Context, timed bool) {
 		}
 		e.stats.Collection(true, took)
 		e.facts.Store(nil)
+		if errors.Is(err, planner.ErrSuperuser) {
+			e.refuse(ctx, cur)
+			return
+		}
 		if timed {
 			e.factsFailures++
 			e.setFactsTimer(factsWait(e.factsFailures, s.PlanInterval))
@@ -707,6 +716,8 @@ func (e *engine) gatherRound(ctx context.Context, timed bool) {
 		return
 	}
 	e.stats.Collection(false, took)
+	e.refusing = false
+	e.errs.Succeeded(logger.GetLogger(), factsQuery, s.Postgres.Database)
 	e.facts.Store(&builtin.Facts{Version: facts.Version, Primary: !facts.InRecovery, WALSegmentSize: facts.WALSegmentSize})
 	e.factsFailures = 0
 	e.setFactsTimer(s.PlanInterval)
@@ -720,6 +731,25 @@ func (e *engine) gatherRound(ctx context.Context, timed bool) {
 	v := facts.Version
 	e.server.Store(&v)
 	e.plan.setFacts(ctx, facts)
+}
+
+// refuse handles a facts round that found a superuser session role: the plan is empty, the pool is new
+// (the old one closes at once), no facts are kept, cnpg_collector_up is unreported and only the superuser
+// check is exported. The next round comes after a planning cycle, with no backoff.
+func (e *engine) refuse(ctx context.Context, cur *configuration) {
+	s := cur.settings
+	logger := log.FromContext(ctx).GetLogger()
+	if !e.refusing {
+		e.refusing = true
+		e.plan.refuse(ctx)
+		e.swapPool(ctx, s, cur.idleTimeout)
+	}
+	e.up.Store(-1)
+	e.stats.SetChecks(map[string]bool{"superuser": true})
+	e.factsFailures = 0
+	e.setFactsTimer(s.PlanInterval)
+	err := fmt.Errorf("%w: %s, no query runs while it is", planner.ErrSuperuser, s.Postgres.User)
+	e.errs.Failed(logger, factsQuery, s.Postgres.Database, selfmetrics.OutcomeDenied, err)
 }
 
 // logChecks logs unreadable live checks when their error appears or changes, and once when they are readable again.
@@ -779,7 +809,7 @@ func (e *engine) gatherFacts(ctx context.Context, s settings.Settings) (planner.
 	facts, err := planner.GatherFacts(ctx, conn, e.runner.pool.Guard())
 	release(err != nil)
 	if err != nil {
-		return planner.Facts{}, fmt.Errorf("gather facts: %w", err)
+		return facts, fmt.Errorf("gather facts: %w", err)
 	}
 	return facts, nil
 }

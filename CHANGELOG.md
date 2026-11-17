@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/gabrosys/plugin-telemetry/compare/v0.4.0...v0.5.0) (2026-11-17)
+
+
+### Features
+
+* add cnpg built-ins and harden the plugin ([#10](https://github.com/gabrosys/plugin-telemetry/issues/10)) ([6f41649](https://github.com/gabrosys/plugin-telemetry/commit/6f41649a062c2b550dabf4b059adeb52bb1fbd1b))
+
 ## [0.4.0](https://github.com/gabrosys/plugin-telemetry/compare/v0.3.0...v0.4.0) (2026-11-15)
 
 

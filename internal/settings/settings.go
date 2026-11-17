@@ -80,7 +80,7 @@ type Exclude struct {
 
 // Exporter takes the keys endpoint, compression, timeout and tls caFile, certFile and keyFile from the
 // OTel declarative configuration OTLP exporter, in camelCase; protocol, headersFile, interval,
-// maxPointsPerRequest and tls serverName and minVersion are its own.
+// maxPointsPerRequest and tls serverName and minVersion are the plugin's own.
 type Exporter struct {
 	Protocol            string        `yaml:"protocol"` // "http/protobuf" or "grpc"
 	Endpoint            string        `yaml:"endpoint"` // full URL; http:// is plaintext, https:// is TLS

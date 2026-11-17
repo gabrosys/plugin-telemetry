@@ -64,8 +64,9 @@ func statWALQuery(sql, runOnServer string, columns ...Mapping) UserQuery {
 }
 
 // Builtin returns the queries behind CNPG's hard-coded metrics that PostgreSQL computes. The names and
-// descriptions are CNPG's (pg_collector.go:160-180, 217-272 at v1.30.1); the pg_wal count takes only names of
-// exactly 24 hex digits, as main does at bc0889a (wal.go:147); v1.30.1 does not anchor the pattern.
+// descriptions are CNPG's (pg_collector.go:148-153, 160-166, 173-180, 217-272, 638-660 at v1.30.1); the
+// pg_wal count takes only names of exactly 24 hex digits, as main does at bc0889a (wal.go:147); v1.30.1
+// leaves the end unanchored.
 func Builtin() UserQueries {
 	return UserQueries{
 		KeyLOPages: UserQuery{

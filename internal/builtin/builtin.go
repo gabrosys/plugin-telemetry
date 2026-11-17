@@ -226,7 +226,7 @@ func expectedSyncReplicas(c *apiv1.Cluster) int {
 	return n
 }
 
-// electableReplicas ports getElectableSyncReplicas (legacy.go:105-169).
+// electableReplicas ports getElectableSyncReplicas and getSortedNonPrimaryHealthyInstanceNames (legacy.go:105-169).
 func electableReplicas(c *apiv1.Cluster) []string {
 	var others []string
 	for _, name := range c.Status.InstancesStatus[apiv1.PodHealthy] {

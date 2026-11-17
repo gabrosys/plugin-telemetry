@@ -166,7 +166,7 @@ func (s *Source) notReady(pending []string, cause error) error {
 // client waits for the token and returns the dynamic client; nil when ctx ended first.
 func (s *Source) client(ctx context.Context) (dynamic.Interface, error) {
 	if !s.waitForToken(ctx) {
-		return nil, nil // the context ended while waiting, which is not an error
+		return nil, nil
 	}
 	cfg := &rest.Config{
 		Host:            s.o.APIServer,

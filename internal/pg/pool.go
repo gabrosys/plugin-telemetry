@@ -316,8 +316,8 @@ func (p *Pool) CloseIdle(ctx context.Context) {
 // Probe dials database once and closes the connection at once. PostgreSQL answers 57P03 (cannot_connect_now)
 // while it shuts down, starts up or recovers: it accepts no new session, and the pool's sessions only hold
 // it, so the pool closes its idle connections and release closes every connection until a dial succeeds.
-// Any other error, such as 53300 while the server is out of slots, leaves the sessions alone. ctx is
-// accepted for contextcheck and reaches closeConn.
+// Any other error, such as 53300 while the server is out of slots, leaves the sessions alone. ctx
+// bounds the dial and reaches closeConn.
 func (p *Pool) Probe(ctx context.Context, database string) {
 	conn, err := p.connect(ctx, database)
 	var pgErr *pgconn.PgError
@@ -347,8 +347,7 @@ func (p *Pool) takeAllIdleLocked() []*idleConn {
 }
 
 // Close closes the idle connections and makes AcquireWithin fail. Connections still in use are
-// closed when they are released. ctx is accepted for contextcheck
-// and reaches closeConn.
+// closed when they are released. ctx is accepted for contextcheck and reaches closeConn.
 func (p *Pool) Close(ctx context.Context) {
 	p.mu.Lock()
 	p.closed = true

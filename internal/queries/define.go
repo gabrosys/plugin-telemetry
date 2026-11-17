@@ -69,7 +69,7 @@ type Column struct {
 	Name        string // result column
 	Role        Role
 	Usage       Usage
-	Metric      string // Namespace + "_" + (the column's name or the column), "_milliseconds" appended for DURATION; empty unless RoleValue
+	Metric      string // Namespace + "_" + (the mapping's name, else the column), "_milliseconds" appended for DURATION; empty unless RoleValue
 	Kind        Kind
 	Description string
 	Mapping     map[string]float64  // MAPPEDMETRIC

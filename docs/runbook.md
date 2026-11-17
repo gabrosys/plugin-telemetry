@@ -146,6 +146,8 @@ Use your collector's address instead of `collector.otel.svc:4318`. The metrics a
 The Cluster and the TelemetryExporter live in the same namespace. Create the namespace and the TelemetryExporter first. `default` is the name a Cluster uses when it sets no `exporter` parameter. One TelemetryExporter can serve every Cluster in the namespace.
 
 ```bash
+NS=${NS:?set NS, see the top}
+CLUSTER=${CLUSTER:?set CLUSTER, see the top}
 kubectl create namespace $NS --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f - <<EOF
 apiVersion: telemetry.gabrosys.github.io/v1alpha1
@@ -237,6 +239,7 @@ Wait until the Cluster is ready.
 
 ```bash
 kubectl wait --for=condition=Ready cluster.postgresql.cnpg.io/$CLUSTER -n $NS --timeout=600s
+kubectl wait --for=condition=Ready pod -l cnpg.io/cluster=$CLUSTER,cnpg.io/podRole=instance -n $NS --timeout=600s
 ```
 
 To opt in an existing Cluster, add the same `plugins` entry and the lines of its mode to the Cluster's manifest. Do not replace a `pg_hba` or `pg_ident` list that has lines of its own. After you edit an existing Cluster, `kubectl get pods -n $NS` shows the instances restart, one at a time.
@@ -321,12 +324,12 @@ kubectl annotate cluster.postgresql.cnpg.io $CLUSTER -n $NS runbook.telemetry.ga
 | The Cluster was opted in before its TelemetryExporter, and the status still says `missing` after you created it | Exports and the identity resume at once, but the status changes only when CloudNativePG reconciles the Cluster, and creating the exporter does not trigger that. | Touch the Cluster (above). |
 | `"identity":"pending"` with a line in `problems` that names an object | `Secret/<c>.telemetry-token has type <type>, not kubernetes.io/service-account-token: delete it`, `Secret/<c>.telemetry-token names ServiceAccount "<a>", not "<c>.telemetry": delete it`, `RoleBinding/<c>.telemetry refers to <kind>/<name>, not Role/<c>.telemetry: delete it`, or `<Kind>/<name> is not in the plugin's cache: not created yet, or not the plugin's`. The plugin logs `identity controller` with `"outcome":"in the way"` once. | The plugin never adopts an object it did not create. Delete the object the line names, for example `kubectl delete secret <c>.telemetry-token -n $NS`. The plugin retries every 5 s. `has no data.token yet` clears when Kubernetes fills the token. |
 | No `otel-metrics` container in the instance Pods | `problems` has `auth "<value>" is invalid: no sidecar is injected`. An invalid `auth` also removes the Cluster's identity objects until it is fixed. | Set `auth` to `peer` or `password`, or leave it out for `peer`. The instances roll once to gain the sidecar. |
-| Peer mode: `peer mode needs the pg_ident line "cnpg_metrics_exporter nobody cnpg_metrics_exporter"` | The status shows the problem at once. The sidecar keeps the connections it has open, so it logs `"msg":"gather facts"` with `FATAL: Peer authentication failed for user "cnpg_metrics_exporter" (SQLSTATE 28000)` in `error`, and `cnpg_collector_up` is 0, only when it opens a new connection, for example after a Pod restart. | Add the line to `spec.postgresql.pg_ident`. PostgreSQL reloads and no Pod restarts. The sidecar retries after 1 s, 2 s, 4 s and so on, at most every plan interval (30 s by default), so it logs `gathered facts again` within one interval of PostgreSQL loading the line. In the upgrade run that came about 2 minutes after the patch. |
+| Peer mode: `peer mode needs the pg_ident line "cnpg_metrics_exporter nobody cnpg_metrics_exporter"` | The status shows the problem at once. The sidecar keeps the connections it has open, so it logs `"msg":"gather facts"` with `FATAL: Peer authentication failed for user "cnpg_metrics_exporter" (SQLSTATE 28000)` in `error`, and `cnpg_collector_up` is 0, only when it opens a new connection, for example after a Pod restart. | Add the line to `spec.postgresql.pg_ident`. PostgreSQL reloads and no Pod restarts. The sidecar retries after 1 s, 2 s, 4 s and so on, at most every plan interval (30 s by default), so it logs `gathered facts again` within one interval of PostgreSQL loading the line. In the upgrade run the sidecar had been failing for about 2 minutes, so the wait was at the 30 s cap, and it recovered about 30 s after the patch. |
 | Password mode: `password mode needs the passwordSecret parameter`, `no managed role uses passwordSecret "<name>" with login and pg_monitor`, `pg_hba has no line for role "<role>" from 127.0.0.1/32` (or `::1/128`), or `pg_hba has no reject line for role "<role>"` | The status is the only place these appear. They list what the Cluster spec lacks. | Add the parameter, the managed role (with `login: true` and `pg_monitor` in `inRoles`) or the `pg_hba` lines from [section 4](#password-mode). |
 | `cnpg_otel_check{check="superuser"}` is 1 | `cnpg_collector_up` is not reported, and no query runs. The sidecar logs `query failed` with `"query":"facts"`, `"outcome":"denied"` and the error `the session role is a superuser: <role>; no query runs until the role is not a superuser`. | The sidecar must log in as a role that is not a superuser. In password mode, check the `username` in the Secret that `passwordSecret` names, and the managed role ([section 4](#password-mode)). |
 | `cnpg_otel_query_runs_total` has `outcome="denied"` | `cnpg_otel_check{check="pg_monitor"}` is 0 when the role is not in `pg_monitor`. The sidecar logs `query failed` with `"outcome":"denied"`. PostgreSQL reports it as SQLSTATE 42501. | Put the role in `pg_monitor`. In password mode that is `inRoles` of the managed role. If `pg_monitor` is held, the query reads something `pg_monitor` cannot, so change the query. |
 | Exports fail | `cnpg_otel_exports_total{outcome="error"}` rises. The sidecar logs `export metrics` with an `error.type`: `timeout`, `_OTHER`, `request_too_large`, an HTTP status such as `401` or a gRPC code such as `Unavailable`. A partly accepted export logs `export partially rejected`. The log says `export recovered` once exports work again. | Check from the Cluster's namespace that the endpoint resolves and answers, that no NetworkPolicy blocks it, and that `exporter.endpoint`, protocol and credentials match the collector. |
-| `ImagePullBackOff` after an image change | `kubectl get pods -n $NS` shows `Init:ImagePullBackOff` or `Init:ErrImagePull` on instance Pods. The sidecar is an init container, so the Pod never starts. | The sidecar digest in the `telemetry-sidecar-image` ConfigMap cannot be pulled by that node. Make it pullable, or put the previous digest back ([section 10](#10-upgrade-the-plugin)). Either change rolls the instances again. |
+| `ImagePullBackOff` after an image change | `kubectl get pods -n $NS` shows `Init:ImagePullBackOff` or `Init:ErrImagePull` on instance Pods. The sidecar is an init container, so the Pod never starts. | The sidecar digest in the `telemetry-sidecar-image` ConfigMap cannot be pulled by that node. Make it pullable, or put the previous digest back ([section 10](#10-upgrade-the-plugin)). Either change rolls the instances again, and each Cluster needs a touch ([section 10](#10-upgrade-the-plugin) step 3). |
 | The plugin's Pods are not ready | The log of a replica stops at `waiting for the sidecar image`, with no `ignoring sidecar image configmap` line. The plugin serves only after it logs `sidecar image loaded, serving`. A log that stops at `waiting for the caches to sync` means the caches have not synced. | With no `ignoring` line, the ConfigMap is missing or the replica has no API server access. Check that the `telemetry-sidecar-image` ConfigMap exists in `cnpg-system`, then look for a NetworkPolicy ([section 9](#9-restrict-the-plugins-network)). `ignoring sidecar image configmap` means the `image` value is invalid: it must be `<repository>@sha256:<64 hex digits>`, and a tag is refused. Fix the ConfigMap. |
 | `problems` names a plugin parameter | `unknown plugin parameter "<key>" is ignored`, or `invalid plugin parameters: sidecarCPU "<value>": <parse error>` or `invalid plugin parameters: sidecarMemory "<value>" is below 32Mi` (`10m` for CPU). The plugin logs `invalid sidecar resource, using the default`, and the sidecar gets the default. | Correct the key (`exporter`, `auth`, `passwordSecret`, `sidecarCPU`, `sidecarMemory`) or the value. A change to the resources rolls the instances. |
 | Deleting, draining or restarting an instance takes about 10 s longer | None. The sidecar holds PostgreSQL's smart shutdown open until its next probe, which runs every 10 s. | Nothing. It was 0.18 s without the plugin against 182.5 s before the probe existed. The measurements are in [resources.md](resources.md#pod-shutdown). |
@@ -335,7 +338,7 @@ kubectl annotate cluster.postgresql.cnpg.io $CLUSTER -n $NS runbook.telemetry.ga
 
 On every clean stop of a plugin Pod, cnpg-i-machinery v0.4.2 logs an error-level line with the message `While terminating server` (`pkg/pluginhelper/http/server.go:222`). It logs it whenever the gRPC server's `Serve` returns something other than a closed-listener error, and a clean stop returns nil. It is harmless. Ignore it in alerts on error-level logs from the plugin.
 
-Every instance start can log an error-level `gather facts` line in the sidecar whose `error` contains `dial unix /controller/run/.s.PGSQL.5432: connect: no such file or directory`, followed about a second later by `gathered facts again`. PostgreSQL isn't accepting connections yet, so the first facts round fails and the retry succeeds. It is harmless. A `gather facts` error that is not followed by `gathered facts again` is a real failure ([section 7](#7-troubleshooting)).
+Every instance start can log an error-level `gather facts` line in the sidecar whose `error` contains `dial unix /controller/run/.s.PGSQL.5432: connect: no such file or directory`, followed about a second later by `gathered facts again`. PostgreSQL is not accepting connections yet, so the first facts round fails and the retry succeeds. It is harmless. A `gather facts` error that is not followed by `gathered facts again` is a real failure ([section 7](#7-troubleshooting)).
 
 ## 9. Restrict the plugin's network
 
@@ -468,7 +471,7 @@ cmp -s bin/image-ref bin/image-ref.previous && echo "same reference: nothing to 
    kubectl annotate service -n cnpg-system plugin-telemetry "telemetry.gabrosys.github.io/image=$NEW_REF" --overwrite
    ```
 
-3. Check that the new digest is pullable on every node, then change the sidecar image in the ConfigMap. This is the one step that rolls instances: every opted-in Cluster rolls once, so the digest must be one that every node can pull. A well-formed digest that cannot be pulled puts every opted-in instance into `Init:ImagePullBackOff`, so do not skip the check. This starts a short-lived Pod on each node in `$NS`, where the instance Pods pull the image.
+3. Check that the new digest is pullable on every node, then change the sidecar image in the ConfigMap. This is the step that rolls the instances: the touch in this step rolls them, once per opted-in Cluster, so the digest must be one that every node can pull. A well-formed digest that cannot be pulled puts every opted-in instance into `Init:ImagePullBackOff`, so do not skip the check. This starts a short-lived Pod on each node in `$NS`, where the instance Pods pull the image.
 
    ```bash
    i=0
@@ -489,7 +492,7 @@ cmp -s bin/image-ref bin/image-ref.previous && echo "same reference: nothing to 
    kubectl apply --server-side -k bin/install
    ```
 
-   The plugin logs `sidecar image updated` at once, but that does not roll a Cluster. CloudNativePG rolls a Cluster when it next reconciles it, and nothing makes a healthy Cluster reconcile on a ConfigMap change. In the upgrade run no instance rolled for 6 minutes. Touch every opted-in Cluster, with the annotation from [section 7](#7-troubleshooting). This lists the Clusters in all namespaces whose `spec.plugins` names the plugin, then touches each one. A Cluster that has already rolled on its own is not rolled again.
+   The plugin logs `sidecar image updated` at once, but that does not roll a Cluster. CloudNativePG rolls a Cluster when it next reconciles it, and nothing makes a healthy Cluster reconcile on a ConfigMap change. In the upgrade run no instance rolled for 6 minutes. Touch every opted-in Cluster, with the annotation from [section 7](#7-troubleshooting). This lists the Clusters in all namespaces whose `spec.plugins` names the plugin, then touches each one.
 
    ```bash
    CLUSTERS=$(kubectl get cluster.postgresql.cnpg.io -A \
@@ -502,24 +505,27 @@ cmp -s bin/image-ref bin/image-ref.previous && echo "same reference: nothing to 
    done
    ```
 
-   Each Cluster then rolls its instances one at a time. In the run the first instance rolled 6 s after the touch. Wait until no instance Pod has another sidecar image, then until every touched Cluster is Ready, and show the images after the roll. The first loop gives up after 10 minutes.
+   Each Cluster then rolls its instances one at a time. The first instance rolls within seconds of the touch. Wait until no instance Pod has another sidecar image, then until the instance Pods and every touched Cluster are Ready, and show the images after the roll. The first loop gives up after 10 minutes and says so. A Cluster with `primaryUpdateStrategy: supervised` keeps its old primary until you switch over (CloudNativePG v1.30.1, `docs/src/rolling_update.md`, "Manual updates (`supervised`)": the update is suspended after the replicas, and an image change needs a switchover), so the loop gives up for it.
 
    ```bash
+   rolled=0
    for i in $(seq 1 60); do
      kubectl get pods -A -l cnpg.io/podRole=instance \
        -o jsonpath='{range .items[*]}{.spec.initContainers[?(@.name=="otel-metrics")].image}{"\n"}{end}' \
-       | grep -v "^$" | grep -vxF "$NEW_REF" > /dev/null || break
+       | grep -v "^$" | grep -vxF "$NEW_REF" > /dev/null || { rolled=1; break; }
      sleep 10
    done
+   [ "$rolled" = 1 ] || echo "instances still on another sidecar image"
    echo "$CLUSTERS" | while read -r ns c; do
      [ -n "$c" ] || continue
+     kubectl wait --for=condition=Ready pod -l cnpg.io/cluster="$c",cnpg.io/podRole=instance -n "$ns" --timeout=600s
      kubectl wait --for=condition=Ready cluster.postgresql.cnpg.io/"$c" -n "$ns" --timeout=600s
    done
    kubectl get pods -A -l cnpg.io/podRole=instance \
      -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{" "}{.spec.initContainers[?(@.name=="otel-metrics")].image}{"\n"}{end}'
    ```
 
-   To go back, set `NEW_REF` to the previous reference and repeat steps 1, 2 and 3. Step 3 then runs again in full: the pull check, the ConfigMap change and the touch. The instances roll again.
+   To go back, set `NEW_REF` to the previous reference and repeat steps 1, 2 and 3. Step 3 then runs again in full: the pull check, the ConfigMap change, the touch and the wait. The instances roll again.
 
    ```bash
    NEW_REF=$(cat bin/image-ref.previous)
@@ -531,7 +537,9 @@ cmp -s bin/image-ref bin/image-ref.previous && echo "same reference: nothing to 
    cp bin/image-ref.previous bin/image-ref
    ```
 
-4. Step 4 needs no command: a release that changes the Pod patch rolls every opted-in instance on upgrade, so read its release notes before you start.
+   The same-reference check from the start of this section would now print `same reference: nothing to upgrade`. That is expected: the installed reference and `bin/image-ref.previous` are the same again.
+
+4. Step 4 needs no command: a release that changes the Pod patch rolls every opted-in instance on upgrade, so read its release notes before you start. Like the ConfigMap change, it rolls a Cluster only at its next reconcile, so touch the Clusters and wait as in step 3.
 
 ## 11. Remove the plugin
 

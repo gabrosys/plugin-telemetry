@@ -90,8 +90,9 @@ type Query struct {
 	RunOnServer string `json:"runonserver,omitempty"`
 
 	// TargetDatabases lists the databases to run the query in. A name with *, ? or [ is a Go path.Match
-	// pattern matched against the databases that accept connections and are not templates. When empty,
-	// the query runs in the Cluster's application database, which is postgres when the bootstrap sets none.
+	// pattern matched against the databases that accept connections, are not templates, that the
+	// monitoring role may CONNECT to and whose names are valid UTF-8. When empty, the query runs in the
+	// Cluster's application database, which is postgres when the bootstrap sets none.
 	//
 	// +kubebuilder:validation:MaxItems=64
 	// +optional

@@ -79,7 +79,7 @@ _Appears in:_
 
 #### Limits
 
-Limits bounds what the queries may cost. A limit left unset keeps the sidecar's default.
+Limits bounds what the queries may cost. A limit left out keeps its default.
 
 _Appears in:_
 - [MetricsSpec](#metricsspec)
@@ -168,7 +168,7 @@ _Appears in:_
 
 #### OTLPExporter
 
-OTLPExporter is the OTLP connection every signal shares.
+OTLPExporter is the OTLP connection.
 
 _Appears in:_
 - [TelemetryExporterSpec](#telemetryexporterspec)
@@ -213,7 +213,7 @@ _Appears in:_
 | `primary` _boolean_ | Primary runs the query on the primary only, and skips it on a replica. The default is false. |  | Optional: \{\} <br /> |
 | `cache_seconds` _integer_ | CacheSeconds is the minimum number of seconds between two runs of the query. A shorter interval is<br />raised to this value. The default is 0, no minimum. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `runonserver` _string_ | RunOnServer is a semantic version range of PostgreSQL servers the query runs on, such as<br />">=15.0.0". A query with an invalid range is disabled. When empty, it runs on every version. |  | Optional: \{\} <br /> |
-| `target_databases` _string array_ | TargetDatabases lists the databases to run the query in. A name with *, ? or [ is a Go path.Match<br />pattern matched against the databases that accept connections and are not templates. When empty,<br />the query runs in the Cluster's application database, which is postgres when the bootstrap sets none. |  | MaxItems: 64 <br />Optional: \{\} <br /> |
+| `target_databases` _string array_ | TargetDatabases lists the databases to run the query in. A name with *, ? or [ is a Go path.Match<br />pattern matched against the databases that accept connections, are not templates, that the<br />monitoring role may CONNECT to and whose names are valid UTF-8. When empty, the query runs in the<br />Cluster's application database, which is postgres when the bootstrap sets none. |  | MaxItems: 64 <br />Optional: \{\} <br /> |
 | `name` _string_ | Name replaces the query key in the metric names: `cnpg_<name>_<column>`. |  | Optional: \{\} <br /> |
 
 #### QueryGroup
@@ -244,14 +244,14 @@ plugin parameter "exporter", and uses the one named default when the parameter i
 
 #### TelemetryExporterSpec
 
-TelemetryExporterSpec holds what every signal shares, then one section per signal.
+TelemetryExporterSpec holds the OTLP connection, the resource attributes and the metrics settings.
 
 _Appears in:_
 - [TelemetryExporter](#telemetryexporter)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `exporter` _[OTLPExporter](#otlpexporter)_ | Exporter is the OTLP connection every signal shares. |  | Optional: \{\} <br /> |
+| `exporter` _[OTLPExporter](#otlpexporter)_ | Exporter is the OTLP connection. |  | Optional: \{\} <br /> |
 | `envFrom` _[EnvFromSource](#envfromsource)_ | EnvFrom names a ConfigMap and a Secret whose OpenTelemetry environment keys are read as settings.<br />The sidecar reads the ENDPOINT, PROTOCOL, COMPRESSION, TIMEOUT (in milliseconds) and HEADERS keys<br />of OTEL_EXPORTER_OTLP_, where `OTEL_EXPORTER_OTLP_METRICS_<NAME>` wins over `OTEL_EXPORTER_OTLP_<NAME>`,<br />and OTEL_RESOURCE_ATTRIBUTES. A Secret key wins over the same ConfigMap key, and a field of<br />spec.exporter wins over both. OTEL_EXPORTER_OTLP_METRICS_ENDPOINT is used as given.<br />OTEL_EXPORTER_OTLP_ENDPOINT gets v1/metrics appended when the protocol is http/protobuf. HEADERS<br />and METRICS_HEADERS must be in the Secret, and the key in the ConfigMap is rejected. The keys<br />CERTIFICATE, CLIENT_KEY and CLIENT_CERTIFICATE are rejected: use spec.exporter.tls.<br />OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE other than<br />cumulative and OTEL_EXPORTER_OTLP_METRICS_DEFAULT_HISTOGRAM_AGGREGATION other than<br />explicit_bucket_histogram are rejected. INSECURE is ignored with a warning, because the endpoint<br />scheme selects TLS. OTEL_SERVICE_NAME is ignored with a warning, because service.name is the<br />Cluster name. |  | Optional: \{\} <br /> |
 | `resourceLabels` _string array_ | ResourceLabels lists Cluster label keys to copy into the resource attributes, each as<br />`cnpg.cluster.label.<key>`. A label the Cluster does not have is skipped. Such an attribute wins<br />over the same key in resourceAttributes. The instance role label (cnpg.io/instanceRole) is not<br />allowed, because it changes at switchover. |  | MaxItems: 32 <br />items:MaxLength: 317 <br />items:Pattern: `^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$` <br />Optional: \{\} <br /> |
 | `resourceAttributes` _object (keys:string, values:string)_ | ResourceAttributes adds fixed attributes to the resource of every export. They win over<br />OTEL_RESOURCE_ATTRIBUTES from envFrom. The sidecar sets service.name, service.namespace,<br />service.instance.id and the k8s.namespace.name, k8s.pod.name, k8s.pod.uid, k8s.node.name and<br />k8s.container.name attributes itself, and an entry with one of these keys is dropped. |  | MaxProperties: 32 <br />Optional: \{\} <br /> |

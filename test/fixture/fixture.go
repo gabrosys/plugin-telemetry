@@ -1,4 +1,4 @@
-// Package fixture reads test fixtures through an os.Root, so a name can't reach outside its directory.
+// Package fixture opens test fixture directories as an os.Root, so a name can't reach outside its directory.
 package fixture
 
 import (

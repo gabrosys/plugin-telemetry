@@ -283,7 +283,7 @@ var _ = Describe("the generated CRDs", func() {
 	It("every CRD property has a description", func() {
 		files, err := fs.Glob(os.DirFS(crdDir), "telemetry.gabrosys.github.io_*.yaml")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(files).NotTo(BeEmpty())
+		Expect(files).To(ContainElements(exporterCRD, querySetCRD))
 
 		var missing []string
 		for _, name := range files {
@@ -292,6 +292,8 @@ var _ = Describe("the generated CRDs", func() {
 
 			for _, version := range external.Spec.Versions {
 				Expect(version.Schema).NotTo(BeNil(), "%s %s has no schema", name, version.Name)
+				Expect(version.Schema.OpenAPIV3Schema).NotTo(BeNil(), "%s %s has no OpenAPI schema", name, version.Name)
+				Expect(version.Schema.OpenAPIV3Schema.Properties).NotTo(BeEmpty(), "%s %s has an empty schema", name, version.Name)
 				missing = append(missing, undescribed(name+" "+version.Name, version.Schema.OpenAPIV3Schema, true)...)
 			}
 		}

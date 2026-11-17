@@ -102,9 +102,10 @@ spec:
                               type: string
                             pg_version:
                               description: |-
-                                PgVersion is a semantic version range of PostgreSQL servers the column applies to. On another
-                                version the column is not exported. An invalid range is ignored with a warning. When empty, the
-                                column applies to every version.
+                                PgVersion is a semantic version range of PostgreSQL servers. On another version, the metric of a
+                                value column is not exported, but the column must still be in the result. It has no effect on a
+                                LABEL or DISCARD column. An invalid range is ignored with a warning, as if the field were empty.
+                                When empty, the column applies to every version.
                               type: string
                             usage:
                               description: |-

@@ -42,9 +42,14 @@ type TelemetryExporterSpec struct {
 	// The sidecar reads the ENDPOINT, PROTOCOL, COMPRESSION, TIMEOUT (in milliseconds) and HEADERS keys
 	// of OTEL_EXPORTER_OTLP_, where OTEL_EXPORTER_OTLP_METRICS_<NAME> wins over OTEL_EXPORTER_OTLP_<NAME>,
 	// and OTEL_RESOURCE_ATTRIBUTES. A Secret key wins over the same ConfigMap key, and a field of
-	// spec.exporter wins over both. HEADERS is read from the Secret only. The keys CERTIFICATE,
-	// CLIENT_KEY and CLIENT_CERTIFICATE are rejected: use spec.exporter.tls. OTEL_SERVICE_NAME is
-	// ignored, because service.name is the Cluster name.
+	// spec.exporter wins over both. OTEL_EXPORTER_OTLP_METRICS_ENDPOINT is used as given.
+	// OTEL_EXPORTER_OTLP_ENDPOINT gets v1/metrics appended when the protocol is http/protobuf. HEADERS
+	// is read from the Secret only. The keys CERTIFICATE, CLIENT_KEY and CLIENT_CERTIFICATE are
+	// rejected: use spec.exporter.tls. OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE other than
+	// cumulative and OTEL_EXPORTER_OTLP_METRICS_DEFAULT_HISTOGRAM_AGGREGATION other than
+	// explicit_bucket_histogram are rejected. INSECURE is ignored with a warning, because the endpoint
+	// scheme selects TLS. OTEL_SERVICE_NAME is ignored with a warning, because service.name is the
+	// Cluster name.
 	//
 	// +optional
 	EnvFrom *EnvFromSource `json:"envFrom,omitempty"`
@@ -164,8 +169,9 @@ type MetricsSpec struct {
 	QuerySets []string `json:"querySets,omitempty"`
 
 	// PlanInterval is how often the sidecar reads the server version, the databases and the settings it
-	// checks from PostgreSQL, and plans the queries again. Changes to the query sources apply when they
-	// happen, not on this timer. At least 1s. The default is 30s.
+	// checks from PostgreSQL. It plans the queries again only when the version, the primary or replica
+	// role or the list of databases changed. Changes to the query sources apply when they happen, not
+	// on this timer. At least 1s. The default is 30s.
 	//
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MaxLength=32

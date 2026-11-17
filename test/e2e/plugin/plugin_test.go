@@ -196,6 +196,9 @@ func (r reconcileCounts) String() string {
 			out = append(out, fmt.Sprintf("%s %s = %g", pod, attrs, r[pod][attrs]))
 		}
 	}
+	if len(out) == 0 {
+		return "none"
+	}
 
 	return strings.Join(out, "\n")
 }

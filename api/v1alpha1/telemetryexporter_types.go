@@ -104,8 +104,8 @@ type OTLPExporter struct {
 	// +optional
 	Compression string `json:"compression,omitempty"`
 
-	// Timeout is the time one export attempt may take, such as 10s. At least 1s, and at most half of
-	// spec.metrics.interval, which is 30s when not set. When empty, the TIMEOUT key of envFrom is used,
+	// Timeout is the time one export attempt may take, such as 10s. It must be at least 1s and at most
+	// half of spec.metrics.interval, which is 30s when not set. When empty, the TIMEOUT key of envFrom is used,
 	// else the lower of 10s and half the interval.
 	//
 	// +kubebuilder:validation:Type=string
@@ -130,7 +130,7 @@ type OTLPExporter struct {
 
 // MetricsSpec holds the metrics settings.
 type MetricsSpec struct {
-	// Interval is how often metrics are exported, such as 30s. At least 1s. The default is 30s.
+	// Interval is how often metrics are exported, such as 30s. It must be at least 1s. The default is 30s.
 	//
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MaxLength=32
@@ -358,8 +358,9 @@ type Limits struct {
 	// +optional
 	MaxLabelsPerSeries *int32 `json:"maxLabelsPerSeries,omitempty"`
 
-	// QueryTimeout is the time one query may run, set as statement_timeout. At least 100ms. At most
-	// 1073741823ms, so twice it fits PostgreSQL's idle_in_transaction_session_timeout. The default is 10s.
+	// QueryTimeout is the time one query may run, set as statement_timeout. It must be at least 100ms and
+	// at most 1073741823ms, so that twice it fits PostgreSQL's idle_in_transaction_session_timeout. The
+	// default is 10s.
 	//
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MaxLength=32
@@ -368,8 +369,8 @@ type Limits struct {
 	// +optional
 	QueryTimeout *metav1.Duration `json:"queryTimeout,omitempty"`
 
-	// LockTimeout is the time a query waits for a lock, set as lock_timeout. More than zero, at most
-	// 2147483647ms (PostgreSQL's lock_timeout maximum). The default is 1s.
+	// LockTimeout is the time a query waits for a lock, set as lock_timeout. It must be more than zero and
+	// at most 2147483647ms (PostgreSQL's lock_timeout maximum). The default is 1s.
 	//
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MaxLength=32

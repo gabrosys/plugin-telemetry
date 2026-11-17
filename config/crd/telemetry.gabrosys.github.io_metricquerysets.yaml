@@ -56,15 +56,15 @@ spec:
                   properties:
                     cache_seconds:
                       description: |-
-                        CacheSeconds is the fewest seconds between two runs of the query: its interval is raised to at
-                        least this. The default is 0, no minimum.
+                        CacheSeconds is the minimum number of seconds between two runs of the query. A shorter interval is
+                        raised to this value. The default is 0, no minimum.
                       format: int64
                       minimum: 0
                       type: integer
                     master:
                       description: |-
-                        Master runs the query on the primary only, and skips it on a replica. It is the old name of
-                        Primary. The default is false.
+                        Master is the old name of Primary: the query runs on the primary only and is skipped on a replica.
+                        The default is false.
                       type: boolean
                     metrics:
                       description: |-
@@ -76,8 +76,8 @@ spec:
                           description: ColumnSpec says how a result column is used.
                           properties:
                             description:
-                              description: Description is the description of the metric.
-                                It is not used for a LABEL or DISCARD column.
+                              description: Description is the metric's description.
+                                A LABEL or DISCARD column does not use it.
                               type: string
                             metric_mapping:
                               additionalProperties:

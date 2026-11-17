@@ -65,8 +65,8 @@ type Query struct {
 	// +listType=atomic
 	Metrics []MetricColumn `json:"metrics"`
 
-	// Master runs the query on the primary only, and skips it on a replica. It is the old name of
-	// Primary. The default is false.
+	// Master is the old name of Primary: the query runs on the primary only and is skipped on a replica.
+	// The default is false.
 	//
 	// +optional
 	Master bool `json:"master,omitempty"`
@@ -76,8 +76,8 @@ type Query struct {
 	// +optional
 	Primary bool `json:"primary,omitempty"`
 
-	// CacheSeconds is the fewest seconds between two runs of the query: its interval is raised to at
-	// least this. The default is 0, no minimum.
+	// CacheSeconds is the minimum number of seconds between two runs of the query. A shorter interval is
+	// raised to this value. The default is 0, no minimum.
 	//
 	// +kubebuilder:validation:Minimum=0
 	// +optional
@@ -119,7 +119,7 @@ type ColumnSpec struct {
 	// +kubebuilder:validation:Enum=LABEL;COUNTER;GAUGE;HISTOGRAM;MAPPEDMETRIC;DURATION;DISCARD
 	Usage string `json:"usage"`
 
-	// Description is the description of the metric. It is not used for a LABEL or DISCARD column.
+	// Description is the metric's description. A LABEL or DISCARD column does not use it.
 	//
 	// +optional
 	Description string `json:"description,omitempty"`

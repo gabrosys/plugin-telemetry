@@ -5,8 +5,6 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"io/fs"
-	"os"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -15,14 +13,13 @@ import (
 	schedulingv1 "k8s.io/api/scheduling/v1"
 	yamlutil "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/yaml"
+
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 var _ = Describe("the plugin Deployment", func() {
-	It("sleeps 5 s in preStop and leaves the drain room in the grace period", func() {
-		raw, err := fs.ReadFile(os.DirFS(repoRoot), "config/deployment.yaml")
-		Expect(err).NotTo(HaveOccurred())
-		var d appsv1.Deployment
-		Expect(yaml.UnmarshalStrict(raw, &d)).To(Succeed())
+	It("sleeps 5 s in preStop and sets a 20 s grace period", func() {
+		d := readDeployment()
 
 		var container *corev1.Container
 		for i := range d.Spec.Template.Spec.Containers {
@@ -40,10 +37,8 @@ var _ = Describe("the plugin Deployment", func() {
 
 var _ = Describe("the plugin PriorityClass", func() {
 	It("defines the plugin-telemetry PriorityClass at 1000000 with preemption, not the global default", func() {
-		raw, err := fs.ReadFile(os.DirFS(repoRoot), "config/priorityclass.yaml")
-		Expect(err).NotTo(HaveOccurred())
 		var pc schedulingv1.PriorityClass
-		Expect(yaml.UnmarshalStrict(raw, &pc)).To(Succeed())
+		Expect(yaml.UnmarshalStrict(readRepoFile("config/priorityclass.yaml"), &pc)).To(Succeed())
 
 		Expect(pc.Name).To(Equal("plugin-telemetry"))
 		Expect(pc.Value).To(BeEquivalentTo(1000000))
@@ -53,18 +48,13 @@ var _ = Describe("the plugin PriorityClass", func() {
 	})
 
 	It("runs the plugin Pods with that PriorityClass", func() {
-		raw, err := fs.ReadFile(os.DirFS(repoRoot), "config/deployment.yaml")
-		Expect(err).NotTo(HaveOccurred())
-		var d appsv1.Deployment
-		Expect(yaml.UnmarshalStrict(raw, &d)).To(Succeed())
+		d := readDeployment()
 		Expect(d.Spec.Template.Spec.PriorityClassName).To(Equal("plugin-telemetry"))
 
-		kraw, err := fs.ReadFile(os.DirFS(repoRoot), "config/kustomization.yaml")
-		Expect(err).NotTo(HaveOccurred())
 		var k struct {
 			Resources []string `json:"resources"`
 		}
-		Expect(yaml.Unmarshal(kraw, &k)).To(Succeed())
+		Expect(yaml.Unmarshal(readRepoFile("config/kustomization.yaml"), &k)).To(Succeed())
 		Expect(k.Resources).To(ContainElement("priorityclass.yaml"))
 	})
 })
@@ -95,14 +85,26 @@ type certDoc struct {
 	} `json:"spec"`
 }
 
+func readRepoFile(path string) []byte {
+	GinkgoHelper()
+
+	return fixture.Read(GinkgoTB(), repoRoot, path)
+}
+
+func readDeployment() appsv1.Deployment {
+	GinkgoHelper()
+
+	var d appsv1.Deployment
+	Expect(yaml.UnmarshalStrict(readRepoFile("config/deployment.yaml"), &d)).To(Succeed())
+
+	return d
+}
+
 func readDocs(path string) map[string]certDoc {
 	GinkgoHelper()
 
-	raw, err := fs.ReadFile(os.DirFS(repoRoot), path)
-	Expect(err).NotTo(HaveOccurred())
-
 	docs := map[string]certDoc{}
-	reader := yamlutil.NewYAMLReader(bufio.NewReader(bytes.NewReader(raw)))
+	reader := yamlutil.NewYAMLReader(bufio.NewReader(bytes.NewReader(readRepoFile(path))))
 	for {
 		doc, err := reader.Read()
 		if errors.Is(err, io.EOF) {
@@ -165,10 +167,7 @@ var _ = Describe("the plugin certificates", func() {
 	})
 
 	It("trusts the CA of the client leaf Secret for client certificates", func() {
-		raw, err := fs.ReadFile(os.DirFS(repoRoot), "config/deployment.yaml")
-		Expect(err).NotTo(HaveOccurred())
-		var d appsv1.Deployment
-		Expect(yaml.UnmarshalStrict(raw, &d)).To(Succeed())
+		d := readDeployment()
 
 		Expect(d.Spec.Template.Spec.Containers[0].Args).To(ContainElement("--client-cert=/client/ca.crt"))
 		var items []corev1.KeyToPath

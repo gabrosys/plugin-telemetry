@@ -16,7 +16,6 @@ import (
 
 const (
 	workflowDir     = "../../.github/workflows"
-	makefile        = "../../Makefile"
 	repoRoot        = "../.."
 	releaseConfig   = "release-please-config.json"
 	releaseManifest = ".release-please-manifest.json"
@@ -170,12 +169,6 @@ var _ = Describe("CI workflows", func() {
 			names = append(names, wf.name)
 		}
 		Expect(names).To(ContainElements("ci.yml", releaseWorkflow))
-	})
-
-	It("are not pushed from the Makefile", func() {
-		raw, err := os.ReadFile(makefile)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(pushPattern.FindAllString(string(raw), -1)).To(BeEmpty())
 	})
 
 	for _, wf := range workflows {
@@ -349,9 +342,7 @@ const e2eWorkflow = "e2e.yml"
 var e2eSuites = regexp.MustCompile(`(?m)^E2E_SUITES\s*:?=\s*(.*)$`)
 
 var _ = It("offers every Makefile e2e suite in e2e.yml", func() {
-	raw, err := os.ReadFile(makefile)
-	Expect(err).NotTo(HaveOccurred())
-	match := e2eSuites.FindStringSubmatch(string(raw))
+	match := e2eSuites.FindStringSubmatch(string(readRepoFile("Makefile")))
 	Expect(match).NotTo(BeNil())
 
 	wf, ok := findWorkflow(e2eWorkflow)
@@ -369,4 +360,10 @@ var _ = It("offers every Makefile e2e suite in e2e.yml", func() {
 
 	Expect(doc.On.Dispatch.Inputs).To(HaveKey("suite"))
 	Expect(doc.On.Dispatch.Inputs["suite"].Options).To(ConsistOf(strings.Fields(match[1])))
+})
+
+var _ = Describe("the Makefile", func() {
+	It("pushes no image", func() {
+		Expect(pushPattern.FindAllString(string(readRepoFile("Makefile")), -1)).To(BeEmpty())
+	})
 })

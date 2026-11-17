@@ -339,7 +339,13 @@ var _ = DescribeTable("the secrets pattern",
 
 const e2eWorkflow = "e2e.yml"
 
-var e2eSuites = regexp.MustCompile(`(?m)^E2E_SUITES\s*:?=\s*(.*)$`)
+var (
+	e2eSuites     = regexp.MustCompile(`(?m)^E2E_SUITES\s*:?=\s*(.*)$`)
+	e2eMatrixCNPG = regexp.MustCompile(`(?m)^E2E_MATRIX_CNPG\s*\??=\s*(.*)$`)
+	cnpgVersion   = regexp.MustCompile(`(?m)^CNPG_VERSION\s*\??=\s*(.*)$`)
+	// cnpgMatrix is the JSON array after the last || of the matrix expression.
+	cnpgMatrix = regexp.MustCompile(`'(\[[^']*\])'\)\s*\}\}$`)
+)
 
 var _ = It("offers every Makefile e2e suite in e2e.yml", func() {
 	match := e2eSuites.FindStringSubmatch(string(readRepoFile("Makefile")))
@@ -366,4 +372,34 @@ var _ = Describe("the Makefile", func() {
 	It("pushes no image", func() {
 		Expect(pushPattern.FindAllString(string(readRepoFile("Makefile")), -1)).To(BeEmpty())
 	})
+})
+
+var _ = It("runs e2e.yml on the Makefile's E2E_MATRIX_CNPG", func() {
+	makefile := string(readRepoFile("Makefile"))
+	matrix := e2eMatrixCNPG.FindStringSubmatch(makefile)
+	Expect(matrix).NotTo(BeNil())
+	version := cnpgVersion.FindStringSubmatch(makefile)
+	Expect(version).NotTo(BeNil())
+
+	wf, ok := findWorkflow(e2eWorkflow)
+	Expect(ok).To(BeTrue())
+	var doc struct {
+		Jobs struct {
+			E2E struct {
+				Strategy struct {
+					Matrix struct {
+						CNPG string `yaml:"cnpg"`
+					} `yaml:"matrix"`
+				} `yaml:"strategy"`
+			} `yaml:"e2e"`
+		} `yaml:"jobs"`
+	}
+	Expect(yaml.Unmarshal([]byte(wf.raw), &doc)).To(Succeed())
+	array := cnpgMatrix.FindStringSubmatch(doc.Jobs.E2E.Strategy.Matrix.CNPG)
+	Expect(array).NotTo(BeNil(), doc.Jobs.E2E.Strategy.Matrix.CNPG)
+
+	var cnpg []string
+	Expect(json.Unmarshal([]byte(array[1]), &cnpg)).To(Succeed())
+	Expect(cnpg).To(Equal(strings.Fields(matrix[1])))
+	Expect(cnpg).To(ContainElement(strings.TrimSpace(version[1])))
 })

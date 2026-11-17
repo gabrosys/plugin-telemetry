@@ -414,7 +414,7 @@ kubectl run curl-np -n default --rm -i --restart=Never \
   -- curl -sv -m 5 -k -o /dev/null https://plugin-telemetry.cnpg-system:9090
 ```
 
-With the policy the connection times out after about 5 s with `Connection timed out`, and the exit code is 28. Without it, curl completes the TLS handshake with `SSL connection using TLSv1.3`.
+With the policy the connection times out after about 5 s with `Connection timed out`, and the exit code is 28. Without it, curl completes the TLS handshake with `SSL connection using TLSv1.3`. Its exit code after the handshake does not matter here: curl sends an HTTP request to a gRPC server.
 
 ### Back out
 
@@ -507,7 +507,7 @@ cmp -s bin/image-ref bin/image-ref.previous && echo "same reference: nothing to 
    done
    ```
 
-   Each Cluster then rolls its instances one at a time. The first instance rolls within seconds of the touch. Wait until no instance Pod has another sidecar image, then until the instance Pods and every touched Cluster are Ready, and show the images after the roll. The first loop gives up after 10 minutes and says so. A Cluster with `primaryUpdateStrategy: supervised` keeps its old primary until you switch over (CloudNativePG v1.30.1, `docs/src/rolling_update.md`, "Manual updates (`supervised`)": the update is suspended after the replicas, and an image change needs a switchover), so the loop gives up for it.
+   Each Cluster then rolls its instances one at a time. The first instance rolls within seconds of the touch. Wait until no instance Pod has another sidecar image, then until the instance Pods and every touched Cluster are Ready, and show the images after the roll. The first loop gives up after 10 minutes and says so. A Cluster with `primaryUpdateStrategy: supervised` keeps its old primary until you switch over (CloudNativePG v1.30.1, `docs/src/rolling_update.md`, "Manual updates (`supervised`)": the update is suspended after the replicas, and an image change needs a switchover), so the loop gives up for it. The first loop can also end while an instance Pod is being recreated, because a missing Pod is not listed. The Ready waits after it cover that case, so run the whole block.
 
    ```bash
    rolled=0

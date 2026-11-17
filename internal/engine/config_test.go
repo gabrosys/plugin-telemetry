@@ -308,9 +308,12 @@ func (c factsClock) NewTimer(d time.Duration) clock.Timer {
 			break
 		}
 		if strings.HasSuffix(f.Function, "engine.(*engine).setFactsTimer") {
-			c.h.mu.Lock()
-			c.h.factsTimers = append(c.h.factsTimers, d)
-			c.h.mu.Unlock()
+			caller, _ := frames.Next()
+			if !strings.HasSuffix(caller.Function, "engine.(*engine).onFactsTimer") { // a gap re-arm is not a backoff step
+				c.h.mu.Lock()
+				c.h.factsTimers = append(c.h.factsTimers, d)
+				c.h.mu.Unlock()
+			}
 			break
 		}
 
@@ -429,7 +432,7 @@ func (h *harness) advanceBy(step time.Duration, cond func() bool) {
 	}).WithTimeout(20 * time.Second).WithPolling(2 * time.Millisecond).Should(BeTrue())
 }
 
-// timersArmed returns the durations the engine armed its facts timer with so far.
+// timersArmed returns the waits the engine chose for its facts timer so far, without the earlyFactsGap re-arms.
 func (h *harness) timersArmed() []time.Duration {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -889,14 +892,16 @@ var _ = Describe("An engine on an in-memory Config", func() {
 	})
 
 	It("sets cnpg_collector_up to 0 when a facts round panics", func() {
+		var sawUp atomic.Bool // the facts func panics only once the test has seen up=1
 		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) },
 			func(_ context.Context, round int) (planner.Facts, error) {
-				if round > 0 {
+				if round > 0 && sawUp.Load() {
 					panic("gather broke")
 				}
 				return memPrimary, nil
 			})
 		h.advance(h.has("cnpg_collector_up", map[string]string{"cluster": "mem"}, 1))
+		sawUp.Store(true)
 		h.advance(h.has("cnpg_collector_up", map[string]string{"cluster": "mem"}, 0))
 	})
 

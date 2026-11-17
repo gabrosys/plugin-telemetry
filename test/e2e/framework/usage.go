@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"slices"
 	"time"
 
@@ -143,15 +142,4 @@ func StatOf(xs []uint64) Stat {
 	s := slices.Sorted(slices.Values(xs))
 
 	return Stat{Min: s[0], Median: s[len(s)/2], Max: s[len(s)-1]}
-}
-
-// Settled reports whether the median of cur differs from the median of prev by at most tolerance of prev's.
-// It is false when either series is empty.
-func Settled(prev, cur []uint64, tolerance float64) bool {
-	if len(prev) == 0 || len(cur) == 0 {
-		return false
-	}
-	p, c := float64(StatOf(prev).Median), float64(StatOf(cur).Median)
-
-	return math.Abs(c-p) <= tolerance*p
 }

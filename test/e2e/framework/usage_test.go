@@ -125,23 +125,3 @@ var _ = Describe("StatOf", func() {
 		Expect(framework.StatOf([]uint64{5, 1, 9, 3, 7})).To(Equal(framework.Stat{Min: 1, Median: 5, Max: 9}))
 	})
 })
-
-var _ = Describe("Settled", func() {
-	flat := func(v uint64) []uint64 { return []uint64{v, v, v, v} }
-
-	DescribeTable("compares the median of the latest window with the previous one",
-		func(prev, cur []uint64, want bool) {
-			Expect(framework.Settled(prev, cur, 0.02)).To(Equal(want))
-		},
-		Entry("the CI series is still climbing",
-			[]uint64{18677760, 18694144, 18694144, 18718720}, []uint64{18722816, 18722816, 19189760, 19775488}, false),
-		Entry("a flat series is settled",
-			[]uint64{21106688, 21139456, 21139456, 21151744}, []uint64{21164032, 21168128, 21168128, 20779008}, true),
-		Entry("exactly 2 % up is settled", flat(1000), flat(1020), true),
-		Entry("just over 2 % up is not", flat(1000), flat(1021), false),
-		Entry("a 2 % drop is settled", flat(1000), flat(980), true),
-		Entry("more than a 2 % drop is not", flat(1000), flat(979), false),
-		Entry("an empty previous window is not", nil, flat(1000), false),
-		Entry("an empty latest window is not", flat(1000), []uint64{}, false),
-	)
-})

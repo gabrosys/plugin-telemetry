@@ -26,11 +26,12 @@ The plugin runs in `cnpg-system`, and the example collector in `otel`. Those two
 - `kubectl`. `make dev-up` also downloads one to `bin/kubectl-v1.37.2`.
 - An OTLP collector that the instance Pods can reach, over HTTP (4318) or gRPC (4317). HTTP is the default. With gRPC, each sidecar stays on one collector Pod, so set `max_connection_age` on the collector gateway to spread them: in the `otlp` receiver, under `grpc`, `keepalive.server_parameters.max_connection_age`.
 
-For a local try, `make dev-up` creates a kind cluster with cert-manager and CloudNativePG. The cluster is named `plugin-telemetry-v1-30-1`, and `make dev-up KIND_CLUSTER=<name>` changes the name. Point kubectl at it afterwards.
+For a local try, `make dev-up` creates a kind cluster with cert-manager and CloudNativePG. The cluster is named `plugin-telemetry-v1-30-1` by default. Set `KIND_CLUSTER` to that name once, or to another name if you want a different cluster, and the kind commands below use it. Point kubectl at the cluster afterwards.
 
 ```bash
-make dev-up
-kubectl config use-context kind-plugin-telemetry-v1-30-1
+KIND_CLUSTER=plugin-telemetry-v1-30-1
+make dev-up KIND_CLUSTER=$KIND_CLUSTER
+kubectl config use-context kind-$KIND_CLUSTER
 ```
 
 If you have no collector, apply the example one. It receives OTLP and prints a summary of what it gets.
@@ -46,10 +47,10 @@ Its endpoints are `http://collector.otel.svc:4318` and `http://collector.otel.sv
 
 The image package on ghcr is private, so you build the image and put it where your nodes can pull it. The plugin and the sidecar are one image. The plugin pins it by digest, and a tag is refused. Both steps below end with the digest reference in `bin/image-ref`. The next section reads it from there.
 
-On kind, `make kind-load` builds the image, loads it into the cluster and writes the reference. It also runs `make dev-up`, which creates the kind environment or brings it up to date, and pre-pulls the collector image on the nodes. Pass the same `KIND_CLUSTER` you gave `make dev-up`. The default name, used below, is `plugin-telemetry-v1-30-1`.
+On kind, `make kind-load` builds the image, loads it into the cluster and writes the reference. It also runs `make dev-up`, which re-applies cert-manager and CloudNativePG onto that cluster at the versions the Makefile pins (cert-manager v1.21.3, CloudNativePG v1.30.1 unless `CNPG_VERSION` says otherwise), and it pre-pulls the collector image on the nodes. Pass the same `KIND_CLUSTER` as for `make dev-up`.
 
 ```bash
-make kind-load KIND_CLUSTER=plugin-telemetry-v1-30-1
+make kind-load KIND_CLUSTER=$KIND_CLUSTER
 cat bin/image-ref
 ```
 
@@ -290,7 +291,7 @@ kubectl logs deployment/collector -n otel | grep -m1 'Name: cnpg_collector_up'
 kubectl logs deployment/collector -n otel | grep -o 'service.name: Str([^)]*)' | grep -v 'Str(plugin-telemetry)' | sort -u
 ```
 
-The first `grep` prints `-> Name: cnpg_collector_up`. The second lists `service.name: Str(<cluster>)` for each Cluster that exports. It leaves out `Str(plugin-telemetry)`, which are the plugin's own metrics if you enabled them. If nothing prints, wait a minute and run it again. With a collector of your own, look for the same metric name and resource attribute in your backend.
+The first `grep` prints `-> Name: cnpg_collector_up`. The second lists `service.name: Str(<cluster>)` for each Cluster that exports. It leaves out `Str(plugin-telemetry)`, which marks the plugin's own metrics if you enabled them. If nothing prints, wait a minute and run it again. With a collector of your own, look for the same metric name and resource attribute in your backend.
 
 ## 6. Notice a quiet sidecar
 
@@ -388,10 +389,10 @@ Then make CloudNativePG reconcile your Cluster, give it 30 s, and read its phase
 kubectl annotate cluster.postgresql.cnpg.io $CLUSTER -n $NS runbook.telemetry.gabrosys.github.io/touch="$(date +%s)" --overwrite
 sleep 30
 kubectl get cluster.postgresql.cnpg.io $CLUSTER -n $NS -o jsonpath='{.status.phase}'; echo
-kubectl logs -n cnpg-system deployment/cnpg-controller-manager --since=2m | grep -c '"level":"error"' || true
+kubectl logs -n cnpg-system deployment/cnpg-controller-manager --since=2m | grep -c '"level":"error"'
 ```
 
-The phase is `Cluster in healthy state`, and the count is 0. `grep -c` exits 1 when the count is 0, so the command ends with `|| true`. When the plugin cannot answer, the phase is `Cluster cannot proceed to reconciliation due to an error while interacting with plugins`.
+The phase is `Cluster in healthy state`, and the count is 0. When the plugin cannot answer, the phase is `Cluster cannot proceed to reconciliation due to an error while interacting with plugins`.
 
 Finally, check that the policy is enforced, using a Pod that is not the operator. From `default`, the connection to the plugin times out. Run the same command after you delete the policy to see the difference.
 
@@ -422,10 +423,10 @@ cp bin/image-ref bin/image-ref.previous
 Then build as in section 2, which overwrites `bin/image-ref`. On kind:
 
 ```bash
-make kind-load KIND_CLUSTER=plugin-telemetry-v1-30-1
+make kind-load KIND_CLUSTER=$KIND_CLUSTER
 ```
 
-On any other cluster, use a new tag:
+On any other cluster, use the same registry path as in section 2 and a new tag. A moved tag can leave the previous digest untagged, and some registries then garbage-collect it, which breaks the rollback.
 
 ```bash
 IMG=registry.example.com/team/plugin-telemetry:v0.6.0
@@ -434,10 +435,11 @@ docker push $IMG
 echo "${IMG%:*}@$(docker buildx imagetools inspect $IMG | awk '/^Digest:/ {print $2}')" > bin/image-ref
 ```
 
-Then read the new reference.
+Then read the new reference. If it equals the old one, steps 1 to 3 change nothing: the Deployment does not roll and no Service event reaches CloudNativePG. This command says so.
 
 ```bash
 NEW_REF=$(cat bin/image-ref)
+cmp -s bin/image-ref bin/image-ref.previous && echo "same reference: nothing to upgrade"
 ```
 
 1. Roll the plugin Deployment. Change only the plugin image in the kustomization. The sidecar image in the ConfigMap stays as it is. No instance Pod rolls and no hook call fails, because a stopping replica keeps serving until the endpoint removal has propagated. The exception is a release that changes the Pod patch (step 4).
@@ -449,7 +451,7 @@ NEW_REF=$(cat bin/image-ref)
    kubectl rollout status deployment/plugin-telemetry -n cnpg-system --timeout=180s
    ```
 
-2. Once the Deployment has rolled out, change the plugin Service's annotation. If `$NEW_REF` equals the reference already in the kustomization, steps 1 to 3 change nothing: the Deployment does not roll, and annotating with the same value leaves the Service's `resourceVersion` unchanged, so CloudNativePG gets no event. Compare the two references, or check that the Service's `resourceVersion` moved (`kubectl get service -n cnpg-system plugin-telemetry -o jsonpath='{.metadata.resourceVersion}'`). CloudNativePG reads the plugin's capabilities only when it rebuilds its connection, and it rebuilds on an event of the Service. Without this step it can keep calling with the old capability set for up to about 10 hours.
+2. Once the Deployment has rolled out, change the plugin Service's annotation. Annotating with a value the Service already has changes nothing, so CloudNativePG gets no event. If you are finishing an upgrade that was only partly done, check that the Service's `resourceVersion` moved (`kubectl get service -n cnpg-system plugin-telemetry -o jsonpath='{.metadata.resourceVersion}'`). CloudNativePG reads the plugin's capabilities only when it rebuilds its connection, and it rebuilds on an event of the Service. Without this step it can keep calling with the old capability set for up to about 10 hours.
 
    ```bash
    kubectl annotate service -n cnpg-system plugin-telemetry "telemetry.gabrosys.github.io/image=$NEW_REF" --overwrite

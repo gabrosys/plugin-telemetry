@@ -5,10 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"sync"
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
+	"github.com/distribution/reference"
 	corev1 "k8s.io/api/core/v1"
 	toolscache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -24,8 +24,16 @@ var errUnexpectedObject = errors.New("unexpected object type")
 
 var errConfigMapDeleted = errors.New("sidecar image configmap deleted, a restarted replica will not serve")
 
-var imageRefPattern = regexp.MustCompile(
-	`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+)?@sha256:[0-9a-f]{64}$`)
+// digestRef reports whether image is a repository with a sha256 digest and no tag, by the distribution reference grammar.
+func digestRef(image string) bool {
+	ref, err := reference.Parse(image)
+	if err != nil {
+		return false
+	}
+	c, canonical := ref.(reference.Canonical)
+	_, tagged := ref.(reference.Tagged)
+	return canonical && !tagged && c.Digest().Algorithm() == "sha256"
+}
 
 // ImageStore holds the current sidecar image and signals when the first valid one arrives.
 type ImageStore struct {
@@ -49,7 +57,7 @@ func (s *ImageStore) Set(cm *corev1.ConfigMap) error {
 	if !ok {
 		return fmt.Errorf("configmap %s/%s has no key %q: %w", cm.Namespace, cm.Name, SidecarImageKey, ErrInvalidImageRef)
 	}
-	if !imageRefPattern.MatchString(image) {
+	if !digestRef(image) {
 		return fmt.Errorf("configmap %s/%s key %q is %q: %w", cm.Namespace, cm.Name, SidecarImageKey, image, ErrInvalidImageRef)
 	}
 

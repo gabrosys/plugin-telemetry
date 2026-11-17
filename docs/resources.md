@@ -172,7 +172,7 @@ Cost of the probe:
 - The probe is 8,640 connections a day (86,400 s / 10 s). With `log_connections` and `log_disconnections` on, each one logs up to four lines on PostgreSQL 18 (connection received, authenticated and authorized, then the disconnection), so up to 34,560 lines a day per instance. The authenticated line appears only for authentication methods that log it, and PostgreSQL 17 and earlier log fewer lines per connection. Both settings are off by default and CloudNativePG v1.30.1 does not set them.
 - While the role's connection limit is reached, PostgreSQL logs one FATAL line every 10 s.
 
-The spec `test/e2e/resilience/shutdown_test.go` deletes the Pod of a one-instance Cluster with the plugin and asserts that the `postgres` container stops within 60 s of the delete. Measured at final verification: <filled by the controller>. The earlier design, which closed connections by age, measured 24.84 s and 25.15 s at the M4.6 gate.
+The spec `test/e2e/resilience/shutdown_test.go` deletes the Pod of a one-instance Cluster with the plugin and asserts that the `postgres` container stops within 60 s of the delete. Measured with the probe at ca518db, five runs: 9.54 s, 12.81 s and 3.02 s on CNPG v1.30.1, 11.60 s and 10.03 s on `main`. In every run the PostgreSQL log shows the smart shutdown request, then only refused new sessions, then the postmaster exit, with no "terminating connection due to administrator command" line, so the fast shutdown never had to end a sidecar session. The earlier design, which closed connections by age, measured 24.84 s and 25.15 s at the M4.6 gate.
 
 ## Environment
 
@@ -197,4 +197,4 @@ Each command needs the kind cluster of its CNPG version (`KIND_CLUSTER=plugin-te
 | Plugin with 1000 Clusters | `make measure CNPG_VERSION=v1.30.1 E2E_FOCUS=plugin` | 1734 s |
 | Watches | `make measure CNPG_VERSION=v1.30.1 E2E_FOCUS=watches` | 4150 s |
 | Per-row cost | `go test -run '^$' -bench '^BenchmarkRowSamples$' -benchmem -count 5 ./internal/queries/` | 24 s |
-| Pod shutdown | `make e2e-resilience CNPG_VERSION=v1.30.1 E2E_FOCUS='smart shutdown'` | <filled by the controller> |
+| Pod shutdown | `make e2e-resilience CNPG_VERSION=v1.30.1 E2E_FOCUS='smart shutdown'` | 67 to 111 s |

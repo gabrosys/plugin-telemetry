@@ -2,19 +2,27 @@ package framework
 
 import (
 	"fmt"
+	"sync"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
+	"github.com/onsi/ginkgo/v2"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/gabrosys/plugin-telemetry/api/v1alpha1"
 )
 
-// NewClients returns a client and REST config for kubeContext.
+var setLogger sync.Once
+
+// NewClients returns a client and REST config for kubeContext. It also sets controller-runtime's logger to
+// GinkgoLogr, once.
 func NewClients(kubeContext string) (client.Client, *rest.Config, error) {
+	setLogger.Do(func() { ctrllog.SetLogger(ginkgo.GinkgoLogr) })
+
 	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 		clientcmd.NewDefaultClientConfigLoadingRules(),
 		&clientcmd.ConfigOverrides{CurrentContext: kubeContext},

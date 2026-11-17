@@ -1,0 +1,50 @@
+{
+  "collector": {
+    "sql": "SELECT pg_catalog.current_database() as datname, relpages as lo_pages FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON (n.oid = c.relnamespace) WHERE n.nspname = 'pg_catalog' AND c.relname = 'pg_largeobject';",
+    "descriptions": {
+      "datname": "",
+      "lo_pages": "Estimated number of pages in the pg_largeobject table"
+    }
+  },
+  "collector_pg_stat_wal": {
+    "sql": "SELECT wal_records, wal_fpi, wal_bytes, wal_buffers_full, CASE WHEN stats_reset IS NULL THEN '-infinity' ELSE pg_catalog.rtrim(pg_catalog.rtrim(pg_catalog.to_char(stats_reset AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US'), '0'), '.') || 'Z' END AS stats_reset FROM pg_catalog.pg_stat_wal",
+    "descriptions": {
+      "stats_reset": "",
+      "wal_buffers_full": "Number of times WAL data was written to disk because WAL buffers became full. Only available on PG 14+",
+      "wal_bytes": "Total amount of WAL generated in bytes. Only available on PG 14+",
+      "wal_fpi": "Total number of WAL full page images generated. Only available on PG 14+",
+      "wal_records": "Total number of WAL records generated. Only available on PG 14+"
+    }
+  },
+  "collector_pg_stat_wal_17": {
+    "sql": "SELECT wal_write, wal_sync, wal_write_time, wal_sync_time, CASE WHEN stats_reset IS NULL THEN '-infinity' ELSE pg_catalog.rtrim(pg_catalog.rtrim(pg_catalog.to_char(stats_reset AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US'), '0'), '.') || 'Z' END AS stats_reset FROM pg_catalog.pg_stat_wal",
+    "descriptions": {
+      "stats_reset": "",
+      "wal_sync": "Number of times WAL files were synced to disk via issue_xlog_fsync request (if fsync is on and wal_sync_method is either fdatasync, fsync or fsync_writethrough, otherwise zero). Only available on PG 14 to 17.",
+      "wal_sync_time": "Total amount of time spent syncing WAL files to disk via issue_xlog_fsync request, in milliseconds (if track_wal_io_timing is enabled, fsync is on, and wal_sync_method is either fdatasync, fsync or fsync_writethrough, otherwise zero). Only available on PG 14 to 17.",
+      "wal_write": "Number of times WAL buffers were written out to disk via XLogWrite request. Only available on PG 14 to 17.",
+      "wal_write_time": "Total amount of time spent writing WAL buffers to disk via XLogWrite request, in milliseconds (if track_wal_io_timing is enabled, otherwise zero). This includes the sync time when wal_sync_method is either open_datasync or open_sync. Only available on PG 14 to 17."
+    }
+  },
+  "collector_pg_wal": {
+    "sql": "WITH s AS (SELECT max(setting::float8) FILTER (WHERE name = 'wal_segment_size') AS seg,\n  max(setting::float8) FILTER (WHERE name = 'min_wal_size') AS min_mb, max(setting::float8) FILTER (WHERE name = 'max_wal_size') AS max_mb,\n  max(setting::float8) FILTER (WHERE name = 'wal_keep_size') AS keep_mb, max(setting::float8) FILTER (WHERE name = 'max_slot_wal_keep_size') AS slots_mb\n  FROM pg_catalog.pg_settings WHERE name IN ('wal_segment_size','min_wal_size','max_wal_size','wal_keep_size','max_slot_wal_keep_size')),\nw AS (SELECT count(*)::float8 AS n FROM pg_catalog.pg_ls_waldir() WHERE name ~ '^[0-9A-F]{24}$')\nSELECT v.value, v.pg_wal FROM s, w, LATERAL (VALUES ('count', w.n), ('size', w.n * s.seg),\n  ('min', s.min_mb * 1048576 / s.seg), ('max', s.max_mb * 1048576 / s.seg), ('keep', s.keep_mb * 1048576 / s.seg),\n  ('slots_max', CASE WHEN s.slots_mb = -1 THEN 'NaN'::float8 ELSE s.slots_mb * 1048576 / s.seg END)) AS v(value, pg_wal)",
+    "descriptions": {
+      "pg_wal": "Total size in bytes of WAL segments in the '/var/lib/postgresql/data/pgdata/pg_wal' directory  computed as (wal_segment_size * count)",
+      "value": ""
+    }
+  },
+  "collector_pg_wal_archive_status": {
+    "sql": "SELECT v.value, v.pg_wal_archive_status FROM (SELECT count(*) FILTER (WHERE name LIKE '%.ready')::float8 AS ready,\n  count(*) FILTER (WHERE name LIKE '%.done')::float8 AS done FROM pg_catalog.pg_ls_archive_statusdir()) c,\n  LATERAL (VALUES ('ready', c.ready), ('done', c.done)) AS v(value, pg_wal_archive_status)",
+    "descriptions": {
+      "pg_wal_archive_status": "Number of WAL segments in the '/var/lib/postgresql/data/pgdata/pg_wal/archive_status' directory (ready, done)",
+      "value": ""
+    }
+  },
+  "collector_sync_replicas": {
+    "sql": "SELECT 'observed' AS value, CASE WHEN s = '' THEN 0 WHEN s ~ '(?:ANY|FIRST) ([0-9]+) \\([^\\n]*\\)' THEN pg_catalog.substring(s, '(?:ANY|FIRST) ([0-9]+) \\([^\\n]*\\)')::float8 ELSE -1 END AS sync_replicas FROM pg_catalog.current_setting('synchronous_standby_names') AS s",
+    "descriptions": {
+      "sync_replicas": "Number of requested synchronous replicas (synchronous_standby_names)",
+      "value": ""
+    }
+  }
+}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"maps"
 	"slices"
 	"sort"
 	"strconv"
@@ -19,8 +18,6 @@ import (
 
 	"github.com/gabrosys/plugin-telemetry/internal/engine"
 	"github.com/gabrosys/plugin-telemetry/internal/executor"
-	"github.com/gabrosys/plugin-telemetry/internal/export"
-	"github.com/gabrosys/plugin-telemetry/internal/featuregate"
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
@@ -30,10 +27,8 @@ import (
 )
 
 const (
-	connectTimeout = 5 * time.Second
-	poolIdle       = 30 * time.Second
-	redacted       = "<redacted>"
-	absent         = "-"
+	poolIdle = 30 * time.Second
+	absent   = "-"
 )
 
 // config is a loaded configuration: the settings, the merged sources and their definitions.
@@ -49,14 +44,9 @@ func loadConfig(cfg engine.Config) (*config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load settings: %w", err)
 	}
-	res := sources.NewLoader(cfg.ReadFile, s.Sources, engine.LoaderOptions(cfg)...).Load()
-	opts := queries.Options{MaxLabelsPerSeries: s.Limits.MaxLabelsPerSeries}
-	defs := make([]queries.Definition, 0, len(res.Entries))
-	for _, e := range res.Entries {
-		defs = append(defs, queries.Define(e.Key, e.Query, opts))
-	}
+	res := sources.NewLoader(cfg.ReadFile, s.Sources, cfg.Sensitive).Load()
 
-	return &config{read: cfg.ReadFile, settings: s, result: res, defs: defs}, nil
+	return &config{read: cfg.ReadFile, settings: s, result: res, defs: engine.Definitions(cfg, s, res)}, nil
 }
 
 func (c *config) keys() []string {
@@ -68,21 +58,19 @@ func (c *config) keys() []string {
 	return keys
 }
 
-func newValidateCommand(flags *instanceFlags) *cobra.Command {
+// toolCommand is a subcommand that opens the configuration named by *config and runs run on it.
+func toolCommand(use, short string, config *string, run func(context.Context, io.Writer, func(context.Context) (engine.Config, error)) error) *cobra.Command {
 	return &cobra.Command{
-		Use:   "validate",
-		Short: "Check the settings and the query sources without connecting",
+		Use:   use,
+		Short: short,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if _, err := flags.registry(); err != nil {
-				return err
-			}
-			open, err := flags.open()
+			open, err := openFunc(*config)
 			if err != nil {
 				return err
 			}
 
-			return validate(cmd.Context(), cmd.OutOrStdout(), open)
+			return run(cmd.Context(), cmd.OutOrStdout(), open)
 		},
 	}
 }
@@ -170,41 +158,22 @@ func connect(ctx context.Context, c *config) (*pg.Pool, planner.Facts, error) {
 	pc := engine.PostgresConfig(s)
 	pc.ReadFile = c.read
 	pool := pg.NewPool(pc, s.Postgres.MaxConnections, poolIdle, clock.RealClock{},
-		pg.WithLogger(log.FromContext(ctx).GetLogger()))
-	ctx, cancel := context.WithTimeout(ctx, connectTimeout+2*s.Limits.QueryTimeout)
+		log.FromContext(ctx).GetLogger(), 0)
+	ctx, cancel := context.WithTimeout(ctx, engine.FactsTimeout(s.Limits))
 	defer cancel()
-	conn, release, err := pool.Acquire(ctx, s.Postgres.Database)
+	conn, release, err := pool.AcquireNow(ctx, s.Postgres.Database)
 	if err != nil {
-		pool.Close()
+		pool.Close(ctx)
 		return nil, planner.Facts{}, fmt.Errorf("connect to PostgreSQL: %w", err)
 	}
-	facts, err := planner.GatherFacts(ctx, conn)
+	facts, err := planner.GatherFacts(ctx, conn, pool.Guard())
 	release(err != nil)
 	if err != nil {
-		pool.Close()
+		pool.Close(ctx)
 		return nil, planner.Facts{}, fmt.Errorf("gather facts: %w", err)
 	}
 
 	return pool, facts, nil
-}
-
-func newTestCommand(flags *instanceFlags) *cobra.Command {
-	return &cobra.Command{
-		Use:   "test",
-		Short: "Run every planned query once and print the series",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if _, err := flags.registry(); err != nil {
-				return err
-			}
-			open, err := flags.open()
-			if err != nil {
-				return err
-			}
-
-			return runTest(cmd.Context(), cmd.OutOrStdout(), open)
-		},
-	}
 }
 
 func runTest(ctx context.Context, w io.Writer, open func(context.Context) (engine.Config, error)) error {
@@ -217,7 +186,7 @@ func runTest(ctx context.Context, w io.Writer, open func(context.Context) (engin
 	if err != nil {
 		return err
 	}
-	defer pool.Close()
+	defer pool.Close(ctx)
 
 	plan := planner.Build(c.defs, c.settings, facts)
 	server := facts.Version
@@ -332,55 +301,24 @@ func series(name string, labels []string, value float64) string {
 	return name + "{" + strings.Join(labels, ",") + "} " + v
 }
 
-func newPrintConfigCommand(flags *instanceFlags) *cobra.Command {
-	var offline bool
-	cmd := &cobra.Command{
-		Use:   "print-config",
-		Short: "Print the effective settings, the sources, the feature gates and the plan",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			gates, err := flags.registry()
-			if err != nil {
-				return err
-			}
-			open, err := flags.open()
-			if err != nil {
-				return err
-			}
-
-			return printConfig(cmd.Context(), cmd.OutOrStdout(), open, gates, offline)
-		},
-	}
-	cmd.Flags().BoolVar(&offline, "offline", false, "do not connect: print the queries that need no facts to be skipped")
-
-	return cmd
-}
-
-func printConfig(ctx context.Context, w io.Writer, open func(context.Context) (engine.Config, error), gates *featuregate.Registry, offline bool) error {
+func printConfig(ctx context.Context, w io.Writer, open func(context.Context) (engine.Config, error)) error {
 	c, err := openConfig(ctx, open)
 	if err != nil {
 		return err
 	}
-	out, err := describe(c, gates)
+	out, err := describe(c)
 	if err != nil {
 		return err
 	}
 	var b strings.Builder
 	b.WriteString(out)
 
-	var connectErr error
-	if offline {
-		b.WriteString("# plan (offline: not planned from live facts)\n")
-		b.WriteString(offlinePlan(c))
-	} else {
-		clearEnv(ctx)
-		var pool *pg.Pool
-		var facts planner.Facts
-		if pool, facts, connectErr = connect(ctx, c); connectErr == nil {
-			pool.Close()
-			b.WriteString("# plan\n")
-			b.WriteString(livePlan(planner.Build(c.defs, c.settings, facts)))
-		}
+	clearEnv(ctx)
+	pool, facts, connectErr := connect(ctx, c)
+	if connectErr == nil {
+		pool.Close(ctx)
+		b.WriteString("# plan\n")
+		b.WriteString(livePlan(planner.Build(c.defs, c.settings, facts)))
 	}
 	if _, err := io.WriteString(w, b.String()); err != nil {
 		return fmt.Errorf("write configuration: %w", err)
@@ -389,28 +327,15 @@ func printConfig(ctx context.Context, w io.Writer, open func(context.Context) (e
 	return connectErr
 }
 
-// describe renders the settings, the headers, the sources and the feature gates.
-func describe(c *config, gates *featuregate.Registry) (string, error) {
+// describe renders the settings and the sources.
+func describe(c *config) (string, error) {
 	var b strings.Builder
-	shown := c.settings
-	shown.Exporter.Endpoint = settings.RedactEndpoint(shown.Exporter.Endpoint)
-	raw, err := yaml.Marshal(shown)
+	raw, err := yaml.Marshal(c.settings)
 	if err != nil {
 		return "", fmt.Errorf("render settings: %w", err)
 	}
 	b.WriteString("# settings\n")
 	b.Write(raw)
-
-	if f := c.settings.Exporter.HeadersFile; f != "" {
-		b.WriteString("# headers\n")
-		keys, err := headerKeys(c.read, f)
-		if err != nil {
-			fmt.Fprintf(&b, "unreadable: %v\n", err)
-		}
-		for _, k := range keys {
-			fmt.Fprintf(&b, "%s: %s\n", k, redacted)
-		}
-	}
 
 	b.WriteString("# sources\n")
 	for _, st := range c.result.Status {
@@ -421,27 +346,7 @@ func describe(c *config, gates *featuregate.Registry) (string, error) {
 		fmt.Fprintf(&b, "%s %s: %v\n", st.Outcome, st.Source, strings.ReplaceAll(fmt.Sprint(st.Err), "\n", " "))
 	}
 
-	b.WriteString("# feature gates\n")
-	for _, g := range gates.List() {
-		fmt.Fprintf(&b, "%s %s enabled=%t\n", g.ID, g.Stage, g.Enabled)
-	}
-
 	return b.String(), nil
-}
-
-// headerKeys returns the sorted keys of the headers file when the exporter's parser accepts all of it;
-// otherwise the parser's error, which names the entry by position only.
-func headerKeys(read sources.ReadFile, file string) ([]string, error) {
-	data, err := read(file)
-	if err != nil {
-		return nil, fmt.Errorf("read headers file: %w", err)
-	}
-	headers, err := export.ParseHeaders(string(data))
-	if err != nil {
-		return nil, fmt.Errorf("parse headers file: %w", err)
-	}
-
-	return slices.Sorted(maps.Keys(headers)), nil
 }
 
 func livePlan(p planner.Plan) string {
@@ -451,32 +356,6 @@ func livePlan(p planner.Plan) string {
 	}
 	for _, s := range p.Skips {
 		fmt.Fprintf(&b, "skipped %s\n", skipLine(s))
-	}
-
-	return b.String()
-}
-
-// offlinePlan lists the whole-query skips that need no facts and the interval and group of the other queries.
-func offlinePlan(c *config) string {
-	s := c.settings
-	var b strings.Builder
-	for i := range c.defs {
-		d := &c.defs[i]
-		reason := ""
-		switch {
-		case s.ExcludedQuery(d.Key):
-			reason = planner.ReasonExcludedQuery
-		case d.Disabled != "":
-			reason = planner.ReasonDisabled + d.Disabled
-		case planner.AllMetricsExcluded(d, s):
-			reason = planner.ReasonAllMetrics
-		}
-		if reason != "" {
-			fmt.Fprintf(&b, "skipped %s: %s\n", d.Key, reason)
-			continue
-		}
-		group, interval := planner.EffectiveInterval(d, s)
-		fmt.Fprintf(&b, "unplanned %s group=%s interval=%s\n", d.Key, group, interval)
 	}
 
 	return b.String()

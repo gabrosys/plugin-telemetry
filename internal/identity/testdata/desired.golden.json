@@ -1,7 +1,7 @@
 {
   "ServiceAccount": {
     "metadata": {
-      "name": "pg-telemetry",
+      "name": "pg.telemetry",
       "namespace": "ns",
       "labels": {
         "app.kubernetes.io/managed-by": "plugin-telemetry",
@@ -21,7 +21,7 @@
   },
   "Role": {
     "metadata": {
-      "name": "pg-telemetry",
+      "name": "pg.telemetry",
       "namespace": "ns",
       "labels": {
         "app.kubernetes.io/managed-by": "plugin-telemetry",
@@ -125,7 +125,7 @@
   },
   "RoleBinding": {
     "metadata": {
-      "name": "pg-telemetry",
+      "name": "pg.telemetry",
       "namespace": "ns",
       "labels": {
         "app.kubernetes.io/managed-by": "plugin-telemetry",
@@ -145,26 +145,26 @@
     "subjects": [
       {
         "kind": "ServiceAccount",
-        "name": "pg-telemetry",
+        "name": "pg.telemetry",
         "namespace": "ns"
       }
     ],
     "roleRef": {
       "apiGroup": "rbac.authorization.k8s.io",
       "kind": "Role",
-      "name": "pg-telemetry"
+      "name": "pg.telemetry"
     }
   },
   "Token": {
     "metadata": {
-      "name": "pg-telemetry-token",
+      "name": "pg.telemetry-token",
       "namespace": "ns",
       "labels": {
         "app.kubernetes.io/managed-by": "plugin-telemetry",
         "telemetry.gabrosys.github.io/cluster": "pg"
       },
       "annotations": {
-        "kubernetes.io/service-account.name": "pg-telemetry"
+        "kubernetes.io/service-account.name": "pg.telemetry"
       },
       "ownerReferences": [
         {

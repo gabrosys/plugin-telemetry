@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io/fs"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/gabrosys/plugin-telemetry/internal/clusterconfig"
@@ -41,13 +43,29 @@ var _ = Describe("Source", func() {
 
 		fw = newFakeWatcher()
 		clk = clocktesting.NewFakeClock(time.Unix(1_700_000_000, 0))
-		var err error
-		src, err = kubesource.New(kubesource.Options{
+		src = kubesource.New(kubesource.Options{
 			Namespace: "ns", Cluster: "pg", APIServer: "https://127.0.0.1:1", TokenDir: GinkgoT().TempDir(), Clock: clk,
 		})
-		Expect(err).NotTo(HaveOccurred())
-		start = func() { src.Begin(ctx, fw.watch) }
+		start = func() {
+			rctx, stop := context.WithCancel(ctx)
+			ran := make(chan struct{})
+			go func() {
+				defer GinkgoRecover()
+				defer close(ran)
+				src.RunWith(rctx, fw.watch)
+			}()
+			DeferCleanup(func() {
+				stop()
+				Eventually(ran).Should(BeClosed())
+			})
+		}
 	})
+
+	// watching waits until exactly the given watches run.
+	watching := func(keys ...string) {
+		GinkgoHelper()
+		Eventually(fw.active).Should(ConsistOf(keys))
+	}
 
 	// ready feeds the Cluster and the default exporter.
 	ready := func() {
@@ -56,10 +74,25 @@ var _ = Describe("Source", func() {
 		fw.set("telemetryexporters", "default", exporter(nil))
 	}
 
-	It("is named kubernetes and fails to build on empty options", func() {
+	It("is named kubernetes", func() {
 		Expect(src.Name()).To(Equal("kubernetes"))
-		_, err := kubesource.New(kubesource.Options{})
-		Expect(err).To(HaveOccurred())
+	})
+
+	It("stops every watch and returns when ctx ends", func() {
+		rctx, stop := context.WithCancel(ctx)
+		ran := make(chan struct{})
+		go func() {
+			defer GinkgoRecover()
+			defer close(ran)
+			src.RunWith(rctx, fw.watch)
+		}()
+		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+		watching("clusters/pg", "telemetryexporters/default")
+		Consistently(ran, "50ms").ShouldNot(BeClosed())
+
+		stop()
+		Eventually(ran).Should(BeClosed())
+		Expect(fw.active()).To(BeEmpty())
 	})
 
 	It("returns ErrNoConfiguration until the Cluster is known, then while the exporter is missing", func() {
@@ -94,7 +127,7 @@ var _ = Describe("Source", func() {
 	It("does not watch the exporter while the plugin is disabled", func() {
 		start()
 		fw.set("clusters", "pg", cluster(clusterOpts{plugins: []any{pluginEntry(map[string]any{}, map[string]any{"enabled": false})}}))
-		Expect(fw.active()).To(ConsistOf("clusters/pg"))
+		Consistently(fw.active, "100ms").Should(ConsistOf("clusters/pg"))
 	})
 
 	It("builds settings once the Cluster and the exporter are known", func() {
@@ -107,9 +140,150 @@ var _ = Describe("Source", func() {
 		Expect(data).NotTo(BeEmpty())
 	})
 
+	DescribeTable("returns ErrNotReady, not ErrNoConfiguration, while an input has not synced",
+		func(clusterParams, exporterSpec map[string]any, feed func()) {
+			start()
+			fw.set("clusters", "pg", enabledCluster(clusterParams))
+			if exporterSpec != nil {
+				fw.set("telemetryexporters", "default", exporter(exporterSpec))
+			}
+			feed()
+			_, _, err := src.Settings()
+			Expect(err).To(MatchError(engine.ErrNotReady))
+			Expect(err).NotTo(MatchError(engine.ErrNoConfiguration))
+		},
+		Entry("the exporter", map[string]any{}, nil, func() {}),
+		Entry("the envFrom ConfigMap", map[string]any{}, map[string]any{
+			"exporter": map[string]any{"endpoint": "http://c:4318"},
+			"envFrom":  map[string]any{"configMap": map[string]any{"name": "envcm"}},
+		}, func() {}),
+		Entry("the envFrom Secret", map[string]any{}, map[string]any{
+			"exporter": map[string]any{"endpoint": "http://c:4318"},
+			"envFrom":  map[string]any{"secret": map[string]any{"name": "envsecret"}},
+		}, func() {}),
+		Entry("the password Secret", map[string]any{"auth": "password", "passwordSecret": "pw"},
+			map[string]any{"exporter": map[string]any{"endpoint": "http://c:4318"}}, func() {}),
+		Entry("a denied exporter", map[string]any{}, map[string]any{"exporter": map[string]any{"endpoint": "http://c:4318"}}, func() {
+			fw.fail("telemetryexporters", "default", errors.Join(errors.New("forbidden"), sources.ErrDenied))
+		}),
+	)
+
+	It("returns ErrNotReady and ErrDenied for a Cluster denied before its first sync", func() {
+		start()
+		fw.fail("clusters", "pg", errors.Join(errors.New("forbidden"), sources.ErrDenied))
+		_, _, err := src.Settings()
+		Expect(err).To(MatchError(engine.ErrNotReady))
+		Expect(err).To(MatchError(sources.ErrDenied))
+		Expect(err).NotTo(MatchError(engine.ErrNoConfiguration))
+	})
+
+	Describe("Cluster", func() {
+		It("returns the watched Cluster, and false before its watch syncs or once it is deleted", func() {
+			_, ok := src.Cluster()
+			Expect(ok).To(BeFalse())
+			start()
+			_, ok = src.Cluster()
+			Expect(ok).To(BeFalse())
+
+			fw.set("clusters", "pg", cluster(clusterOpts{
+				plugins:     []any{pluginEntry(map[string]any{}, nil)},
+				status:      map[string]any{"currentPrimary": "pg-1"},
+				annotations: map[string]string{"cnpg.io/fencedInstances": `["pg-1"]`},
+			}))
+			c, ok := src.Cluster()
+			Expect(ok).To(BeTrue())
+			Expect(c.Name).To(Equal("pg"))
+			Expect(c.Status.CurrentPrimary).To(Equal("pg-1"))
+			Expect(c.Annotations).To(HaveKeyWithValue("cnpg.io/fencedInstances", `["pg-1"]`))
+
+			fw.set("clusters", "pg", nil)
+			_, ok = src.Cluster()
+			Expect(ok).To(BeFalse())
+		})
+
+		DescribeTable("returns the Cluster whatever the plugin's entry, which only the configuration depends on",
+			func(plugins []any) {
+				start()
+				fw.set("clusters", "pg", cluster(clusterOpts{plugins: plugins}))
+				_, _, err := src.Settings()
+				Expect(err).To(MatchError(engine.ErrNoConfiguration))
+				c, ok := src.Cluster()
+				Expect(ok).To(BeTrue())
+				Expect(c.Name).To(Equal("pg"))
+			},
+			Entry("absent", []any{map[string]any{"name": "other"}}),
+			Entry("disabled", []any{pluginEntry(map[string]any{}, map[string]any{"enabled": false})}),
+			Entry("invalid parameters", []any{pluginEntry(map[string]any{"auth": "kerberos"}, nil)}),
+		)
+
+		It("returns false while the Cluster is denied or does not decode", func() {
+			start()
+			fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+			fw.fail("clusters", "pg", errors.Join(errors.New("forbidden"), sources.ErrDenied))
+			_, ok := src.Cluster()
+			Expect(ok).To(BeFalse())
+
+			bad := enabledCluster(map[string]any{})
+			Expect(unstructured.SetNestedField(bad.Object, "three", "spec", "instances")).To(Succeed())
+			fw.set("clusters", "pg", bad)
+			_, ok = src.Cluster()
+			Expect(ok).To(BeFalse())
+		})
+	})
+
+	It("keeps the last good references watched while an input is not ready", func() {
+		start()
+		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+		fw.set("telemetryexporters", "default", exporter(map[string]any{
+			"exporter": map[string]any{"endpoint": "http://c:4318", "headers": map[string]any{"name": "h1", "key": "h"}},
+		}))
+		fw.set("secrets", "h1", secret("h1", map[string]string{"h": "k=1"}))
+		_, _, err := src.Settings()
+		Expect(err).NotTo(HaveOccurred())
+
+		fw.set("telemetryexporters", "default", exporter(map[string]any{
+			"exporter": map[string]any{"endpoint": "http://c:4318", "headers": map[string]any{"name": "h1", "key": "h"}},
+			"envFrom":  map[string]any{"configMap": map[string]any{"name": "envcm"}},
+		}))
+		watching("clusters/pg", "telemetryexporters/default", "secrets/h1", "configmaps/envcm")
+		_, _, err = src.Settings()
+		Expect(err).To(MatchError(engine.ErrNotReady))
+		Consistently(fw.active, "100ms").Should(ContainElement("secrets/h1"))
+	})
+
+	It("logs each Build warning once while the warning set stays the same", func() {
+		start()
+		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+		spec := func(endpoint string, labels ...any) map[string]any {
+			return map[string]any{
+				"exporter":       map[string]any{"endpoint": endpoint},
+				"resourceLabels": labels,
+			}
+		}
+		const warning = "spec.resourceLabels: cnpg.io/instanceRole is ignored"
+		fw.set("telemetryexporters", "default", exporter(spec("http://c:4318", "app")))
+		_, plain, err := src.Settings()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(logs.String()).NotTo(ContainSubstring(warning))
+
+		fw.set("telemetryexporters", "default", exporter(spec("http://c:4318", "app", "cnpg.io/instanceRole")))
+		for range 3 {
+			_, data, err := src.Settings()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(data).To(Equal(plain), "the ignored label leaves the bytes unchanged")
+		}
+		Expect(strings.Count(logs.String(), warning)).To(Equal(1), "a warning that only the warning set shows is logged")
+		Expect(logs.String()).To(MatchRegexp(`(?i)warn.*` + warning))
+
+		fw.set("telemetryexporters", "default", exporter(spec("http://other:4318", "app", "cnpg.io/instanceRole")))
+		_, _, err = src.Settings()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.Count(logs.String(), warning)).To(Equal(1), "the same warning is not logged again")
+	})
+
 	It("starts watches for exactly References and stops those no longer referenced", func() {
 		start()
-		Expect(fw.active()).To(ConsistOf("clusters/pg"))
+		watching("clusters/pg")
 
 		fw.set("clusters", "pg", cluster(clusterOpts{
 			plugins: []any{pluginEntry(map[string]any{"auth": "password", "passwordSecret": "pw", "exporter": "ex"}, nil)},
@@ -118,7 +292,7 @@ var _ = Describe("Source", func() {
 				"customQueriesSecret":    []any{map[string]any{"name": "mon-sec", "key": "q.yaml"}},
 			},
 		}))
-		Expect(fw.active()).To(ConsistOf("clusters/pg", "telemetryexporters/ex", "secrets/pw", "configmaps/mon-cm", "secrets/mon-sec"))
+		watching("clusters/pg", "telemetryexporters/ex", "secrets/pw", "configmaps/mon-cm", "secrets/mon-sec")
 
 		fw.set("telemetryexporters", "ex", exporter(map[string]any{
 			"exporter": map[string]any{"endpoint": "http://c:4318", "headers": map[string]any{"name": "hdr", "key": "h"}},
@@ -128,16 +302,180 @@ var _ = Describe("Source", func() {
 			},
 			"metrics": map[string]any{"querySets": []any{"qs1"}},
 		}))
-		Expect(fw.active()).To(ConsistOf(
+		watching(
 			"clusters/pg", "telemetryexporters/ex", "secrets/pw", "configmaps/mon-cm", "secrets/mon-sec",
 			"secrets/hdr", "configmaps/envcm", "secrets/envsecret", "metricquerysets/qs1",
-		))
+		)
 
 		fw.set("telemetryexporters", "ex", exporter(nil))
-		Expect(fw.active()).To(ConsistOf("clusters/pg", "telemetryexporters/ex", "secrets/pw", "configmaps/mon-cm", "secrets/mon-sec"))
+		watching("clusters/pg", "telemetryexporters/ex", "secrets/pw", "configmaps/mon-cm", "secrets/mon-sec")
 
 		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
-		Expect(fw.active()).To(ConsistOf("clusters/pg", "telemetryexporters/default"))
+		watching("clusters/pg", "telemetryexporters/default")
+	})
+
+	It("keeps watching the objects of the last settings that built while an edit fails Build", func() {
+		withHeaders := func(name string, timeout string) *unstructured.Unstructured {
+			return exporter(map[string]any{
+				"exporter": map[string]any{
+					"endpoint": "http://c:4318", "timeout": timeout, "headers": map[string]any{"name": name, "key": "h"},
+				},
+				"metrics": map[string]any{"interval": "30s"},
+			})
+		}
+		start()
+		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+		fw.set("telemetryexporters", "default", withHeaders("h1", "10s"))
+		fw.set("secrets", "h1", secret("h1", map[string]string{"h": "k=1"}))
+		_, _, err := src.Settings()
+		Expect(err).NotTo(HaveOccurred())
+
+		fw.set("telemetryexporters", "default", withHeaders("h2", "20s"))
+		watching("clusters/pg", "telemetryexporters/default", "secrets/h1", "secrets/h2")
+		fw.set("secrets", "h2", secret("h2", map[string]string{"h": "k=2"}))
+		_, _, err = src.Settings()
+		Expect(err).To(MatchError(ContainSubstring("exporter.timeout")))
+		Expect(src.ReadFile(clusterconfig.SecretFile("h1", "h"))).To(Equal([]byte("k=1")))
+		Consistently(fw.active, "100ms").Should(ContainElement("secrets/h1"))
+
+		fw.set("telemetryexporters", "default", withHeaders("h2", "10s"))
+		s, _, err := src.Settings()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(s.Exporter.HeadersFile).To(Equal(clusterconfig.SecretFile("h2", "h")))
+		watching("clusters/pg", "telemetryexporters/default", "secrets/h2")
+	})
+
+	DescribeTable("forgets the references of the last settings that built once there is no configuration",
+		func(idle *unstructured.Unstructured, missingExporter string, still ...string) {
+			start()
+			fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+			fw.set("telemetryexporters", "default", exporter(map[string]any{
+				"exporter": map[string]any{"endpoint": "http://c:4318", "headers": map[string]any{"name": "h1", "key": "h"}},
+			}))
+			fw.set("secrets", "h1", secret("h1", map[string]string{"h": "k=1"}))
+			_, _, err := src.Settings()
+			Expect(err).NotTo(HaveOccurred())
+
+			fw.set("clusters", "pg", idle)
+			if missingExporter != "" {
+				fw.set("telemetryexporters", missingExporter, nil)
+			}
+			Eventually(func() error { _, _, err := src.Settings(); return err }).Should(MatchError(engine.ErrNoConfiguration))
+			watching(still...)
+		},
+		Entry("the exporter is missing", enabledCluster(map[string]any{"exporter": "other"}), "other",
+			"clusters/pg", "telemetryexporters/other"),
+		Entry("the plugin is disabled",
+			cluster(clusterOpts{plugins: []any{pluginEntry(map[string]any{}, map[string]any{"enabled": false})}}), "",
+			"clusters/pg"),
+	)
+
+	It("drops reports from a watch that was stopped", func() {
+		withQuerySet := exporter(map[string]any{
+			"exporter": map[string]any{"endpoint": "http://c:4318"},
+			"metrics":  map[string]any{"querySets": []any{"qs1"}},
+		})
+		start()
+		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+		fw.set("telemetryexporters", "default", withQuerySet)
+		stale := fw.handler("metricquerysets", "qs1")
+
+		fw.set("telemetryexporters", "default", exporter(nil))
+		watching("clusters/pg", "telemetryexporters/default")
+		fw.set("telemetryexporters", "default", withQuerySet)
+		watching("clusters/pg", "telemetryexporters/default", "metricquerysets/qs1")
+
+		var notified atomic.Int32
+		go func() {
+			defer GinkgoRecover()
+			Expect(src.Watch(ctx, nil, func() { notified.Add(1) })).To(Succeed())
+		}()
+		Eventually(notified.Load).Should(BeEquivalentTo(1))
+		stale.Set(querySet("qs1", map[string]any{"q": map[string]any{"query": "SELECT 1"}}))
+		stale.Fail(errors.New("connection refused"))
+
+		_, err := src.ReadFile(clusterconfig.QuerySetFile("qs1"))
+		Expect(err).To(MatchError(kubesource.ErrNotSynced))
+		Expect(logs.String()).NotTo(ContainSubstring("watch failed"))
+		Consistently(clk.HasWaiters, "100ms").Should(BeFalse())
+	})
+
+	It("goes on reconciling after a watch start panics, and starts that watch again after 5 s", func() {
+		fw.panicOnce("configmaps", "mon-cm")
+		start()
+		fw.set("clusters", "pg", cluster(clusterOpts{
+			plugins:    []any{pluginEntry(map[string]any{}, nil)},
+			monitoring: map[string]any{"customQueriesConfigMap": []any{map[string]any{"name": "mon-cm", "key": "q.yaml"}}},
+		}))
+
+		watching("clusters/pg", "telemetryexporters/default")
+		Eventually(clk.HasWaiters).Should(BeTrue())
+		Expect(logs.String()).To(ContainSubstring("recovered from a panic"))
+		clk.Step(5 * time.Second)
+		watching("clusters/pg", "telemetryexporters/default", "configmaps/mon-cm")
+	})
+
+	It("still starts the new watches when a stop panics", func() {
+		withCM := func(name string) *unstructured.Unstructured {
+			return cluster(clusterOpts{
+				plugins:    []any{pluginEntry(map[string]any{}, nil)},
+				monitoring: map[string]any{"customQueriesConfigMap": []any{map[string]any{"name": name, "key": "q.yaml"}}},
+			})
+		}
+		start()
+		fw.set("clusters", "pg", withCM("old-cm"))
+		watching("clusters/pg", "telemetryexporters/default", "configmaps/old-cm")
+
+		fw.panicOnStop("configmaps", "old-cm")
+		fw.set("clusters", "pg", withCM("new-cm"))
+		watching("clusters/pg", "telemetryexporters/default", "configmaps/new-cm")
+	})
+
+	It("starts a watch again after 5 s when its informer died", func() {
+		start()
+		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+		watching("clusters/pg", "telemetryexporters/default")
+		Expect(fw.started("telemetryexporters", "default")).To(Equal(1))
+
+		fw.handler("telemetryexporters", "default").Crashed()
+		Eventually(clk.HasWaiters).Should(BeTrue())
+		clk.Step(5 * time.Second)
+		Eventually(func() int { return fw.started("telemetryexporters", "default") }).Should(Equal(2))
+	})
+
+	It("keeps handling events after a handler panics", func() {
+		var (
+			mu    sync.Mutex // guards lines
+			lines []string
+			once  sync.Once
+		)
+		logger := funcr.New(func(_, args string) {
+			if strings.Contains(args, "watch failed") {
+				once.Do(func() { panic("log broke") })
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			lines = append(lines, args)
+		}, funcr.Options{})
+		ctx = logr.NewContext(ctx, logger)
+		start()
+
+		fw.fail("clusters", "pg", errors.New("first failure"))
+		Eventually(func() int {
+			mu.Lock()
+			defer mu.Unlock()
+			n := 0
+			for _, l := range lines {
+				if strings.Contains(l, "recovered from a panic") {
+					n++
+				}
+			}
+			return n
+		}).Should(Equal(1))
+
+		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
+		fw.set("telemetryexporters", "default", exporter(nil))
+		Eventually(func() error { _, _, err := src.Settings(); return err }).Should(Succeed())
 	})
 
 	Describe("ReadFile", func() {
@@ -173,10 +511,20 @@ var _ = Describe("Source", func() {
 				`{"q":{"query":"SELECT 1","metrics":[{"v":{"usage":"GAUGE","metric_mapping":{}}}]}}`))
 		})
 
+		It("answers not synced, not missing, for a virtual file with no watch yet", func() {
+			for _, name := range []string{
+				clusterconfig.ConfigMapFile("unwatched", "k"), clusterconfig.SecretFile("unwatched", "k"), clusterconfig.QuerySetFile("unwatched"),
+			} {
+				_, err := src.ReadFile(name)
+				Expect(err).To(MatchError(kubesource.ErrNotSynced), name)
+				Expect(err).NotTo(MatchError(fs.ErrNotExist), name)
+			}
+		})
+
 		It("answers fs.ErrNotExist for an unknown name or a missing key", func() {
 			fw.set("configmaps", "mon-cm", configMap("mon-cm", map[string]any{"q.yaml": "a"}))
 			for _, name := range []string{
-				"other/x", "configmap/unwatched/k", clusterconfig.ConfigMapFile("mon-cm", "missing"), "configmap/mon-cm",
+				"other/x", clusterconfig.ConfigMapFile("mon-cm", "missing"), "configmap/mon-cm",
 			} {
 				_, err := src.ReadFile(name)
 				Expect(err).To(MatchError(fs.ErrNotExist), name)
@@ -203,7 +551,7 @@ var _ = Describe("Source", func() {
 	})
 
 	Describe("Settings", func() {
-		It("keeps the bytes unchanged when only the Cluster status or an unrelated annotation changes", func() {
+		It("keeps the bytes unchanged when only the Cluster status, an unrelated annotation or a plugin parameter Build ignores changes", func() {
 			ready()
 			_, before, err := src.Settings()
 			Expect(err).NotTo(HaveOccurred())
@@ -218,6 +566,13 @@ var _ = Describe("Source", func() {
 			Expect(after).To(Equal(before))
 
 			fw.set("clusters", "pg", enabledCluster(map[string]any{"sidecarCPU": "100m"}))
+			_, after, err = src.Settings()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(after).To(Equal(before))
+
+			fw.set("telemetryexporters", "default", exporter(map[string]any{
+				"exporter": map[string]any{"endpoint": "http://other:4318"},
+			}))
 			_, changed, err := src.Settings()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(changed).NotTo(Equal(before))
@@ -245,76 +600,60 @@ var _ = Describe("Source", func() {
 	})
 
 	Describe("Watch", func() {
-		It("notifies once, debounced, after a burst of events", func() {
+		It("notifies once watching, then after a change", func() {
 			var notified atomic.Int32
-			readyCh := make(chan struct{})
-			done := make(chan error, 1)
 			start()
 			go func() {
-				done <- src.Watch(ctx, nil, func() { notified.Add(1) }, sources.WithReady(func() { close(readyCh) }))
+				defer GinkgoRecover()
+				Expect(src.Watch(ctx, nil, func() { notified.Add(1) })).To(Succeed())
 			}()
-			Eventually(readyCh).Should(BeClosed())
+			Eventually(notified.Load).Should(BeEquivalentTo(1))
 
 			fw.set("clusters", "pg", enabledCluster(map[string]any{}))
-			fw.set("telemetryexporters", "default", exporter(nil))
-			fw.set("clusters", "pg", enabledCluster(map[string]any{"sidecarCPU": "100m"}))
-			Eventually(clk.HasWaiters).Should(BeTrue())
-
-			clk.Step(999 * time.Millisecond)
-			Consistently(notified.Load, "100ms").Should(BeZero())
-			clk.Step(time.Millisecond)
-			Eventually(notified.Load).Should(BeEquivalentTo(1))
-			Consistently(notified.Load, "100ms").Should(BeEquivalentTo(1))
-
-			fw.set("telemetryexporters", "default", exporter(nil))
-			Eventually(clk.HasWaiters).Should(BeTrue())
-			clk.Step(time.Second)
-			Eventually(notified.Load).Should(BeEquivalentTo(2))
+			Eventually(notified.Load).Should(BeNumerically(">=", 2))
 		})
 
-		It("reports watch errors other than a 403 to the error handler and returns nil when ctx ends", func() {
-			errs := make(chan error, 4)
-			readyCh := make(chan struct{})
+		It("returns nil when ctx ends", func() {
 			done := make(chan error, 1)
 			wctx, cancel := context.WithCancel(ctx)
 			start()
-			go func() {
-				done <- src.Watch(wctx, nil, func() {}, sources.WithReady(func() { close(readyCh) }),
-					sources.WithErrorHandler(func(err error) { errs <- err }))
-			}()
-			Eventually(readyCh).Should(BeClosed())
-
-			fw.fail("clusters", "pg", errors.New("connection refused"))
-			Eventually(errs).Should(Receive(MatchError(ContainSubstring("connection refused"))))
-
+			go func() { done <- src.Watch(wctx, nil, func() {}) }()
 			cancel()
 			Eventually(done).Should(Receive(BeNil()))
 		})
 	})
 
-	It("logs and forwards a repeated watch error once, and again when the error changes", func() {
-		errs := make(chan error, 8)
-		readyCh := make(chan struct{})
+	It("logs a repeated watch error once, and again when the error changes or after an event", func() {
 		start()
-		go func() {
-			_ = src.Watch(ctx, nil, func() {}, sources.WithReady(func() { close(readyCh) }),
-				sources.WithErrorHandler(func(err error) { errs <- err }))
-		}()
-		Eventually(readyCh).Should(BeClosed())
-
 		fw.fail("clusters", "pg", errors.New("connection refused"))
 		fw.fail("clusters", "pg", errors.New("connection refused"))
-		Eventually(errs).Should(Receive())
-		Consistently(errs, "100ms").ShouldNot(Receive())
 		Expect(strings.Count(logs.String(), "watch failed")).To(Equal(1))
 
 		fw.fail("clusters", "pg", errors.New("no route to host"))
-		Eventually(errs).Should(Receive(MatchError(ContainSubstring("no route to host"))))
 		Expect(strings.Count(logs.String(), "watch failed")).To(Equal(2))
 
 		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
 		fw.fail("clusters", "pg", errors.New("no route to host"))
-		Eventually(errs).Should(Receive())
+		Expect(strings.Count(logs.String(), "watch failed")).To(Equal(3))
+	})
+
+	It("logs A, 403, A as two failures and never notifies for a watch error", func() {
+		var notified atomic.Int32
+		start()
+		go func() {
+			defer GinkgoRecover()
+			Expect(src.Watch(ctx, nil, func() { notified.Add(1) })).To(Succeed())
+		}()
+		Eventually(notified.Load).Should(BeEquivalentTo(1))
+
+		fw.fail("clusters", "pg", errors.New("connection refused"))
+		Consistently(notified.Load, "100ms").Should(BeEquivalentTo(1))
+		Expect(clk.HasWaiters()).To(BeFalse())
+
+		fw.fail("clusters", "pg", errors.Join(errors.New("forbidden"), sources.ErrDenied))
+		fw.fail("clusters", "pg", errors.New("connection refused"))
+		Expect(strings.Count(logs.String(), "watch failed")).To(Equal(2))
+		Expect(strings.Count(logs.String(), "access to object denied")).To(Equal(1))
 	})
 
 	It("keeps the watches and answers ErrDenied while the exporter is denied and a Cluster event arrives", func() {
@@ -330,7 +669,7 @@ var _ = Describe("Source", func() {
 		fw.fail("telemetryexporters", "default", errors.Join(errors.New("forbidden"), sources.ErrDenied))
 		fw.set("clusters", "pg", enabledCluster(map[string]any{}))
 
-		Expect(fw.active()).To(ConsistOf(before))
+		Consistently(fw.active, "100ms").Should(ConsistOf(before))
 		Expect(src.ReadFile(clusterconfig.QuerySetFile("qs1"))).To(MatchJSON(`{"q":{"query":"SELECT 1"}}`))
 		_, _, err := src.Settings()
 		Expect(err).To(MatchError(sources.ErrDenied))
@@ -346,10 +685,15 @@ var _ = Describe("Source", func() {
 		}))
 		data := map[string]string{"username": "monitor", "password": sensitive}
 		fw.set("secrets", "pw", secret("pw", data))
+		fw.set("secrets", "envsecret", secret("envsecret", map[string]string{"OTEL_EXPORTER_OTLP_TIMEOUT": sensitive}))
+		_, _, err := src.Settings()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(logs.String()).To(ContainSubstring("OTEL_EXPORTER_OTLP_TIMEOUT"))
+
 		fw.set("secrets", "envsecret", secret("envsecret", map[string]string{"OTEL_EXPORTER_OTLP_HEADERS": "k=" + sensitive}))
 		fw.fail("secrets", "pw", errors.Join(errors.New("watch broke"), sources.ErrDenied))
 		fw.fail("secrets", "envsecret", errors.New("watch broke"))
-		_, _, err := src.Settings()
+		_, _, err = src.Settings()
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).NotTo(ContainSubstring(sensitive))
 
@@ -358,10 +702,9 @@ var _ = Describe("Source", func() {
 		Expect(logs.String()).NotTo(ContainSubstring(base64.StdEncoding.EncodeToString([]byte(sensitive))))
 	})
 
-	It("waits for the token file", func() {
+	It("waits for the token file and logs the first wait with the stat error", func() {
 		dir := GinkgoT().TempDir()
-		s, err := kubesource.New(kubesource.Options{Namespace: "ns", Cluster: "pg", APIServer: "https://x", TokenDir: dir, Clock: clk})
-		Expect(err).NotTo(HaveOccurred())
+		s := kubesource.New(kubesource.Options{Namespace: "ns", Cluster: "pg", APIServer: "https://x", TokenDir: dir, Clock: clk})
 		found := make(chan bool, 1)
 		go func() { found <- s.WaitForToken(ctx) }()
 
@@ -373,13 +716,27 @@ var _ = Describe("Source", func() {
 		Eventually(clk.HasWaiters).Should(BeTrue())
 		clk.Step(5 * time.Second)
 		Eventually(found).Should(Receive(BeTrue()))
+		Expect(strings.Count(logs.String(), "waiting for the sidecar token")).To(Equal(1))
+		Expect(logs.String()).To(ContainSubstring("no such file or directory"))
+	})
+})
+
+var _ = Describe("Snapshot without a token", func() {
+	It("fails when the deadline passes before the token appears, naming the token path", func() {
+		dir := GinkgoT().TempDir()
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		_, err := kubesource.Snapshot(ctx, kubesource.Options{Namespace: "ns", Cluster: "pg", APIServer: "https://127.0.0.1:1", TokenDir: dir}, time.Minute)
+		Expect(time.Since(start)).To(BeNumerically("<", time.Second))
+		Expect(err).To(MatchError(context.DeadlineExceeded))
+		Expect(err).To(MatchError(Equal("sidecar token " + dir + "/token did not appear: " + context.DeadlineExceeded.Error())))
 	})
 })
 
 var _ = Describe("Source.Sensitive", func() {
 	It("is true for secret/ names only", func() {
-		src, err := kubesource.New(kubesource.Options{Namespace: "ns", Cluster: "c", APIServer: "https://x", TokenDir: "/t"})
-		Expect(err).NotTo(HaveOccurred())
+		src := kubesource.New(kubesource.Options{Namespace: "ns", Cluster: "c", APIServer: "https://x", TokenDir: "/t"})
 		Expect(src.Sensitive("secret/s/k")).To(BeTrue())
 		Expect(src.Sensitive("configmap/s/k")).To(BeFalse())
 		Expect(src.Sensitive("metricqueryset/s")).To(BeFalse())

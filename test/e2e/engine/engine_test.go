@@ -14,6 +14,7 @@ import (
 	. "github.com/onsi/gomega"
 	otelruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
 
+	"github.com/gabrosys/plugin-telemetry/internal/engine"
 	"github.com/gabrosys/plugin-telemetry/internal/scheduler"
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/otlp"
@@ -31,8 +32,6 @@ const (
 const (
 	// engineScope is the instrumentation scope of the engine's metrics.
 	engineScope = "github.com/gabrosys/plugin-telemetry"
-	// watchDebounce is the engine's quiet time after a file change before it reloads.
-	watchDebounce = time.Second
 	// slack covers the work between the timers: a reload, a run, a copy of the collector's file.
 	slack = 3 * time.Second
 
@@ -48,7 +47,7 @@ const (
 `
 
 	runsTotal   = "cnpg_otel_query_runs_total"
-	configInfo  = "cnpg_otel_config_info"
+	configInfo  = otlp.ConfigInfo
 	configLoads = "cnpg_otel_config_loads_total"
 	up          = "cnpg_collector_up"
 )
@@ -79,34 +78,13 @@ func marshalShapes(shapes []otlp.Shape) []byte {
 	return []byte("[\n" + strings.Join(rows, ",\n") + "\n]\n")
 }
 
-// exportTimes returns the collection times of the exports in lines, from the one config info point each carries.
-func exportTimes(lines []otlp.Line) []time.Time {
-	var out []time.Time
-	for _, p := range otlp.Points(lines, configInfo) {
-		out = append(out, p.Time)
-	}
-	slices.SortFunc(out, func(a, b time.Time) int { return a.Compare(b) })
-	return slices.Compact(out)
-}
-
-// exportAt returns the lines of the export collected at t; its points are stamped within a second of t.
-func exportAt(lines []otlp.Line, t time.Time) []otlp.Line {
-	var out []otlp.Line
-	for _, l := range otlp.Since(lines, t) {
-		if l.Time.Before(t.Add(time.Second)) {
-			out = append(out, l)
-		}
-	}
-	return out
-}
-
 // latestExport returns the lines of the last export.
 func latestExport(lines []otlp.Line) []otlp.Line {
-	times := exportTimes(lines)
+	times := otlp.ExportTimes(lines)
 	if len(times) == 0 {
 		return nil
 	}
-	return exportAt(lines, times[len(times)-1])
+	return otlp.ExportAt(lines, times[len(times)-1])
 }
 
 // increase returns how much the counter series matching want grew over the window that ends at its last point.
@@ -129,7 +107,7 @@ func lastValue(g Gomega, lines []otlp.Line, name string, want map[string]string)
 	return p.Value
 }
 
-var _ = Describe("the engine", Ordered, func() {
+var _ = Describe("the engine", Ordered, ContinueOnFailure, func() {
 	It("exports CNPG's default metrics with the golden names, kinds and attribute keys", func(ctx SpecContext) {
 		// Every job of the first plan runs within MaxInitialDelay of the start.
 		settled := proc.started.Add(scheduler.MaxInitialDelay + slack)
@@ -201,7 +179,7 @@ var _ = Describe("the engine", Ordered, func() {
 			g.Expect(points[len(points)-1].Time.Sub(points[0].Time)).To(BeNumerically(">=", slowWindow))
 		}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(time.Second).Should(Succeed())
 
-		times := exportTimes(lines)
+		times := otlp.ExportTimes(lines)
 		Expect(len(times)).To(BeNumerically(">=", 7), "fewer than 6 export gaps")
 		gaps := make([]time.Duration, 0, len(times)-1)
 		for i := 1; i < len(times); i++ {
@@ -237,7 +215,7 @@ var _ = Describe("the engine", Ordered, func() {
 		oldGeneration := mustLast(lines, configInfo, nil).Attrs["generation"]
 
 		// A new query waits for its initial delay, below its interval and MaxInitialDelay, before its first run.
-		bound := watchDebounce + min(defaultInterval, scheduler.MaxInitialDelay) + exportInterval + flushInterval + slack
+		bound := engine.Debounce + min(defaultInterval, scheduler.MaxInitialDelay) + exportInterval + flushInterval + slack
 		start := time.Now()
 		writeFile("extra.yaml", probeQuery)
 		Eventually(func(g Gomega) []otlp.Point {
@@ -266,17 +244,17 @@ var _ = Describe("the engine", Ordered, func() {
 			g.Expect(loadErrors(ls)).To(BeNumerically(">", errorsBefore))
 			p, _ := otlp.Last(ls, configLoads, map[string]string{"source": extra, "outcome": "error"})
 			broken = p.Time
-		}).WithContext(ctx).WithTimeout(watchDebounce + exportInterval + flushInterval + slack).
+		}).WithContext(ctx).WithTimeout(engine.Debounce + exportInterval + flushInterval + slack).
 			WithPolling(250 * time.Millisecond).Should(Succeed())
 
 		// The exports after the failed load still carry the probe, under the same generation.
 		var after []otlp.Line
 		Eventually(func(g Gomega) {
 			after = otlp.Since(exported(ctx, g), broken)
-			g.Expect(len(exportTimes(after))).To(BeNumerically(">=", 3))
+			g.Expect(len(otlp.ExportTimes(after))).To(BeNumerically(">=", 3))
 		}).WithContext(ctx).WithTimeout(3*exportInterval + slack).WithPolling(time.Second).Should(Succeed())
-		for _, at := range exportTimes(after) {
-			export := exportAt(after, at)
+		for _, at := range otlp.ExportTimes(after) {
+			export := otlp.ExportAt(after, at)
 			Expect(otlp.Points(export, probeMetric)).To(ContainElement(HaveField("Value", 42.0)), "export at %s", at)
 			Expect(mustLast(export, configInfo, nil).Attrs).To(HaveKeyWithValue("generation", generation), "export at %s", at)
 		}

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/testcontainers/testcontainers-go"
 	tcexec "github.com/testcontainers/testcontainers-go/exec"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -25,6 +26,7 @@ const (
 	// MonitorPassword is the password of MonitorUser.
 	MonitorPassword = "monitor-password"
 
+	dataDir    = "/tmp/pgdata"
 	holdFile   = "/tmp/pg-hold"
 	socketDir  = "/var/run/postgresql"
 	readyTries = 300
@@ -46,20 +48,21 @@ type Postgres struct {
 func Start(ctx context.Context, image string) (*Postgres, error) {
 	c, err := testcontainers.Run(ctx, image,
 		testcontainers.WithCmd("bash", "-c", serverScript),
+		testcontainers.WithEnv(map[string]string{"PGDATA": dataDir, "HOLD": holdFile}),
 		testcontainers.WithExposedPorts("5432/tcp"),
 		testcontainers.WithWaitStrategy(wait.ForLog("database system is ready to accept connections")),
 	)
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("start container: %w", err), terminate(ctx, c))
+		return nil, errors.Join(fmt.Errorf("start container: %w", err), Terminate(ctx, c))
 	}
 
 	host, err := c.Host(ctx)
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("get container host: %w", err), terminate(ctx, c))
+		return nil, errors.Join(fmt.Errorf("get container host: %w", err), Terminate(ctx, c))
 	}
 	port, err := c.MappedPort(ctx, "5432/tcp")
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("get mapped port: %w", err), terminate(ctx, c))
+		return nil, errors.Join(fmt.Errorf("get mapped port: %w", err), Terminate(ctx, c))
 	}
 
 	p := &Postgres{Host: host, Port: port.Num(), container: c}
@@ -71,13 +74,14 @@ func Start(ctx context.Context, image string) (*Postgres, error) {
 		"REVOKE CONNECT ON DATABASE noconnect FROM PUBLIC",
 	} {
 		if err := p.Exec(ctx, stmt); err != nil {
-			return nil, errors.Join(fmt.Errorf("bootstrap: %w", err), terminate(ctx, c))
+			return nil, errors.Join(fmt.Errorf("bootstrap: %w", err), Terminate(ctx, c))
 		}
 	}
 	return p, nil
 }
 
-func terminate(ctx context.Context, c *testcontainers.DockerContainer) error {
+// Terminate removes the container, with its volumes, and wraps the error.
+func Terminate(ctx context.Context, c *testcontainers.DockerContainer) error {
 	if err := c.Terminate(ctx); err != nil {
 		return fmt.Errorf("terminate container: %w", err)
 	}
@@ -112,12 +116,41 @@ func (p *Postgres) MonitorConfig(dir string) pg.Config {
 	}
 }
 
+// PlainConn connects to database as the monitoring role with pgx's defaults and no runtime parameter of
+// its own, so its settings are the server's.
+func (p *Postgres) PlainConn(ctx context.Context, database string) (*pgx.Conn, error) {
+	cc, err := pgx.ParseConfig("sslmode=disable")
+	if err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	cc.Host, cc.Port, cc.User, cc.Password, cc.Database = p.Host, p.Port, MonitorUser, MonitorPassword, database
+	conn, err := pgx.ConnectConfig(ctx, cc)
+	if err != nil {
+		return nil, fmt.Errorf("connect: %w", err)
+	}
+	return conn, nil
+}
+
 // StopServer stops PostgreSQL and keeps it stopped, the container keeps running.
 func (p *Postgres) StopServer(ctx context.Context) error {
 	if err := p.run(ctx, "touch", holdFile); err != nil {
 		return err
 	}
-	return p.run(ctx, "pg_ctl", "-D", "/tmp/pgdata", "stop", "-m", "fast")
+	return p.run(ctx, "pg_ctl", "-D", dataDir, "stop", "-m", "fast")
+}
+
+// StopServerSmart starts a smart shutdown and keeps the server stopped once it is down: the postmaster
+// waits for the open sessions to end, and the call returns without waiting.
+func (p *Postgres) StopServerSmart(ctx context.Context) error {
+	if err := p.run(ctx, "touch", holdFile); err != nil {
+		return err
+	}
+	return p.run(ctx, "pg_ctl", "-D", dataDir, "stop", "-m", "smart", "-W")
+}
+
+// Running reports whether the postmaster is alive, also while it only waits to shut down.
+func (p *Postgres) Running(ctx context.Context) bool {
+	return p.run(ctx, "pg_ctl", "-D", dataDir, "status") == nil
 }
 
 // StartServer starts PostgreSQL again and returns once it accepts connections on the same port.
@@ -140,7 +173,7 @@ func (p *Postgres) StartServer(ctx context.Context) error {
 
 // Terminate removes the container.
 func (p *Postgres) Terminate(ctx context.Context) error {
-	return terminate(ctx, p.container)
+	return Terminate(ctx, p.container)
 }
 
 func (p *Postgres) run(ctx context.Context, cmd ...string) error {

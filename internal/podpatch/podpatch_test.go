@@ -43,7 +43,7 @@ func loadPod(fixture string) *corev1.Pod {
 }
 
 func params(auth podpatch.AuthMode) podpatch.Params {
-	return podpatch.Params{Auth: auth, CPU: resource.MustParse("50m"), Memory: resource.MustParse("64Mi")}
+	return podpatch.Params{Auth: auth, CPU: resource.MustParse("50m"), Memory: resource.MustParse("96Mi")}
 }
 
 func marshal(pod *corev1.Pod) []byte {
@@ -106,7 +106,7 @@ var _ = Describe("Apply", func() {
 				for _, list := range []corev1.ResourceList{c.Resources.Requests, c.Resources.Limits} {
 					cpu, mem := list[corev1.ResourceCPU], list[corev1.ResourceMemory]
 					Expect(cpu.Cmp(resource.MustParse("50m"))).To(BeZero())
-					Expect(mem.Cmp(resource.MustParse("64Mi"))).To(BeZero())
+					Expect(mem.Cmp(resource.MustParse("96Mi"))).To(BeZero())
 				}
 
 				Expect(c.SecurityContext).To(Equal(&corev1.SecurityContext{
@@ -127,7 +127,7 @@ var _ = Describe("Apply", func() {
 				Expect(pod.Spec.Volumes).To(HaveLen(len(original.Spec.Volumes) + 2))
 				Expect(pod.Spec.Volumes[len(pod.Spec.Volumes)-2:]).To(Equal([]corev1.Volume{
 					{Name: "telemetry-token", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{ //nolint:gosec // a Secret name, not a credential
-						SecretName: "fixture-telemetry-token",
+						SecretName: "fixture.telemetry-token",
 						Optional:   ptr.To(true),
 					}}},
 					{Name: "telemetry-sa-mask", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
@@ -238,3 +238,17 @@ var _ = Describe("Apply", func() {
 		})
 	}
 })
+
+var _ = DescribeTable("Apply rejects and leaves the Pod unchanged",
+	func(p podpatch.Params) {
+		pod := loadPod("pod-main")
+		before := pod.DeepCopy()
+
+		Expect(podpatch.Apply(pod, cluster, p, image)).To(MatchError(podpatch.ErrInvalidParameters))
+		Expect(pod).To(Equal(before))
+	},
+	Entry("an unknown auth mode", podpatch.Params{
+		Auth: "ldap", CPU: resource.MustParse("50m"), Memory: resource.MustParse("64Mi"),
+	}),
+	Entry("zero parameters", podpatch.Params{}),
+)

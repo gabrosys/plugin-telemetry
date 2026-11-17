@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -25,14 +26,14 @@ var _ = Describe("instance command", func() {
 		done := make(chan error, 1)
 		go func() { done <- cmd.ExecuteContext(ctx) }()
 
-		time.Sleep(100 * time.Millisecond)
+		Consistently(done, 100*time.Millisecond).ShouldNot(Receive())
 		cancel()
 		Eventually(done, time.Second).Should(Receive(BeNil()))
 	})
 })
 
 var _ = Describe("instance preflight command", func() {
-	It("prints one JSON line with the pg part even when it cannot connect", func() {
+	It("prints one JSON line with the postgres and kube parts when neither can be reached", func() {
 		GinkgoT().Setenv("KUBERNETES_SERVICE_HOST", "")
 		var out bytes.Buffer
 		cmd := cli.NewRootCommand()
@@ -46,6 +47,32 @@ var _ = Describe("instance preflight command", func() {
 		Expect(report).To(HaveKey("postgres"))
 		Expect(report).To(HaveKey("kube"))
 		Expect(strings.Count(out.String(), "\n")).To(Equal(1))
+	})
+
+	It("clears PG* before it connects", func() {
+		GinkgoT().Setenv("PGAPPNAME", "x")
+		cmd := cli.NewRootCommand()
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		cmd.SetArgs([]string{"instance", "preflight", "--kube=false", "--pg-host=127.0.0.1", "--pg-port=1"})
+		Expect(cmd.Execute()).To(Succeed())
+
+		_, set := os.LookupEnv("PGAPPNAME")
+		Expect(set).To(BeFalse())
+	})
+
+	It("does not print PGPASSWORD", func() {
+		GinkgoT().Setenv("PGPASSWORD", "hunter2")
+		var out bytes.Buffer
+		cmd := cli.NewRootCommand()
+		cmd.SetOut(&out)
+		cmd.SetErr(io.Discard)
+		cmd.SetArgs([]string{"instance", "preflight", "--kube=false", "--pg-host=127.0.0.1", "--pg-port=1"})
+		Expect(cmd.Execute()).To(Succeed())
+
+		Expect(out.String()).NotTo(ContainSubstring("PGPASSWORD"))
+		Expect(out.String()).NotTo(ContainSubstring("hunter2"))
+		Expect(out.String()).To(ContainSubstring(`"connected":false`))
 	})
 
 	It("rejects unknown flags", func() {

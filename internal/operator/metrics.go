@@ -6,16 +6,16 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
-	"sync"
 	"time"
 
+	"github.com/cloudnative-pg/machinery/pkg/log"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/exemplar"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/clock"
 
 	"github.com/gabrosys/plugin-telemetry/internal/clusterconfig"
@@ -27,154 +27,148 @@ import (
 
 // Values of the service and operation attributes of the hook metrics.
 const (
-	serviceLifecycle  = "lifecycle"
-	serviceReconciler = "reconciler"
-	serviceOperator   = "operator"
+	serviceLifecycle = "lifecycle"
+	serviceOperator  = "operator"
 
 	operationCreate    = "create"
 	operationEvaluate  = "evaluate"
-	operationPre       = "pre"
-	operationPost      = "post"
 	operationSetStatus = "set_status"
 )
 
-// Outcomes of SetStatusInCluster and of identity reconciles, as recorded.
+// Outcomes of SetStatusInCluster, as recorded, and of identity reconciles, as recorded or logged.
 const (
-	outcomeNoop   = "noop"
-	outcomeStatus = "status"
-	outcomeOK     = "ok"
+	outcomeNoop     = "noop"
+	outcomeStatus   = "status"
+	outcomeOK       = "ok"
+	outcomeApplied  = "applied"
+	outcomeRemoved  = "removed"
+	outcomeError    = "error"
+	outcomeInTheWay = "in the way"
 )
 
-const (
-	pluginServiceName  = "plugin-telemetry"
-	metricsCardinality = 10000
-)
+const pluginServiceName = "plugin-telemetry"
 
 var errNoFiles = errors.New("the plugin's metrics exporter reads no files")
-
-type hookKey struct{ service, operation, outcome string }
 
 // PluginMetrics holds the plugin's self-metrics. A nil *PluginMetrics records nothing.
 type PluginMetrics struct {
 	reader *sdkmetric.ManualReader
 	mp     *sdkmetric.MeterProvider
-	// duration is set once by NewPluginMetrics.
-	duration metric.Float64Histogram
+	// The instruments are set once by NewPluginMetrics.
+	hookCalls  metric.Int64Counter
+	duration   metric.Float64Histogram
+	reconciles metric.Int64Counter
 	// initErr is the instrument setup failure Run returns.
 	initErr error
-
-	// mu guards calls and reconciles.
-	mu         sync.RWMutex
-	calls      map[hookKey]int64
-	reconciles map[string]int64
 }
 
 // NewPluginMetrics returns the plugin's self-metrics with their instruments registered on a
 // MeterProvider that only Run reads.
 func NewPluginMetrics() *PluginMetrics {
-	m := &PluginMetrics{
-		reader:     sdkmetric.NewManualReader(),
-		calls:      map[hookKey]int64{},
-		reconciles: map[string]int64{},
-	}
-	m.mp = sdkmetric.NewMeterProvider(
-		sdkmetric.WithReader(m.reader),
-		sdkmetric.WithView(selfmetrics.Views()...),
-		sdkmetric.WithExemplarFilter(exemplar.AlwaysOffFilter),
-		sdkmetric.WithCardinalityLimit(metricsCardinality),
-	)
+	m := &PluginMetrics{reader: sdkmetric.NewManualReader()}
+	m.mp = selfmetrics.NewMeterProvider(m.reader)
 	m.initErr = m.register(m.mp.Meter(export.ScopeName, metric.WithInstrumentationVersion(version.Version)))
 
 	return m
 }
 
-// register creates the instruments of the catalogue's plugin section on meter.
+// register creates the three plugin instruments on meter, with the unit and description of their
+// catalogue entries.
 func (m *PluginMetrics) register(meter metric.Meter) error {
-	var observables []metric.Observable
-	counters := map[string]metric.Int64ObservableCounter{}
+	defs := map[string]selfmetrics.Metric{}
 	for _, def := range selfmetrics.ByComponent(selfmetrics.ComponentPlugin) {
-		switch selfmetrics.Instrument(def.Instrument) {
-		case selfmetrics.InstrumentCounter:
-			c, err := meter.Int64ObservableCounter(def.Name, metric.WithUnit(def.Unit), metric.WithDescription(def.Description))
-			if err != nil {
-				return fmt.Errorf("create counter %s: %w", def.Name, err)
-			}
-			counters[def.Name] = c
-			observables = append(observables, c)
-		case selfmetrics.InstrumentHistogram:
-			if def.Name != selfmetrics.HookDuration {
-				return fmt.Errorf("histogram %s: no recorder", def.Name)
-			}
-			h, err := meter.Float64Histogram(def.Name, metric.WithUnit(def.Unit), metric.WithDescription(def.Description),
-				metric.WithExplicitBucketBoundaries())
-			if err != nil {
-				return fmt.Errorf("create histogram %s: %w", def.Name, err)
-			}
-			m.duration = h
-		case selfmetrics.InstrumentGauge:
-			return fmt.Errorf("metric %s: gauges are not used by the plugin", def.Name)
-		default:
-			return fmt.Errorf("metric %s: unknown instrument %q", def.Name, def.Instrument)
-		}
+		defs[def.Name] = def
 	}
-
-	_, err := meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
-		m.mu.RLock()
-		defer m.mu.RUnlock()
-		for k, v := range m.calls {
-			o.ObserveInt64(counters["cnpg_otel_plugin_hook_calls_total"], v, metric.WithAttributes(
-				attribute.String("service", k.service),
-				attribute.String("operation", k.operation),
-				attribute.String("outcome", k.outcome)))
+	var errs []error
+	counter := func(name string) metric.Int64Counter {
+		c, err := meter.Int64Counter(name, metric.WithUnit(defs[name].Unit), metric.WithDescription(defs[name].Description))
+		if err != nil {
+			errs = append(errs, fmt.Errorf("create counter %s: %w", name, err))
 		}
-		for outcome, v := range m.reconciles {
-			o.ObserveInt64(counters["cnpg_otel_plugin_identity_reconciles_total"], v,
-				metric.WithAttributes(attribute.String("outcome", outcome)))
-		}
-
-		return nil
-	}, observables...)
+		return c
+	}
+	m.hookCalls = counter(selfmetrics.HookCalls)
+	m.reconciles = counter(selfmetrics.IdentityReconciles)
+	h, err := meter.Float64Histogram(selfmetrics.HookDuration, metric.WithUnit(defs[selfmetrics.HookDuration].Unit),
+		metric.WithDescription(defs[selfmetrics.HookDuration].Description), metric.WithExplicitBucketBoundaries())
 	if err != nil {
-		return fmt.Errorf("register callback: %w", err)
+		errs = append(errs, fmt.Errorf("create histogram %s: %w", selfmetrics.HookDuration, err))
 	}
+	m.duration = h
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // Hook records one hook call and its duration. A nil receiver records nothing.
-func (m *PluginMetrics) Hook(service, operation, outcome string, d time.Duration) {
-	if m == nil {
+func (m *PluginMetrics) Hook(ctx context.Context, service, operation, outcome string, d time.Duration) {
+	if m == nil || m.initErr != nil {
 		return
 	}
-	m.mu.Lock()
-	m.calls[hookKey{service, operation, outcome}]++
-	m.mu.Unlock()
-
-	if m.duration != nil {
-		m.duration.Record(context.Background(), d.Seconds(), metric.WithAttributes(
-			attribute.String("service", service), attribute.String("operation", operation)))
-	}
+	m.hookCalls.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("service", service),
+		attribute.String("operation", operation),
+		attribute.String("outcome", outcome)))
+	m.duration.Record(ctx, d.Seconds(), metric.WithAttributes(
+		attribute.String("service", service), attribute.String("operation", operation)))
 }
 
-// IdentityReconcile records one identity controller reconcile, with outcome ok or error.
-// A nil receiver records nothing.
-func (m *PluginMetrics) IdentityReconcile(outcome string) {
-	if m == nil {
+// IdentityReconcile records one identity controller reconcile: outcome ok when err is nil, else
+// outcome error with the reason of err. A nil receiver records nothing.
+func (m *PluginMetrics) IdentityReconcile(ctx context.Context, err error) {
+	if m == nil || m.initErr != nil {
 		return
 	}
-	m.mu.Lock()
-	m.reconciles[outcome]++
-	m.mu.Unlock()
+	if err == nil {
+		m.reconciles.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", outcomeOK)))
+
+		return
+	}
+	m.reconciles.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("outcome", outcomeError), attribute.String("reason", failureReason(err))))
 }
 
-// collect reads the current metrics.
-func (m *PluginMetrics) collect(ctx context.Context) (*metricdata.ResourceMetrics, error) {
-	rm := &metricdata.ResourceMetrics{}
-	if err := m.reader.Collect(ctx, rm); err != nil {
-		return nil, fmt.Errorf("collect plugin metrics: %w", err)
+// reasonUnknown is the reason of an error with no known cause.
+const reasonUnknown = "Unknown"
+
+// apiReasons are the reasons the API defines (apimachinery v0.37.2 pkg/apis/meta/v1/types.go:919-1067, bar
+// Unknown), which bound the reason attribute.
+var apiReasons = map[metav1.StatusReason]struct{}{
+	metav1.StatusReasonUnauthorized:          {},
+	metav1.StatusReasonForbidden:             {},
+	metav1.StatusReasonNotFound:              {},
+	metav1.StatusReasonAlreadyExists:         {},
+	metav1.StatusReasonConflict:              {},
+	metav1.StatusReasonGone:                  {},
+	metav1.StatusReasonInvalid:               {},
+	metav1.StatusReasonServerTimeout:         {},
+	metav1.StatusReasonStoreReadError:        {},
+	metav1.StatusReasonTimeout:               {},
+	metav1.StatusReasonTooManyRequests:       {},
+	metav1.StatusReasonBadRequest:            {},
+	metav1.StatusReasonMethodNotAllowed:      {},
+	metav1.StatusReasonNotAcceptable:         {},
+	metav1.StatusReasonRequestEntityTooLarge: {},
+	metav1.StatusReasonUnsupportedMediaType:  {},
+	metav1.StatusReasonInternalError:         {},
+	metav1.StatusReasonExpired:               {},
+	metav1.StatusReasonServiceUnavailable:    {},
+}
+
+// failureReason names why err failed: the API status reason when the API defines it, Timeout for a
+// deadline, else Unknown. A server-supplied reason outside the API's list is Unknown.
+func failureReason(err error) string {
+	if reason := apierrors.ReasonForError(err); reason != metav1.StatusReasonUnknown {
+		if _, ok := apiReasons[reason]; ok {
+			return string(reason)
+		}
+
+		return reasonUnknown
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return string(metav1.StatusReasonTimeout)
 	}
 
-	return rm, nil
+	return reasonUnknown
 }
 
 // Run exports the metrics over OTLP with s until ctx ends. The resource is service.name
@@ -190,8 +184,11 @@ func (m *PluginMetrics) Run(ctx context.Context, s settings.Exporter) error {
 	}
 
 	rnd := rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())) //nolint:gosec // jitter, not security
-	loop := export.NewLoop(m.reader, pluginResource(os.Getenv), clock.RealClock{}, rnd, selfmetrics.NewStats())
-	loop.SetExporter(exp, s.Interval, s.MaxPointsPerRequest)
+	instance, err := export.Instance(os.Getenv, os.Hostname)
+	if err != nil {
+		log.FromContext(ctx).Info("naming the instance unknown", "error", err.Error())
+	}
+	loop := export.NewLoop(m.reader, pluginResource(os.Getenv, instance), clock.RealClock{}, rnd, selfmetrics.NewStats(), exp, s.Interval, s.MaxPointsPerRequest)
 
 	runErr := loop.Run(ctx)
 	if err := m.mp.Shutdown(context.WithoutCancel(ctx)); err != nil {
@@ -204,17 +201,9 @@ func (m *PluginMetrics) Run(ctx context.Context, s settings.Exporter) error {
 	return nil
 }
 
-// pluginResource builds the resource of the plugin's metrics from the downward-API env.
-func pluginResource(getenv func(string) string) *resource.Resource {
+// pluginResource builds the resource of the plugin's metrics from the downward-API env and the instance name.
+func pluginResource(getenv func(string) string, instance string) *resource.Resource {
 	namespace, pod := getenv("POD_NAMESPACE"), getenv("POD_NAME")
-	instance := pod
-	if instance == "" {
-		host, err := os.Hostname()
-		if err != nil {
-			host = "unknown"
-		}
-		instance = host
-	}
 
 	attrs := []attribute.KeyValue{
 		semconv.ServiceName(pluginServiceName),

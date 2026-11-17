@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -26,13 +25,14 @@ import (
 
 // States in ClusterStatus.
 const (
-	exporterOK       = "ok"
-	exporterMissing  = "missing"
-	exporterInvalid  = "invalid"
-	identityReady    = "ready"
-	identityPending  = "pending"
-	statusLogMessage = "set status"
+	exporterOK      = "ok"
+	exporterMissing = "missing"
+	exporterInvalid = "invalid"
+	identityReady   = "ready"
+	identityPending = "pending"
 )
+
+const statusLogMessage = "set status"
 
 // ClusterStatus is what the plugin stores in the Cluster's status.pluginStatus. Its JSON is
 // deterministic: fixed field order, sorted problems, no timestamps.
@@ -53,7 +53,7 @@ func (s ClusterStatus) Healthy() bool {
 type Status struct {
 	operator.UnimplementedOperatorServer
 	Reader   client.Reader     // cached Clusters and exporters
-	Identity *identity.Ensurer // Ready gives the identity state
+	Identity *identity.Ensurer // Pending gives the identity state
 	Metrics  *PluginMetrics    // nil records nothing
 }
 
@@ -74,7 +74,7 @@ func (*Status) GetCapabilities(context.Context, *operator.OperatorCapabilitiesRe
 func (s *Status) SetStatusInCluster(ctx context.Context, req *operator.SetStatusInClusterRequest) (*operator.SetStatusInClusterResponse, error) {
 	start := time.Now()
 	resp, outcome := s.setStatus(ctx, req)
-	s.Metrics.Hook(serviceOperator, operationSetStatus, outcome, time.Since(start)) //nolint:contextcheck // Hook takes no context
+	s.Metrics.Hook(ctx, serviceOperator, operationSetStatus, outcome, time.Since(start))
 
 	return resp, nil
 }
@@ -129,12 +129,6 @@ func (s *Status) compute(ctx context.Context, c *apiv1.Cluster, plugin apiv1.Plu
 	parsed, authErr := podpatch.ParseParams(plugin.Parameters)
 	var problems []string
 	if authErr != nil {
-		rest := maps.Clone(plugin.Parameters)
-		delete(rest, "auth")
-		var err error
-		if parsed, err = podpatch.ParseParams(rest); err != nil {
-			return ClusterStatus{}, fmt.Errorf("parse plugin parameters: %w", err)
-		}
 		problems = append(problems, fmt.Sprintf("auth %q is invalid: no sidecar is injected", plugin.Parameters["auth"]))
 	} else {
 		problems = append(problems, clusterconfig.SpecProblems(c, parsed.Params)...)
@@ -164,49 +158,19 @@ func (s *Status) compute(ctx context.Context, c *apiv1.Cluster, plugin apiv1.Plu
 		}
 	}
 
-	ready, identityProblems, err := s.identity(ctx, c)
+	pending, err := s.Identity.Pending(ctx, c.Namespace, c.Name)
 	if err != nil {
 		return ClusterStatus{}, fmt.Errorf("check identity of %s/%s: %w", c.Namespace, c.Name, err)
 	}
-	st.Identity = identityPending
-	if ready {
-		st.Identity = identityReady
+	st.Identity = identityReady
+	if len(pending) > 0 {
+		st.Identity = identityPending
 	}
-	problems = append(problems, identityProblems...)
+	problems = append(problems, pending...)
 	slices.Sort(problems)
 	st.Problems = problems
 
 	return st, nil
-}
-
-// identity reports whether the identity is ready and, when it is not, why the plugin applies none.
-func (s *Status) identity(ctx context.Context, c *apiv1.Cluster) (bool, []string, error) {
-	colliding, found, err := collidingCluster(ctx, s.Reader, c)
-	if err != nil {
-		return false, nil, err
-	}
-	if found {
-		return false, []string{fmt.Sprintf("Cluster %q has the name of this Cluster's identity objects: the plugin manages none",
-			colliding.Name)}, nil
-	}
-
-	ready, err := s.Identity.Ready(ctx, c.Namespace, c.Name)
-	if err != nil {
-		return false, nil, fmt.Errorf("read identity: %w", err)
-	}
-	if ready {
-		return true, nil, nil
-	}
-	foreign, err := s.Identity.Foreign(ctx, c)
-	if err != nil {
-		return false, nil, fmt.Errorf("look for foreign identity objects: %w", err)
-	}
-	problems := make([]string, 0, len(foreign))
-	for _, obj := range foreign {
-		problems = append(problems, obj+" exists and is not managed by the plugin: no identity is applied")
-	}
-
-	return false, problems, nil
 }
 
 // storedStatus returns the status CloudNativePG holds for this plugin.

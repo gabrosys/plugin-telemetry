@@ -15,7 +15,7 @@ type TelemetryExporter struct {
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	// Spec holds the exporter settings. It sets exporter.endpoint, or envFrom with an
-	// OTEL_EXPORTER_OTLP_ENDPOINT key.
+	// OTEL_EXPORTER_OTLP_METRICS_ENDPOINT or OTEL_EXPORTER_OTLP_ENDPOINT key.
 	Spec TelemetryExporterSpec `json:"spec"`
 }
 
@@ -31,7 +31,7 @@ type TelemetryExporterList struct {
 // TelemetryExporterSpec holds what every signal shares, then one section per signal.
 //
 // +kubebuilder:validation:XValidation:rule="(has(self.envFrom) && (has(self.envFrom.configMap) || has(self.envFrom.secret))) || (has(self.exporter) && has(self.exporter.endpoint))",message="set exporter.endpoint or envFrom"
-// +kubebuilder:validation:XValidation:rule="!has(self.exporter) || !has(self.exporter.timeout) || !has(self.metrics) || !has(self.metrics.interval) || duration(self.exporter.timeout).getMilliseconds() * 2 <= duration(self.metrics.interval).getMilliseconds()",message="exporter.timeout times 2 must not exceed metrics.interval"
+// +kubebuilder:validation:XValidation:rule="!has(self.exporter) || !has(self.exporter.timeout) || duration(self.exporter.timeout).getMilliseconds() * 2 <= (has(self.metrics) && has(self.metrics.interval) ? duration(self.metrics.interval).getMilliseconds() : 30000)",message="exporter.timeout times 2 must not exceed metrics.interval, which is 30s when not set"
 type TelemetryExporterSpec struct {
 	// Exporter is the OTLP connection every signal shares.
 	//
@@ -39,7 +39,8 @@ type TelemetryExporterSpec struct {
 	Exporter OTLPExporter `json:"exporter,omitempty"`
 
 	// EnvFrom names a ConfigMap and a Secret whose OTEL_EXPORTER_OTLP_* and OTEL_RESOURCE_ATTRIBUTES
-	// keys are read as settings.
+	// keys are read as settings. The endpoint comes from OTEL_EXPORTER_OTLP_METRICS_ENDPOINT or
+	// OTEL_EXPORTER_OTLP_ENDPOINT.
 	//
 	// +optional
 	EnvFrom *EnvFromSource `json:"envFrom,omitempty"`
@@ -70,6 +71,7 @@ type TelemetryExporterSpec struct {
 // OTLPExporter is the OTLP connection every signal shares.
 //
 // +kubebuilder:validation:XValidation:rule=`!has(self.endpoint) || self.endpoint.matches(r'^https?://[^@/?#\s]+(/[^?#\s]*)?$')`,fieldPath=".endpoint",message="endpoint must be a base http(s) URL with a host, and no user info, query or fragment"
+// +kubebuilder:validation:XValidation:rule="!has(self.endpoint) || isURL(self.endpoint)",fieldPath=".endpoint",message="endpoint must parse as a URL"
 // +kubebuilder:validation:XValidation:rule="!has(self.tls) || !has(self.endpoint) || self.endpoint.startsWith('https://')",message="tls requires an https:// endpoint"
 type OTLPExporter struct {
 	// Protocol is the OTLP transport: http/protobuf or grpc.
@@ -277,7 +279,9 @@ type QueryGroup struct {
 
 // Limits bounds what the queries may cost. A limit left unset keeps the sidecar's default.
 type Limits struct {
-	// MaxConnections is the most database connections the sidecar opens.
+	// MaxConnections is the most database connections the sidecar opens for queries. Every 10 seconds
+	// it also opens one more short connection, outside this cap, to see whether PostgreSQL is shutting
+	// down, so the monitoring role needs a connection limit of maxConnections + 1 or more.
 	//
 	// +kubebuilder:validation:Minimum=1
 	// +optional
@@ -319,19 +323,23 @@ type Limits struct {
 	// +optional
 	MaxLabelsPerSeries *int32 `json:"maxLabelsPerSeries,omitempty"`
 
-	// QueryTimeout is the time one query may run. At least 100ms.
+	// QueryTimeout is the time one query may run. At least 100ms. At most 1073741823ms, so twice it fits
+	// PostgreSQL's idle_in_transaction_session_timeout.
 	//
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MaxLength=32
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('100ms')",message="queryTimeout must be at least 100ms"
+	// +kubebuilder:validation:XValidation:rule="duration(self) <= duration('1073741823ms')",message="queryTimeout must be at most 1073741823ms"
 	// +optional
 	QueryTimeout *metav1.Duration `json:"queryTimeout,omitempty"`
 
-	// LockTimeout is the time a query waits for a lock. More than zero.
+	// LockTimeout is the time a query waits for a lock. More than zero, at most 2147483647ms (PostgreSQL's
+	// lock_timeout maximum).
 	//
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MaxLength=32
 	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="lockTimeout must be more than 0s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) <= duration('2147483647ms')",message="lockTimeout must be at most 2147483647ms"
 	// +optional
 	LockTimeout *metav1.Duration `json:"lockTimeout,omitempty"`
 }

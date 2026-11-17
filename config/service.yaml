@@ -2,11 +2,12 @@ apiVersion: v1
 kind: Service
 metadata:
   name: plugin-telemetry
+  namespace: cnpg-system
   labels:
     cnpg.io/pluginName: telemetry.gabrosys.github.io
   annotations:
     cnpg.io/pluginClientSecret: plugin-telemetry-client-tls
-    cnpg.io/pluginServerSecret: plugin-telemetry-server-tls
+    cnpg.io/pluginServerSecret: plugin-telemetry-ca-tls
     cnpg.io/pluginPort: "9090"
 spec:
   selector:

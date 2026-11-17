@@ -1,0 +1,11 @@
+apiVersion: telemetry.gabrosys.github.io/v1alpha1
+kind: TelemetryExporter
+metadata:
+  name: default
+  namespace: app
+spec:
+  envFrom:
+    secret: {name: otel-env}
+  exporter:
+    tls:
+      serverName: collector

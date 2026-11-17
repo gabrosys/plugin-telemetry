@@ -2,10 +2,10 @@
 package snapshot
 
 import (
+	"cmp"
 	"errors"
 	"math"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -16,9 +16,11 @@ import (
 // Key identifies a query running against a database.
 type Key struct{ Query, Database string }
 
-// Point is one series ready to export.
+// Point is one series ready to export. Points hands out the entry's own slices and histogram, which
+// are immutable after Put: read them, never write.
 type Point struct {
-	Key                 Key // set by Points
+	Key                 Key    // set by Points
+	ID                  string // queries.SeriesID of Metric and Labels, set by Put
 	Metric, Description string
 	Kind                queries.Kind
 	Labels              []queries.Label
@@ -42,7 +44,8 @@ type seriesState struct {
 type entry struct {
 	fingerprint string
 	observed    time.Time
-	points      []Point
+	points      []Point // nil after Fail
+	size        int     // the series of the last Put; the cap counts it, also after Fail
 	state       map[string]seriesState
 }
 
@@ -50,7 +53,7 @@ type entry struct {
 type Store struct {
 	mu             sync.RWMutex // covers every field below
 	maxSeriesTotal int
-	series         int
+	series         int // sum of entry sizes
 	entries        map[Key]*entry
 }
 
@@ -67,12 +70,17 @@ func (s *Store) SetMaxSeriesTotal(n int) {
 	s.maxSeriesTotal = n
 }
 
-// Series returns the number of series held.
+// Series returns the number of series exported: those of the entries that have not failed since their last Put.
 func (s *Store) Series() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return s.series
+	n := 0
+	for _, e := range s.entries {
+		n += len(e.points)
+	}
+
+	return n
 }
 
 // Put replaces the entry atomically, or returns ErrTotalCap and leaves it as it was.
@@ -83,7 +91,7 @@ func (s *Store) Put(k Key, fingerprint string, samples []queries.Sample, observe
 	old := s.entries[k]
 	oldSeries := 0
 	if old != nil {
-		oldSeries = len(old.points)
+		oldSeries = old.size
 	}
 	if s.maxSeriesTotal > 0 && s.series-oldSeries+len(samples) > s.maxSeriesTotal {
 		return ErrTotalCap
@@ -93,10 +101,13 @@ func (s *Store) Put(k Key, fingerprint string, samples []queries.Sample, observe
 		fingerprint: fingerprint,
 		observed:    observed,
 		points:      make([]Point, 0, len(samples)),
+		size:        len(samples),
 		state:       make(map[string]seriesState, len(samples)),
 	}
 	for _, sample := range samples {
+		id := queries.SeriesID(sample.Metric, sample.Labels)
 		p := Point{
+			ID:          id,
 			Metric:      sample.Metric,
 			Description: sample.Description,
 			Kind:        sample.Kind,
@@ -106,12 +117,12 @@ func (s *Store) Put(k Key, fingerprint string, samples []queries.Sample, observe
 			Observed:    observed,
 		}
 		if sample.Kind != queries.KindGauge {
-			p.Start = e.advance(old, seriesID(sample), sample, observed)
+			p.Start = e.advance(old, id, sample, observed)
 		}
 		e.points = append(e.points, p)
 	}
 
-	s.series += len(e.points) - oldSeries
+	s.series += e.size - oldSeries
 	s.entries[k] = e
 
 	return nil
@@ -147,14 +158,13 @@ func (e *entry) advance(old *entry, id string, sample queries.Sample, observed t
 	return st.start
 }
 
-// Delete removes the entry and its start times.
-func (s *Store) Delete(k Key) {
+// Fail stops exporting k's series and keeps its start times and its share of maxSeriesTotal until its next Put or a Retain that drops it.
+func (s *Store) Fail(k Key) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if e, ok := s.entries[k]; ok {
-		s.series -= len(e.points)
-		delete(s.entries, k)
+		e.points = nil
 	}
 }
 
@@ -165,14 +175,15 @@ func (s *Store) Retain(keep func(k Key, fingerprint string) bool) {
 
 	for k, e := range s.entries {
 		if !keep(k, e.fingerprint) {
-			s.series -= len(e.points)
+			s.series -= e.size
 			delete(s.entries, k)
 		}
 	}
 }
 
-// Points returns copies of every series, sorted by Metric then labels; across entries, the first
-// by (Query, Database) keeps a duplicate series and the others are counted.
+// Points returns every series, sorted by Metric then labels; across entries, the first
+// by (Query, Database) keeps a duplicate series and the others are counted. The points share
+// the store's memory: read only.
 func (s *Store) Points() (points []Point, duplicates map[Key]int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -181,66 +192,35 @@ func (s *Store) Points() (points []Point, duplicates map[Key]int) {
 	for k := range s.entries {
 		keys = append(keys, k)
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].Query != keys[j].Query {
-			return keys[i].Query < keys[j].Query
-		}
-
-		return keys[i].Database < keys[j].Database
+	slices.SortFunc(keys, func(a, b Key) int {
+		return cmp.Or(strings.Compare(a.Query, b.Query), strings.Compare(a.Database, b.Database))
 	})
 
 	duplicates = make(map[Key]int)
-	seen := make(map[string]struct{}, s.series)
-	points = make([]Point, 0, s.series)
+	exported := 0
+	for _, e := range s.entries {
+		exported += len(e.points)
+	}
+	seen := make(map[string]struct{}, exported)
+	points = make([]Point, 0, exported)
 	for _, k := range keys {
 		for _, p := range s.entries[k].points {
-			id := seriesID(queries.Sample{Metric: p.Metric, Labels: p.Labels})
-			if _, dup := seen[id]; dup {
+			if _, dup := seen[p.ID]; dup {
 				duplicates[k]++
 
 				continue
 			}
-			seen[id] = struct{}{}
+			seen[p.ID] = struct{}{}
 			p.Key = k
-			p.Labels = slices.Clone(p.Labels)
-			p.Histogram = cloneHistogram(p.Histogram)
 			points = append(points, p)
 		}
 	}
 
-	sort.SliceStable(points, func(i, j int) bool {
-		if points[i].Metric != points[j].Metric {
-			return points[i].Metric < points[j].Metric
-		}
-
-		return compareLabels(points[i].Labels, points[j].Labels) < 0
+	slices.SortStableFunc(points, func(a, b Point) int {
+		return cmp.Or(strings.Compare(a.Metric, b.Metric), slices.CompareFunc(a.Labels, b.Labels, queries.CompareLabels))
 	})
 
 	return points, duplicates
-}
-
-func compareLabels(a, b []queries.Label) int {
-	return slices.CompareFunc(a, b, func(x, y queries.Label) int {
-		if c := strings.Compare(x.Key, y.Key); c != 0 {
-			return c
-		}
-
-		return strings.Compare(x.Value, y.Value)
-	})
-}
-
-// seriesID joins the metric and labels with NUL and SOH separators.
-func seriesID(sample queries.Sample) string {
-	var b strings.Builder
-	b.WriteString(sample.Metric)
-	for _, l := range sample.Labels {
-		b.WriteString("\x00")
-		b.WriteString(l.Key)
-		b.WriteString("\x01")
-		b.WriteString(l.Value)
-	}
-
-	return b.String()
 }
 
 func cloneHistogram(h *queries.Histogram) *queries.Histogram {

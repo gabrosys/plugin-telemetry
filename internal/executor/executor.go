@@ -7,15 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
+	"runtime/debug"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/cloudnative-pg/machinery/pkg/log"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"k8s.io/utils/clock"
-
-	"github.com/cloudnative-pg/machinery/pkg/log"
 
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
@@ -25,7 +24,7 @@ import (
 )
 
 const (
-	// deadlineGrace lets the server's statement_timeout fire before the context deadline.
+	// deadlineGrace lets the guard's statement_timeout fire before the context deadline.
 	deadlineGrace = 2 * time.Second
 	// rollbackTimeout bounds the rollback of an unfinished transaction.
 	rollbackTimeout = 2 * time.Second
@@ -40,12 +39,12 @@ const (
 // Result is the outcome of one Run.
 type Result struct {
 	Job     planner.Job
-	Outcome selfmetrics.Outcome // ok, error, timeout, capped, denied
+	Outcome selfmetrics.Outcome // ok, error, timeout, capped, denied, skipped
 	Samples []queries.Sample    // nil unless ok
 	WouldBe int                 // capped: series counted before giving up
 	Dropped map[queries.DropReason]int
 	Err     error
-	// ConnectionLost is set when the connection broke during the run or none could be acquired.
+	// ConnectionLost is set when the connection broke during the run or a connect attempt failed.
 	ConnectionLost bool
 	Started        time.Time
 	Duration       time.Duration
@@ -67,8 +66,12 @@ func New(pool *pg.Pool, limits settings.Limits, server func() *semver.Version, c
 }
 
 // Classify maps an error to an outcome: SQLSTATE 57014 or 55P03, or a context deadline, is timeout;
-// SQLSTATE 42501 is denied.
+// SQLSTATE 42501 is denied; a closed pool, which a pool swap leaves behind, a wait that got no slot in time
+// and a superuser session role are skipped.
 func Classify(err error) selfmetrics.Outcome {
+	if errors.Is(err, pg.ErrPoolClosed) || errors.Is(err, pg.ErrNoSlot) || errors.Is(err, planner.ErrSuperuser) {
+		return selfmetrics.OutcomeSkipped
+	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		switch pgErr.Code {
@@ -92,16 +95,14 @@ func (e *Executor) Run(ctx context.Context, job planner.Job) (res Result) {
 			res.Outcome = selfmetrics.OutcomeError
 			res.Err = fmt.Errorf("panic in query %s on %s: %v", job.Query, job.Database, r)
 			res.Samples = nil
+			logCleanup(ctx, job, "recover a panic in a run", res.Err, "stack", string(debug.Stack()))
 		}
 		res.Duration = e.clk.Since(res.Started)
 	}()
 
-	ctx, cancel := context.WithTimeout(ctx, e.limits.QueryTimeout+deadlineGrace)
-	defer cancel()
-
-	if err := e.run(ctx, job, &res); err != nil {
+	if pastDeadline, err := e.run(ctx, job, &res); err != nil {
 		res.Outcome = Classify(err)
-		if res.Outcome != selfmetrics.OutcomeTimeout && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if res.Outcome != selfmetrics.OutcomeTimeout && pastDeadline {
 			res.Outcome = selfmetrics.OutcomeTimeout
 		}
 		res.Err = err
@@ -111,24 +112,41 @@ func (e *Executor) Run(ctx context.Context, job planner.Job) (res Result) {
 	return res
 }
 
-func (e *Executor) run(ctx context.Context, job planner.Job, res *Result) error {
-	conn, release, err := e.pool.Acquire(ctx, job.Database)
-	if err != nil {
-		// Waiting for a slot past the run's deadline, or a closed pool, loses no connection.
-		res.ConnectionLost = ctx.Err() == nil && !errors.Is(err, pg.ErrPoolClosed)
-		return fmt.Errorf("acquire connection to %s: %w", job.Database, err)
+// RunTimeout is the deadline of one run, which starts when the run has a pool slot.
+func RunTimeout(l settings.Limits) time.Duration { return l.QueryTimeout + deadlineGrace }
+
+// run waits for a pool slot for at most the job's interval (the query timeout without one), then runs the job under a deadline that starts at the slot.
+// pastDeadline reports that this deadline had passed when run returned.
+func (e *Executor) run(ctx context.Context, job planner.Job, res *Result) (pastDeadline bool, err error) {
+	maxWait := job.Interval
+	if maxWait <= 0 {
+		maxWait = e.limits.QueryTimeout
 	}
+	conn, release, err := e.pool.AcquireWithin(ctx, job.Database, maxWait)
+	if err != nil {
+		if errors.Is(err, pg.ErrNoSlot) {
+			return false, fmt.Errorf("query %s on database %s could not get a connection within %s: %w",
+				job.Query, job.Database, maxWait, pg.ErrNoSlot)
+		}
+		// A cancelled wait, the backoff after a failed connect and a closed pool lose no connection.
+		res.ConnectionLost = ctx.Err() == nil && !errors.Is(err, pg.ErrBackoff) && !errors.Is(err, pg.ErrPoolClosed)
+		return false, fmt.Errorf("acquire connection to %s: %w", job.Database, err)
+	}
+	rctx, cancel := context.WithTimeout(ctx, RunTimeout(e.limits))
+	defer cancel()
 	// A panic leaves broken true and ConnectionLost false.
 	broken := true
 	defer func() { release(broken) }()
 
-	discard, err := e.inTransaction(ctx, conn, job, res)
-	res.ConnectionLost = conn.IsClosed() || (err != nil && connectionFailed(ctx, conn, err))
+	discard, err := e.inTransaction(rctx, conn, job, res)
+	res.ConnectionLost = conn.IsClosed() || (err != nil && connectionFailed(conn, err))
 	broken = discard || res.ConnectionLost
-	return err
+	return errors.Is(rctx.Err(), context.DeadlineExceeded), err
 }
 
-// inTransaction runs the predicate and the query in one read-only transaction and commits it.
+// inTransaction runs the predicate and the query in one read-only transaction and commits it. The
+// transaction runs under the pool's guard unless the query reads the settings; such a query is bounded
+// by the cancel request the connection sends at the run deadline.
 func (e *Executor) inTransaction(ctx context.Context, conn *pgx.Conn, job planner.Job, res *Result) (discard bool, err error) {
 	tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
@@ -148,6 +166,19 @@ func (e *Executor) inTransaction(ctx context.Context, conn *pgx.Conn, job planne
 		}
 	}()
 
+	var superuser bool
+	if job.Def.ReadsSettings {
+		err = tx.QueryRow(ctx, pg.SuperuserSQL).Scan(&superuser)
+		if err != nil {
+			return false, fmt.Errorf("read rolsuper of the session role: %w", err)
+		}
+	} else if superuser, err = pg.ApplyGuard(ctx, tx, e.pool.Guard()); err != nil {
+		return false, fmt.Errorf("query transaction: %w", err)
+	}
+	if superuser {
+		return false, planner.ErrSuperuser
+	}
+
 	if job.Def.Predicate != "" {
 		collect, err := predicate(ctx, tx, job.Def.Predicate)
 		if err != nil {
@@ -161,7 +192,7 @@ func (e *Executor) inTransaction(ctx context.Context, conn *pgx.Conn, job planne
 
 	capped, err := e.collect(ctx, tx, job, res, &discard)
 	if err != nil {
-		return false, err
+		return discard, err
 	}
 	if capped {
 		res.Outcome = selfmetrics.OutcomeCapped
@@ -226,6 +257,8 @@ func (e *Executor) collect(ctx context.Context, tx pgx.Tx, job planner.Job, res 
 	}
 	defer rows.Close()
 
+	// seen holds at most maxSeries + 1 series IDs; a series past that is counted but not remembered, so WouldBe
+	// can overcount one that repeats. Limits are validated >= 1, so the bound holds whenever a cap is set.
 	var (
 		fields    []pgconn.FieldDescription
 		columns   []string
@@ -253,16 +286,15 @@ func (e *Executor) collect(ctx context.Context, tx pgx.Tx, job planner.Job, res 
 	for rows.Next() {
 		if rowCount == 0 {
 			if err := checkColumns(); err != nil {
+				// The rest of the result is not read, and the cancel request may land on a later statement.
+				*discard = true
+				e.stopStatement(ctx, tx, job, discard, "send the cancel request at a column mismatch")
 				return false, err
 			}
 		}
 		if maxRows > 0 && rowCount >= maxRows {
 			res.WouldBe = series
-			if err := e.cancel(ctx, tx.Conn()); err != nil {
-				// An undelivered or late cancel request could stop the next statement on this connection.
-				*discard = true
-				logCleanup(ctx, job, "send the cancel request at the row cap", err)
-			}
+			e.stopStatement(ctx, tx, job, discard, "send the cancel request at the row cap")
 			return true, nil
 		}
 		rowCount++
@@ -276,12 +308,14 @@ func (e *Executor) collect(ctx context.Context, tx pgx.Tx, job planner.Job, res 
 			res.Dropped[reason] += n
 		}
 		for _, s := range samples {
-			key := seriesKey(s)
-			if _, dup := seen[key]; dup {
+			id := queries.SeriesID(s.Metric, s.Labels)
+			if _, dup := seen[id]; dup {
 				res.Dropped[queries.DropDuplicate]++
 				continue
 			}
-			seen[key] = struct{}{}
+			if maxSeries <= 0 || len(seen) <= maxSeries {
+				seen[id] = struct{}{}
+			}
 			series++
 			if maxSeries > 0 && series > maxSeries {
 				overCap = true
@@ -306,6 +340,15 @@ func (e *Executor) collect(ctx context.Context, tx pgx.Tx, job planner.Job, res 
 	return false, nil
 }
 
+// stopStatement cancels the statement so that closing the rows does not read the rest of the result.
+// An undelivered or late cancel request could stop the next statement on this connection, so then it is discarded.
+func (e *Executor) stopStatement(ctx context.Context, tx pgx.Tx, job planner.Job, discard *bool, msg string) {
+	if err := e.cancel(ctx, tx.Conn()); err != nil {
+		*discard = true
+		logCleanup(ctx, job, msg, err)
+	}
+}
+
 // cancelStatement asks the server to stop the running statement, so closing the rows does not
 // read the rest of the result. Delivery is not guaranteed (pgconn.PgConn.CancelRequest).
 func cancelStatement(ctx context.Context, conn *pgx.Conn) error {
@@ -318,27 +361,16 @@ func cancelStatement(ctx context.Context, conn *pgx.Conn) error {
 }
 
 // logCleanup logs an error that does not change the outcome of the run.
-func logCleanup(ctx context.Context, job planner.Job, msg string, err error) {
-	log.FromContext(ctx).GetLogger().V(1).Info(msg, "query", job.Query, "database", job.Database, "error", err.Error())
-}
-
-// seriesKey is the metric name and the labels, which are sorted by key.
-func seriesKey(s queries.Sample) string {
-	var b strings.Builder
-	b.WriteString(s.Metric)
-	for _, l := range s.Labels {
-		b.WriteByte(0)
-		b.WriteString(l.Key)
-		b.WriteByte('=')
-		b.WriteString(l.Value)
-	}
-	return b.String()
+func logCleanup(ctx context.Context, job planner.Job, msg string, err error, kv ...any) {
+	kv = append([]any{"query", job.Query, "database", job.Database, "error", err.Error()}, kv...)
+	log.FromContext(ctx).GetLogger().V(1).Info(msg, kv...)
 }
 
 // connectionFailed reports whether the connection must be discarded: the pool does not ping idle
-// connections, and pgx closes the connection on a network error or a cancelled or expired context.
-func connectionFailed(ctx context.Context, conn *pgx.Conn, err error) bool {
-	if conn.IsClosed() || ctx.Err() != nil || pgconn.SafeToRetry(err) {
+// connections, and pgx closes the connection on a network error. At a context's end the server cancels
+// the statement and the connection stays usable, unless the cancel did not end it in time.
+func connectionFailed(conn *pgx.Conn, err error) bool {
+	if conn.IsClosed() || pgconn.SafeToRetry(err) {
 		return true
 	}
 	var netErr net.Error

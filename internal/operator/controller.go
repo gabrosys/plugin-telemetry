@@ -2,7 +2,10 @@ package operator
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	"github.com/cloudnative-pg/machinery/pkg/log"
@@ -21,35 +24,49 @@ import (
 	"github.com/gabrosys/plugin-telemetry/api/v1alpha1"
 	"github.com/gabrosys/plugin-telemetry/internal/clusterconfig"
 	"github.com/gabrosys/plugin-telemetry/internal/identity"
-	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/podpatch"
 )
+
+// ownedObjects drops create events: the plugin's own creates would re-trigger the Cluster before its cache holds them.
+var ownedObjects = predicate.Funcs{CreateFunc: func(event.CreateEvent) bool { return false }}
 
 // specChanged passes creates, deletes and updates that change metadata.generation.
 var specChanged = predicate.GenerationChangedPredicate{}
 
-// createdOrDeleted passes creates and deletes, the events that start or end a name collision.
-var createdOrDeleted = predicate.Funcs{UpdateFunc: func(event.UpdateEvent) bool { return false }}
-
 // IdentityController keeps identities current between CNPG reconciles: For(Cluster) with
-// GenerationChangedPredicate, Watches(Cluster) created or deleted mapped to the Cluster whose identity
-// has its name, Watches(TelemetryExporter, GenerationChangedPredicate) mapped to the Clusters in its
-// namespace whose exporter parameter names it, Owns(ServiceAccount, Role, RoleBinding, Secret).
+// GenerationChangedPredicate, Watches(TelemetryExporter, GenerationChangedPredicate) mapped to the
+// Clusters in its namespace whose exporter parameter names it, Owns(ServiceAccount, Role, RoleBinding, Secret).
 type IdentityController struct {
 	Client   client.Client
 	Identity *identity.Ensurer
 	Metrics  *PluginMetrics // nil records nothing
+
+	blocked sync.Map // Clusters whose "in the way" line was logged and hasn't cleared; keyed by namespaced name
 }
 
+// requeueInTheWay is the wait before Ensure retries after an object in the way; the cache may catch up
+// or the object's owner may be gone.
+const requeueInTheWay = 5 * time.Second
+
 // Reconcile ensures the identity of a Cluster that enables the plugin and removes it from one that does not.
-// It returns Ensure and Remove errors so the workqueue backs off, and never requeues on its own.
+// An object in the way requeues after 5 s; any other error goes to the workqueue's back-off.
 func (c *IdentityController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	err := c.reconcile(ctx, req)
-	outcome := outcomeOK
-	if err != nil {
-		outcome = outcomeError
+	c.Metrics.IdentityReconcile(ctx, err)
+
+	logger := log.FromContext(ctx)
+	switch {
+	case errors.Is(err, identity.ErrInTheWay):
+		if _, seen := c.blocked.LoadOrStore(req.NamespacedName, struct{}{}); !seen {
+			logger.Info("identity controller", "outcome", outcomeInTheWay, "reason", err.Error())
+		}
+
+		return ctrl.Result{RequeueAfter: requeueInTheWay}, nil
+	case err == nil:
+		if _, was := c.blocked.LoadAndDelete(req.NamespacedName); was {
+			logger.Info("identity controller", "outcome", outcomeInTheWay+" cleared")
+		}
 	}
-	c.Metrics.IdentityReconcile(outcome)
 
 	return ctrl.Result{}, err
 }
@@ -69,22 +86,6 @@ func (c *IdentityController) reconcile(ctx context.Context, req ctrl.Request) er
 
 	logger := log.FromContext(ctx)
 
-	colliding, found, err := collidingCluster(ctx, c.Client, &cluster)
-	if err != nil {
-		return err
-	}
-	if found {
-		changed, err := c.Identity.BackOff(ctx, &cluster, colliding)
-		if err != nil {
-			return fmt.Errorf("back off from cluster %s/%s: %w", colliding.Namespace, colliding.Name, err)
-		}
-		if len(changed) > 0 {
-			logger.Info("identity controller", "outcome", outcomeBackedOff, "objects", changed, "collidingCluster", colliding.Name)
-		}
-
-		return nil
-	}
-
 	refs, ok, err := referencesFor(ctx, c.Client, &cluster)
 	if err != nil {
 		return err
@@ -93,34 +94,26 @@ func (c *IdentityController) reconcile(ctx context.Context, req ctrl.Request) er
 		return c.remove(ctx, logger, &cluster)
 	}
 
-	res, err := c.Identity.Ensure(ctx, &cluster, refs)
+	wrote, err := c.Identity.Ensure(ctx, &cluster, refs)
+	if len(wrote) > 0 {
+		logger.Info("identity controller", "outcome", outcomeApplied, "objects", wrote)
+	}
 	if err != nil {
 		return fmt.Errorf("ensure identity of %s: %w", req.NamespacedName, err)
-	}
-	if len(res.Refused) > 0 {
-		logger.Info("identity controller", "outcome", outcomeRefused, "objects", res.Refused)
-	}
-	if len(res.Applied) > 0 {
-		logger.Info("identity controller", "outcome", outcomeApplied, "objects", res.Applied)
 	}
 
 	return nil
 }
 
-// remove deletes the identity when the cache still holds any of its objects.
+// remove deletes the identity objects the cache holds.
 func (c *IdentityController) remove(ctx context.Context, logger log.Logger, cluster *apiv1.Cluster) error {
-	present, err := c.Identity.Present(ctx, cluster.Namespace, cluster.Name)
+	removed, err := c.Identity.Remove(ctx, cluster.Namespace, cluster.Name)
+	if removed > 0 {
+		logger.Info("identity controller", "outcome", outcomeRemoved)
+	}
 	if err != nil {
-		return fmt.Errorf("check identity of %s/%s: %w", cluster.Namespace, cluster.Name, err)
-	}
-	if !present {
-		return nil
-	}
-
-	if err := c.Identity.Remove(ctx, cluster.Namespace, cluster.Name); err != nil {
 		return fmt.Errorf("remove identity of %s/%s: %w", cluster.Namespace, cluster.Name, err)
 	}
-	logger.Info("identity controller", "outcome", "removed")
 
 	return nil
 }
@@ -130,46 +123,18 @@ func (c *IdentityController) SetupWithManager(mgr manager.Manager) error {
 	err := ctrl.NewControllerManagedBy(mgr).
 		Named("identity").
 		For(&apiv1.Cluster{}, builder.WithPredicates(specChanged)).
-		Watches(&apiv1.Cluster{}, handler.EnqueueRequestsFromMapFunc(identityNameToCluster),
-			builder.WithPredicates(createdOrDeleted)).
 		Watches(&v1alpha1.TelemetryExporter{}, handler.EnqueueRequestsFromMapFunc(exportersToClusters(c.Client)),
 			builder.WithPredicates(specChanged)).
-		Owns(&corev1.ServiceAccount{}).
-		Owns(&rbacv1.Role{}).
-		Owns(&rbacv1.RoleBinding{}).
-		Owns(&corev1.Secret{}).
+		Owns(&corev1.ServiceAccount{}, builder.WithPredicates(ownedObjects)).
+		Owns(&rbacv1.Role{}, builder.WithPredicates(ownedObjects)).
+		Owns(&rbacv1.RoleBinding{}, builder.WithPredicates(ownedObjects)).
+		Owns(&corev1.Secret{}, builder.WithPredicates(ownedObjects)).
 		Complete(c)
 	if err != nil {
 		return fmt.Errorf("set up identity controller: %w", err)
 	}
 
 	return nil
-}
-
-// identityNameToCluster maps a Cluster to the Cluster whose identity objects have its name.
-func identityNameToCluster(_ context.Context, obj client.Object) []reconcile.Request {
-	owner, ok := metadata.IdentityOwner(obj.GetName())
-	if !ok {
-		return nil
-	}
-
-	return []reconcile.Request{{NamespacedName: client.ObjectKey{Namespace: obj.GetNamespace(), Name: owner}}}
-}
-
-// collidingCluster returns the cached Cluster in c's namespace that has the name of c's identity objects,
-// which CloudNativePG gives that Cluster's own ServiceAccount, Role and RoleBinding.
-func collidingCluster(ctx context.Context, r client.Reader, c *apiv1.Cluster) (*apiv1.Cluster, bool, error) {
-	var other apiv1.Cluster
-	key := client.ObjectKey{Namespace: c.Namespace, Name: metadata.ServiceAccountName(c.Name)}
-	err := r.Get(ctx, key, &other)
-	switch {
-	case apierrors.IsNotFound(err):
-		return nil, false, nil
-	case err != nil:
-		return nil, false, fmt.Errorf("get cluster %s: %w", key, err)
-	}
-
-	return &other, true, nil
 }
 
 // exportersToClusters maps a TelemetryExporter to the Clusters in its namespace whose enabled plugin
@@ -179,7 +144,8 @@ func exportersToClusters(r client.Reader) handler.MapFunc {
 		logger := log.FromContext(ctx)
 
 		var clusters apiv1.ClusterList
-		if err := r.List(ctx, &clusters, client.InNamespace(obj.GetNamespace())); err != nil {
+		// Items share the cache's maps and slices: read them, never write.
+		if err := r.List(ctx, &clusters, client.InNamespace(obj.GetNamespace()), client.UnsafeDisableDeepCopy); err != nil {
 			logger.Error(err, "list clusters for exporter", "namespace", obj.GetNamespace(), "exporter", obj.GetName())
 
 			return nil
@@ -213,8 +179,7 @@ func referencesFor(ctx context.Context, r client.Reader, c *apiv1.Cluster) (clus
 
 	parsed, err := podpatch.ParseParams(plugin.Parameters)
 	if err != nil {
-		log.FromContext(ctx).Error(err, "invalid plugin parameters, no identity ensured",
-			"namespace", c.Namespace, "cluster", c.Name)
+		log.FromContext(ctx).Error(err, "invalid plugin parameters, no identity ensured")
 
 		return clusterconfig.Refs{}, false, nil
 	}

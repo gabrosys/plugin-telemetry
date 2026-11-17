@@ -4,71 +4,126 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	clocktesting "k8s.io/utils/clock/testing"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/gabrosys/plugin-telemetry/internal/sources"
 )
-
-const debounce = 200 * time.Millisecond
 
 var _ = Describe("Watch", func() {
 	var (
 		dir    string
 		file   string
+		clk    *clocktesting.FakeClock
 		count  atomic.Int32
+		list   atomic.Pointer[[]string]
+		errs   chan error
 		cancel context.CancelFunc
 		done   chan error
+
+		mu    sync.Mutex // guards lines
+		lines []string
 	)
 
-	start := func(files ...string) {
+	setFiles := func(files ...string) { list.Store(&files) }
+	files := func() []string { return *list.Load() }
+
+	logged := func(text string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		n := 0
+		for _, l := range lines {
+			if strings.Contains(l, text) {
+				n++
+			}
+		}
+		return n
+	}
+
+	// startWith runs watch and returns once it has notified that it is watching.
+	startWith := func(watch func(ctx context.Context, notify func()) error, fs ...string) {
+		GinkgoHelper()
+		setFiles(fs...)
+		logger := funcr.New(func(_, args string) {
+			mu.Lock()
+			defer mu.Unlock()
+			lines = append(lines, args)
+		}, funcr.Options{})
 		var ctx context.Context
-		ctx, cancel = context.WithCancel(context.Background())
-		done = make(chan error, 1)
-		count.Store(0)
-		ready := make(chan struct{})
+		ctx, cancel = context.WithCancel(ctrllog.IntoContext(context.Background(), logger))
 		go func() {
-			done <- sources.Watch(ctx, files, debounce, func() { count.Add(1) },
-				sources.WithReady(func() { close(ready) }))
+			done <- watch(ctx, func() { count.Add(1) })
 		}()
-		Eventually(ready).Should(BeClosed())
+		Eventually(count.Load, 5*time.Second).Should(Equal(int32(1)), "notifies once watching")
+	}
+
+	// start runs Watch on the fake clock.
+	start := func(fs ...string) {
+		GinkgoHelper()
+		startWith(func(ctx context.Context, notify func()) error { return sources.WatchWith(ctx, clk, files, notify) }, fs...)
+	}
+
+	// atLeast waits for n notifications; one change can raise several events.
+	atLeast := func(n int32) {
+		GinkgoHelper()
+		Eventually(count.Load, 5*time.Second).Should(BeNumerically(">=", n))
+	}
+
+	expect := func(n int32) {
+		GinkgoHelper()
+		Eventually(count.Load, 5*time.Second).Should(Equal(n))
+		Consistently(count.Load, 200*time.Millisecond).Should(Equal(n))
 	}
 
 	BeforeEach(func() {
 		dir = GinkgoT().TempDir()
 		file = filepath.Join(dir, "queries.yaml")
 		write(file, "a:\n  query: SELECT 1\n")
+		clk = clocktesting.NewFakeClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
+		count.Store(0)
+		errs = make(chan error)
+		done = make(chan error, 1)
+		mu.Lock()
+		lines = nil
+		mu.Unlock()
 	})
 
 	AfterEach(func() {
 		cancel()
-		Eventually(done).Should(Receive(BeNil()))
+		Eventually(done, 5*time.Second).Should(Receive(BeNil()))
 	})
 
-	expectOne := func() {
-		GinkgoHelper()
-		Eventually(count.Load, debounce+time.Second).Should(Equal(int32(1)))
-		Consistently(count.Load, 2*debounce).Should(Equal(int32(1)))
-	}
+	It("notifies once watching and not again without a change", func() {
+		start(file)
+		expect(1)
+		clk.Step(sources.WatchRetry)
+		expect(1)
+	})
 
-	It("notifies once after a write", func() {
+	It("notifies after a write", func() {
 		start(file)
 		write(file, "a:\n  query: SELECT 2\n")
-		expectOne()
+		atLeast(2)
 	})
 
-	It("notifies once after an editor-style rename over the file", func() {
+	It("notifies after an editor-style rename over the file", func() {
 		start(file)
 		tmp := filepath.Join(dir, ".queries.yaml.swp")
 		write(tmp, "a:\n  query: SELECT 2\n")
 		Expect(os.Rename(tmp, file)).To(Succeed())
-		expectOne()
+		atLeast(2)
 	})
 
-	It("notifies once after a kubernetes-style ..data symlink swap", func() {
+	It("notifies after a kubernetes-style ..data symlink swap", func() {
 		Expect(os.Remove(file)).To(Succeed())
 		v1 := filepath.Join(dir, "..2026_1")
 		v2 := filepath.Join(dir, "..2026_2")
@@ -84,38 +139,91 @@ var _ = Describe("Watch", func() {
 		Expect(os.Symlink("..2026_2", filepath.Join(dir, "..data_tmp"))).To(Succeed())
 		Expect(os.Rename(filepath.Join(dir, "..data_tmp"), filepath.Join(dir, "..data"))).To(Succeed())
 		Expect(os.RemoveAll(v1)).To(Succeed())
-		expectOne()
+		atLeast(2)
 	})
 
-	It("notifies once for ten writes inside the debounce window", func() {
+	It("notifies once after files() adds a directory, then watches it", func() {
+		other := filepath.Join(GinkgoT().TempDir(), "headers")
+		write(other, "a=1")
 		start(file)
-		for i := range 10 {
-			write(file, "a:\n  query: SELECT "+string(rune('0'+i))+"\n")
-			time.Sleep(5 * time.Millisecond)
+
+		setFiles(file, other)
+		clk.Step(sources.WatchRetry)
+		expect(2)
+
+		write(other, "a=2")
+		atLeast(3)
+	})
+
+	It("stops watching a directory files() no longer lists", func() {
+		other := filepath.Join(GinkgoT().TempDir(), "headers")
+		write(other, "a=1")
+		start(file, other)
+
+		setFiles(file)
+		clk.Step(sources.WatchRetry)
+		Eventually(clk.Waiters, 5*time.Second).Should(Equal(1))
+		write(other, "a=2")
+		expect(1)
+	})
+
+	It("retries a missing directory every 5 s, logging it and its recovery once", func() {
+		// The missing directory sits outside the watched ones, so creating it raises no event.
+		missing := filepath.Join(GinkgoT().TempDir(), "later")
+		start(file, filepath.Join(missing, "q.yaml"))
+		Expect(logged("watch the configuration files")).To(Equal(1))
+
+		for range 3 {
+			clk.Step(sources.WatchRetry)
+			Eventually(clk.Waiters, 5*time.Second).Should(Equal(1))
 		}
-		expectOne()
+		Expect(logged("watch the configuration files")).To(Equal(1))
+		expect(1)
+
+		Expect(os.Mkdir(missing, 0o700)).To(Succeed())
+		clk.Step(sources.WatchRetry)
+		expect(2)
+		Expect(logged("watching the configuration files again")).To(Equal(1))
+
+		// A rename raises one event; a create followed by a write would raise two, and the second could land after the step.
+		tmp := filepath.Join(filepath.Dir(missing), "q.yaml.tmp")
+		write(tmp, "b:\n  query: SELECT 1\n")
+		Expect(os.Rename(tmp, filepath.Join(missing, "q.yaml"))).To(Succeed())
+		expect(3)
+		Expect(logged("watch the configuration files")).To(Equal(1))
+		Expect(logged("watching the configuration files again")).To(Equal(1))
 	})
 
-	It("notifies for a write made right after ready fires", func() {
-		ctx, c := context.WithCancel(context.Background())
-		cancel = c
-		done = make(chan error, 1)
-		count.Store(0)
-		ready := make(chan struct{})
-		go func() {
-			done <- sources.Watch(ctx, []string{file}, debounce, func() { count.Add(1) },
-				sources.WithReady(func() { close(ready) }))
-		}()
-		<-ready
-		write(file, "a:\n  query: SELECT 9\n")
-		expectOne()
+	It("logs an fsnotify error once and notifies", func() {
+		startWith(func(ctx context.Context, notify func()) error {
+			return sources.WatchWithErrors(ctx, clk, files, notify, errs)
+		}, file)
+		errs <- fsnotify.ErrEventOverflow
+		expect(2)
+		errs <- fsnotify.ErrEventOverflow
+		expect(3)
+		Expect(logged("overflow")).To(Equal(1))
 	})
 
-	It("returns an error when a directory can't be watched", func() {
-		cancel = func() {}
-		done = make(chan error, 1)
-		done <- nil
-		err := sources.Watch(context.Background(), []string{filepath.Join(dir, "nope", "q.yaml")}, debounce, func() {})
-		Expect(err).To(HaveOccurred())
+	It("logs each kind of failure once while they alternate, and each recovery once", func() {
+		missing := filepath.Join(dir, "later")
+		startWith(func(ctx context.Context, notify func()) error {
+			return sources.WatchWithErrors(ctx, clk, files, notify, errs)
+		}, file, filepath.Join(missing, "q.yaml"))
+		for range 3 {
+			errs <- fsnotify.ErrEventOverflow
+			clk.Step(sources.WatchRetry)
+			Eventually(clk.Waiters, 5*time.Second).Should(Equal(1))
+		}
+		Expect(logged("watch " + missing)).To(Equal(1))
+		Expect(logged("overflow")).To(Equal(1))
+		Expect(logged("watching the configuration files again")).To(BeZero())
+
+		Expect(os.Mkdir(missing, 0o700)).To(Succeed())
+		clk.Step(sources.WatchRetry)
+		Eventually(func() int { return logged("watching the configuration files again") }, 5*time.Second).Should(Equal(2),
+			"the directory and the fsnotify errors recover")
+		Expect(logged("watch " + missing)).To(Equal(1))
+		Expect(logged("overflow")).To(Equal(1))
 	})
 })

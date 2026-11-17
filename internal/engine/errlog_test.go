@@ -10,6 +10,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/gabrosys/plugin-telemetry/internal/engine"
+	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 )
 
 var _ = Describe("errorLog", func() {
@@ -27,7 +28,7 @@ var _ = Describe("errorLog", func() {
 
 	It("logs ten identical failures once", func() {
 		for range 10 {
-			l.Failed(logger, "backends", "app", errors.New("connection refused"))
+			l.Failed(logger, "backends", "app", selfmetrics.OutcomeError, errors.New("connection refused"))
 		}
 		Expect(lines).To(HaveLen(1))
 		Expect(lines[0]).To(And(
@@ -37,33 +38,45 @@ var _ = Describe("errorLog", func() {
 		))
 	})
 
-	It("logs a new line when the message changes, once per distinct message", func() {
-		for _, msg := range []string{"a", "a", "b", "b", "a", "b"} {
-			l.Failed(logger, "backends", "app", errors.New(msg))
+	It("logs ten failures whose messages differ by an ephemeral port once", func() {
+		for i := range 10 {
+			l.Failed(logger, "backends", "app", selfmetrics.OutcomeError, fmt.Errorf("dial tcp 10.0.0.1:%d: connection refused", 40000+i))
 		}
-		Expect(lines).To(HaveLen(2))
-		Expect(lines[0]).To(ContainSubstring(`"error"="a"`))
-		Expect(lines[1]).To(ContainSubstring(`"error"="b"`))
+		Expect(lines).To(HaveLen(1))
 	})
 
-	It("remembers a bounded number of messages", func() {
-		for i := range engine.MaxMessages + 1 {
-			l.Failed(logger, "backends", "app", fmt.Errorf("attempt %d", i))
-		}
-		Expect(lines).To(HaveLen(engine.MaxMessages + 1))
-		l.Failed(logger, "backends", "app", errors.New("attempt 0"))
-		Expect(lines).To(HaveLen(engine.MaxMessages + 2))
+	It("forgets a failure whatever its outcome when the query succeeds", func() {
+		err := errors.New("boom")
+		l.Failed(logger, "backends", "app", selfmetrics.Outcome("some-later-outcome"), err)
+		l.Succeeded(logger, "backends", "app")
+		Expect(lines).To(HaveLen(2), "the failure and its recovery")
+		l.Failed(logger, "backends", "app", selfmetrics.Outcome("some-later-outcome"), err)
+		Expect(lines).To(HaveLen(3))
+	})
+
+	It("logs a new line when the outcome changes", func() {
+		err := errors.New("boom")
+		l.Failed(logger, "backends", "app", selfmetrics.OutcomeError, err)
+		l.Failed(logger, "backends", "app", selfmetrics.OutcomeTimeout, err)
+		l.Failed(logger, "backends", "app", selfmetrics.OutcomeError, err)
+		l.Failed(logger, "backends", "app", selfmetrics.OutcomeTimeout, err)
+		Expect(lines).To(HaveLen(2))
+
+		l.Succeeded(logger, "backends", "app")
+		Expect(lines).To(HaveLen(3), "one recovery for every outcome")
+		l.Failed(logger, "backends", "app", selfmetrics.OutcomeError, err)
+		Expect(lines).To(HaveLen(4))
 	})
 
 	It("logs one recovery line, and the next failure again", func() {
-		l.Failed(logger, "backends", "app", errors.New("connection refused"))
+		l.Failed(logger, "backends", "app", selfmetrics.OutcomeError, errors.New("connection refused"))
 		l.Succeeded(logger, "backends", "app")
 		l.Succeeded(logger, "backends", "app")
 		Expect(lines).To(HaveLen(2))
 		Expect(lines[1]).To(And(ContainSubstring(`"query"="backends"`), ContainSubstring(`"database"="app"`)))
 		Expect(lines[1]).NotTo(ContainSubstring(`"error"`))
 
-		l.Failed(logger, "backends", "app", errors.New("connection refused"))
+		l.Failed(logger, "backends", "app", selfmetrics.OutcomeError, errors.New("connection refused"))
 		Expect(lines).To(HaveLen(3))
 	})
 
@@ -74,15 +87,15 @@ var _ = Describe("errorLog", func() {
 
 	It("keeps each query and database apart", func() {
 		err := errors.New("connection refused")
-		l.Failed(logger, "backends", "app", err)
-		l.Failed(logger, "backends", "postgres", err)
-		l.Failed(logger, "pg_database", "app", err)
+		l.Failed(logger, "backends", "app", selfmetrics.OutcomeError, err)
+		l.Failed(logger, "backends", "postgres", selfmetrics.OutcomeError, err)
+		l.Failed(logger, "pg_database", "app", selfmetrics.OutcomeError, err)
 		Expect(lines).To(HaveLen(3))
 
 		l.Succeeded(logger, "backends", "postgres")
 		Expect(lines).To(HaveLen(4))
 		Expect(lines[3]).To(ContainSubstring(`"database"="postgres"`))
-		l.Failed(logger, "backends", "app", err)
+		l.Failed(logger, "backends", "app", selfmetrics.OutcomeError, err)
 		Expect(lines).To(HaveLen(4))
 	})
 })

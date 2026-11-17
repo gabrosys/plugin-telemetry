@@ -10,8 +10,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
@@ -56,7 +55,7 @@ var _ = Describe("Status.SetStatusInCluster", func() {
 	status := func() *operator.Status {
 		c := newClient(objs, funcs)
 
-		return &operator.Status{Reader: c, Identity: &identity.Ensurer{Reader: c, Live: c, Writer: c}}
+		return &operator.Status{Reader: c, Identity: &identity.Ensurer{Reader: c, Writer: c}}
 	}
 
 	call := func(s *operator.Status, c *apiv1.Cluster) []byte {
@@ -103,12 +102,14 @@ var _ = Describe("Status.SetStatusInCluster", func() {
 	It("reports the exporter invalid with the first error", func() {
 		e := newExporterWithEndpoint()
 		e.Spec.Exporter.Endpoint = "ftp://c"
+		e.Spec.Metrics.Limits.MaxRowsPerQuery = ptr.To[int32](0)
 		objs = append([]client.Object{e}, identityObjects(true)...)
 
 		st := decode(call(status(), cluster))
 
 		Expect(st.ExporterState).To(Equal("invalid"))
-		Expect(st.Message).To(ContainSubstring("endpoint"))
+		Expect(st.Message).To(ContainSubstring("maxRowsPerQuery"))
+		Expect(st.Message).NotTo(ContainSubstring("endpoint"))
 	})
 
 	It("reports the exporter named by the parameters", func() {
@@ -129,29 +130,35 @@ var _ = Describe("Status.SetStatusInCluster", func() {
 		Expect(decode(call(status(), cluster)).Identity).To(Equal("pending"))
 	})
 
-	It("reports identity pending with the Cluster that has the identity's name", func() {
-		objs = append(objs, newCluster("ns", "pg-telemetry"))
+	It("reports the identity from its four objects whatever other Clusters the namespace holds", func() {
+		objs = append(append([]client.Object{newExporterWithEndpoint()}, identityObjects(true)...), newCluster("ns", "pg-telemetry"))
 
 		st := decode(call(status(), cluster))
 
-		Expect(st.Identity).To(Equal("pending"))
-		Expect(st.Problems).To(ConsistOf(`Cluster "pg-telemetry" has the name of this Cluster's identity objects: the plugin manages none`))
+		Expect(st.Identity).To(Equal("ready"))
+		Expect(st.Problems).To(BeEmpty())
 	})
 
-	It("reports identity pending with each identity object the plugin doesn't manage", func() {
-		objs = []client.Object{
-			newExporterWithEndpoint(),
-			&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg-telemetry"}},
-			&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg-telemetry"}},
-		}
+	It("reports pending with one line per object missing from the cache", func() {
+		objs = []client.Object{newExporterWithEndpoint(), identityObjects(true)[3]}
+
+		st := decode(call(status(), cluster))
+
+		const missing = " is not in the plugin's cache: not created yet, or not the plugin's"
+		Expect(st.Identity).To(Equal("pending"))
+		Expect(st.Problems).To(ConsistOf("Role/pg.telemetry"+missing, "RoleBinding/pg.telemetry"+missing, "Secret/pg.telemetry-token"+missing))
+	})
+
+	It("reports a token Secret of another type as pending with its line", func() {
+		objs = identityObjects(true)
+		token, ok := objs[0].(*corev1.Secret)
+		Expect(ok).To(BeTrue())
+		token.Type = corev1.SecretTypeOpaque
 
 		st := decode(call(status(), cluster))
 
 		Expect(st.Identity).To(Equal("pending"))
-		Expect(st.Problems).To(ConsistOf(
-			"Role/pg-telemetry exists and is not managed by the plugin: no identity is applied",
-			"ServiceAccount/pg-telemetry exists and is not managed by the plugin: no identity is applied",
-		))
+		Expect(st.Problems).To(ConsistOf("Secret/pg.telemetry-token has type Opaque, not kubernetes.io/service-account-token: delete it"))
 	})
 
 	It("lists the spec problems and parameter problems, sorted", func() {
@@ -283,19 +290,38 @@ var _ = Describe("Status.SetStatusInCluster", func() {
 
 	It("never returns an error, for undecodable input too", func() {
 		s := status()
+		ctx, all := captureAll(ctx, 2)
 
 		resp, err := s.SetStatusInCluster(ctx, &cnpgoperator.SetStatusInClusterRequest{Cluster: []byte("{")})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(resp.GetJsonStatus()).To(BeEmpty())
+		Expect(all()).To(ContainElement(SatisfyAll(
+			HaveKeyWithValue("msg", "decode set status request"),
+			HaveKey("error"),
+		)))
 
 		resp, err = s.SetStatusInCluster(ctx, &cnpgoperator.SetStatusInClusterRequest{})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(resp.GetJsonStatus()).To(BeEmpty())
 	})
 
+	It("never returns an error when only the identity read fails", func() {
+		funcs.Get = func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, o ...client.GetOption) error {
+			if _, ok := obj.(*v1alpha1.TelemetryExporter); ok {
+				return c.Get(ctx, key, obj, o...)
+			}
+
+			return errGet
+		}
+
+		resp, err := status().SetStatusInCluster(ctx, hookStatusRequest(cluster))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.GetJsonStatus()).To(BeEmpty())
+	})
+
 	It("never returns an error when the cache fails", func() {
 		funcs.Get = func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-			return errApply
+			return errGet
 		}
 
 		resp, err := status().SetStatusInCluster(ctx, hookStatusRequest(cluster))

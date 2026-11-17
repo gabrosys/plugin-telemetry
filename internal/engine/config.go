@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
+	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
+
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
 	"github.com/gabrosys/plugin-telemetry/internal/sources"
 )
@@ -14,17 +16,27 @@ import (
 // ErrNoConfiguration is what Config.Settings wraps when there is nothing to run.
 var ErrNoConfiguration = errors.New("no configuration")
 
+// ErrNotReady is what Config.Settings wraps when an input has not synced or is denied: the engine
+// keeps the configuration in force, counts no load and waits.
+var ErrNotReady = errors.New("configuration not ready")
+
 // Config is where the engine reads its settings and the files they name.
 type Config interface {
 	// Name labels the settings in logs and in the source attribute: the file path, or "kubernetes".
 	Name() string
 	// Settings reads and validates the settings; the bytes identify what they came from and enter
-	// the reload digest. An error wrapping ErrNoConfiguration means there is nothing to run.
+	// the reload digest. An error wrapping ErrNoConfiguration means there is nothing to run;
+	// one wrapping ErrNotReady means an input is not available yet.
 	Settings() (settings.Settings, []byte, error)
 	// ReadFile reads a file the settings name: fs.ErrNotExist when missing, sources.ErrDenied on a 403.
 	ReadFile(name string) ([]byte, error)
-	// Watch calls notify, debounced, after any change to the settings or to files, and returns nil when ctx ends.
-	Watch(ctx context.Context, files []string, notify func(), opts ...sources.WatchOption) error
+	// Watch calls notify once it is watching, then after changes to the settings or the files files()
+	// lists; it returns nil only when ctx ends.
+	Watch(ctx context.Context, files func() []string, notify func()) error
+	// Sensitive reports whether the named file holds secret data.
+	Sensitive(name string) bool
+	// Cluster returns the instance's Cluster when the Config watches one.
+	Cluster() (*apiv1.Cluster, bool)
 }
 
 // fileConfig reads the settings from a YAML file and every other file from the file system.
@@ -57,24 +69,14 @@ func (fileConfig) ReadFile(name string) ([]byte, error) {
 }
 
 // Watch also watches the settings file.
-func (c fileConfig) Watch(ctx context.Context, files []string, notify func(), opts ...sources.WatchOption) error {
-	if err := sources.Watch(ctx, append([]string{c.path}, files...), watchDebounce, notify, opts...); err != nil {
+func (c fileConfig) Watch(ctx context.Context, files func() []string, notify func()) error {
+	withSettings := func() []string { return append([]string{c.path}, files()...) }
+	if err := sources.Watch(ctx, withSettings, notify); err != nil {
 		return fmt.Errorf("watch files: %w", err)
 	}
 	return nil
 }
 
-// sensitiveConfig is implemented by a Config whose files may hold secret data.
-type sensitiveConfig interface {
-	// Sensitive reports whether the named file holds secret data.
-	Sensitive(name string) bool
-}
+func (fileConfig) Sensitive(string) bool { return false }
 
-// LoaderOptions returns the sources.Loader options that follow from cfg.
-func LoaderOptions(cfg Config) []sources.LoaderOption {
-	if s, ok := cfg.(sensitiveConfig); ok {
-		return []sources.LoaderOption{sources.WithSensitive(s.Sensitive)}
-	}
-
-	return nil
-}
+func (fileConfig) Cluster() (*apiv1.Cluster, bool) { return nil, false }

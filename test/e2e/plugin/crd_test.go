@@ -12,6 +12,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
@@ -20,7 +21,7 @@ import (
 )
 
 // strictFieldValidation is fieldValidation=Strict, which kubectl applies by default.
-const strictFieldValidation = client.FieldValidation("Strict")
+const strictFieldValidation = client.FieldValidation(metav1.FieldValidationStrict)
 
 const (
 	fixturesDir = "../../../api/v1alpha1/testdata"

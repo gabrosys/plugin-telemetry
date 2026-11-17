@@ -4,51 +4,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/gabrosys/plugin-telemetry/internal/pg"
+	"github.com/gabrosys/plugin-telemetry/internal/planner"
+	"github.com/gabrosys/plugin-telemetry/internal/settings"
 )
 
 const (
-	connectTimeout  = 5 * time.Second
-	queryTimeout    = 10 * time.Second
-	applicationName = "cnpg_otel_preflight"
-
-	preflightQuery = `SELECT current_user,
-       (SELECT count(*) FROM pg_catalog.pg_ls_waldir()),
-       (SELECT count(*) FROM pg_catalog.pg_ls_archive_statusdir())`
+	checkTimeout = 15 * time.Second
+	passwordFile = "password"
 )
 
-// ConnConfig builds the connection configuration. A host starting with / is
-// a socket directory and gets no TLS.
-func ConnConfig(c PostgresConfig) (*pgx.ConnConfig, error) {
-	dsn := strings.Join([]string{
-		"host=" + quoteValue(c.Host),
-		"port=" + strconv.Itoa(int(c.Port)),
-		"user=" + quoteValue(c.User),
-		"dbname=" + quoteValue(c.Database),
-		"password=" + quoteValue(c.Password),
-	}, " ")
-
-	cc, err := pgx.ParseConfig(dsn)
-	if err != nil {
-		return nil, fmt.Errorf("parse connection config: %w", err)
-	}
-
-	cc.RuntimeParams["default_transaction_read_only"] = "on"
-	cc.RuntimeParams["application_name"] = applicationName
-	cc.ConnectTimeout = connectTimeout
-
-	return cc, nil
-}
-
-// quoteValue quotes a keyword/value connection string value.
-func quoteValue(v string) string {
-	return "'" + strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(v) + "'"
-}
+// query is the check the PostgreSQL report shows; a var so tests can see inside its transaction.
+var query = `SELECT current_user,
+       (SELECT count(*) FROM pg_catalog.pg_ls_waldir()),
+       (SELECT count(*) FROM pg_catalog.pg_ls_archive_statusdir())`
 
 // SQLState returns the SQLSTATE and "SEVERITY: message" of a PostgreSQL
 // error, or an empty code and the error text for any other error.
@@ -75,12 +49,25 @@ func checkPostgres(ctx context.Context, cfg PostgresConfig, precondition error) 
 		return rep
 	}
 
-	cc, err := ConnConfig(cfg)
-	if err != nil {
-		return fail(err)
+	limits := settings.Defaults().Limits
+	pgCfg := pg.Config{
+		Host:         cfg.Host,
+		Port:         cfg.Port,
+		User:         cfg.User,
+		QueryTimeout: limits.QueryTimeout,
+		LockTimeout:  limits.LockTimeout,
+	}
+	if cfg.Password != "" {
+		pgCfg.PasswordFile = passwordFile
+		pgCfg.ReadFile = func(string) ([]byte, error) { return []byte(cfg.Password), nil }
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, connectTimeout+queryTimeout)
+	cc, err := pg.ConnConfig(pgCfg, cfg.Database)
+	if err != nil {
+		return fail(fmt.Errorf("connection settings: %w", err))
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, checkTimeout)
 	defer cancel()
 
 	conn, err := pgx.ConnectConfig(ctx, cc)
@@ -96,9 +83,29 @@ func checkPostgres(ctx context.Context, cfg PostgresConfig, precondition error) 
 	}()
 	rep.Connected = true
 
-	if err := conn.QueryRow(ctx, preflightQuery).Scan(&rep.CurrentUser, &rep.WALFiles, &rep.ArchiveStatusFiles); err != nil {
-		return fail(fmt.Errorf("query: %w", err))
+	if err := readOnly(ctx, conn, pg.GuardSQL(pgCfg), rep); err != nil {
+		return fail(err)
 	}
 
 	return rep
+}
+
+// readOnly runs query in a read-only transaction under guard, the limits of the engine's transactions.
+func readOnly(ctx context.Context, conn *pgx.Conn, guard string, rep *PostgresReport) error {
+	superuser, err := pg.ReadOnly(ctx, conn, guard, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, query).Scan(&rep.CurrentUser, &rep.WALFiles, &rep.ArchiveStatusFiles); err != nil {
+			return fmt.Errorf("query: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit: %w", err)
+		}
+		return nil
+	})
+	if superuser {
+		return fmt.Errorf("%w: %s", planner.ErrSuperuser, rep.User)
+	}
+	if err != nil {
+		return fmt.Errorf("transaction: %w", err)
+	}
+	return nil
 }

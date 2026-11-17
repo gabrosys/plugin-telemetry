@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,8 +22,8 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/gabrosys/plugin-telemetry/internal/export"
-	"github.com/gabrosys/plugin-telemetry/internal/export/otlptest"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
+	"github.com/gabrosys/plugin-telemetry/test/otlptest"
 )
 
 func exporterSettings(protocol, endpoint string) settings.Exporter {
@@ -68,7 +69,10 @@ func newExporter(s settings.Exporter) *export.Exporter {
 	GinkgoHelper()
 	e, err := export.NewExporter(context.Background(), s, os.ReadFile)
 	Expect(err).NotTo(HaveOccurred())
-	DeferCleanup(func(ctx SpecContext) { Expect(e.Shutdown(ctx)).To(Succeed()) })
+	// A Loop shuts its exporter down when it stops, so a second shutdown may report that.
+	DeferCleanup(func(ctx SpecContext) {
+		Expect(e.Shutdown(ctx)).To(Or(Succeed(), MatchError(ContainSubstring("is shutdown"))))
+	})
 	return e
 }
 
@@ -84,6 +88,7 @@ func newGRPCServer(cfg *tls.Config) *otlptest.Server {
 	srv, err := otlptest.NewGRPC(cfg)
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(srv.Close)
+	DeferCleanup(func() { Expect(srv.Err()).NotTo(HaveOccurred()) })
 	return srv
 }
 
@@ -91,6 +96,7 @@ func newHTTPServer(cfg *tls.Config) *otlptest.Server {
 	GinkgoHelper()
 	srv := otlptest.NewHTTP(cfg)
 	DeferCleanup(srv.Close)
+	DeferCleanup(func() { Expect(srv.Err()).NotTo(HaveOccurred()) })
 	return srv
 }
 
@@ -181,7 +187,7 @@ var _ = Describe("Exporter", func() {
 			Expect(export.HTTPProxy(e)).To(BeNil())
 		})
 
-		It("adds the headers file's entries to every request and picks up a change without a new exporter", func(ctx SpecContext) {
+		It("adds the headers file's entries to every request", func(ctx SpecContext) {
 			srv := newHTTPServer(nil)
 			s := exporterSettings(settings.ProtocolHTTP, srv.URL+"/v1/metrics")
 			s.HeadersFile = writeFile(dir, "headers", []byte("Authorization=Bearer%20one, x-tenant = a\n"))
@@ -189,36 +195,28 @@ var _ = Describe("Exporter", func() {
 
 			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
 			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
-			writeFile(dir, "headers", []byte("x-tenant=b"))
-			Expect(e.Reload()).To(Succeed())
-			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
 
 			reqs := srv.Requests()
-			Expect(reqs).To(HaveLen(3))
-			for _, r := range reqs[:2] {
+			Expect(reqs).To(HaveLen(2))
+			for _, r := range reqs {
 				Expect(r.Header.Get("Authorization")).To(Equal("Bearer one"))
 				Expect(r.Header.Get("X-Tenant")).To(Equal("a"))
 			}
-			Expect(reqs[2].Header.Get("X-Tenant")).To(Equal("b"))
-			Expect(reqs[2].Header.Get("Authorization")).To(BeEmpty())
 		})
 
-		It("keeps the last good headers when Reload fails, without the values in the error", func(ctx SpecContext) {
+		It("refuses a broken headers file without the values in the error", func() {
 			srv := newHTTPServer(nil)
 			s := exporterSettings(settings.ProtocolHTTP, srv.URL+"/v1/metrics")
-			s.HeadersFile = writeFile(dir, "headers", []byte("x-tenant=a"))
-			e := newExporter(s)
+			s.HeadersFile = writeFile(dir, "headers", []byte("x-tenant=secret-value,broken"))
 
-			writeFile(dir, "headers", []byte("x-tenant=secret-value,broken"))
-			err := e.Reload()
+			e, err := export.NewExporter(context.Background(), s, os.ReadFile)
+
 			Expect(err).To(HaveOccurred())
+			Expect(e).To(BeNil())
 			Expect(err.Error()).NotTo(ContainSubstring("secret-value"))
-			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
-
-			Expect(srv.Requests()[0].Header.Get("X-Tenant")).To(Equal("a"))
 		})
 
-		It("presents the client certificate and picks up a renewed one without a new exporter", func(ctx SpecContext) {
+		It("presents the client certificate", func(ctx SpecContext) {
 			srv := newHTTPServer(serverTLS(pki.caA))
 			s := exporterSettings(settings.ProtocolHTTP, srv.URL+"/v1/metrics")
 			s.TLS.CAFile = writeFile(dir, "ca.pem", pki.caA.PEM)
@@ -227,18 +225,13 @@ var _ = Describe("Exporter", func() {
 			e := newExporter(s)
 
 			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
-			writeFile(dir, "tls.crt", pki.client2.cert)
-			writeFile(dir, "tls.key", pki.client2.key)
-			Expect(e.Reload()).To(Succeed())
-			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
 
 			reqs := srv.Requests()
-			Expect(reqs).To(HaveLen(2))
+			Expect(reqs).To(HaveLen(1))
 			Expect(reqs[0].ClientCN()).To(Equal("client-1"))
-			Expect(reqs[1].ClientCN()).To(Equal("client-2"))
 		})
 
-		It("trusts a CA file in place of the system roots after Reload", func(ctx SpecContext) {
+		It("trusts a CA file in place of the system roots", func(ctx SpecContext) {
 			srv := newHTTPServer(serverTLS(pki.caB))
 			s := exporterSettings(settings.ProtocolHTTP, srv.URL+"/v1/metrics")
 			s.TLS.CAFile = writeFile(dir, "ca.pem", pki.caA.PEM)
@@ -247,8 +240,8 @@ var _ = Describe("Exporter", func() {
 			Expect(e.Export(ctx, batch(1, 1))).NotTo(Succeed())
 			Expect(srv.Requests()).To(BeEmpty())
 
-			writeFile(dir, "ca.pem", pki.caB.PEM)
-			Expect(e.Reload()).To(Succeed())
+			s.TLS.CAFile = writeFile(dir, "ca.pem", pki.caB.PEM)
+			e = newExporter(s)
 			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
 			Expect(srv.Requests()).To(HaveLen(1))
 		})
@@ -365,17 +358,6 @@ var _ = Describe("Exporter", func() {
 			expectClass(err, "request_too_large", 0)
 			Expect(srv.Requests()).To(HaveLen(sent))
 		}, SpecTimeout(10*time.Second))
-
-		It("refuses exports and reloads after Shutdown", func(ctx SpecContext) {
-			srv := newHTTPServer(nil)
-			e := newExporter(exporterSettings(settings.ProtocolHTTP, srv.URL+"/v1/metrics"))
-
-			Expect(e.Shutdown(ctx)).To(Succeed())
-
-			Expect(e.Export(ctx, batch(1, 1))).To(MatchError(export.ErrExporterShutdown))
-			Expect(e.Reload()).To(MatchError(export.ErrExporterShutdown))
-			Expect(srv.Requests()).To(BeEmpty())
-		})
 	})
 
 	Context("over gRPC", func() {
@@ -397,8 +379,6 @@ var _ = Describe("Exporter", func() {
 			e := newExporter(s)
 
 			Expect(e.Export(ctx, batch(3, 1))).To(Succeed())
-			writeFile(dir, "headers", []byte("x-tenant=b"))
-			Expect(e.Reload()).To(Succeed())
 			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
 
 			reqs := srv.Requests()
@@ -407,11 +387,11 @@ var _ = Describe("Exporter", func() {
 			Expect(reqs[0].ClientCN()).To(Equal("client-1"))
 			Expect(reqs[0].Header.Get("X-Tenant")).To(Equal("a"))
 			Expect(reqs[0].Points()).To(Equal(3))
-			Expect(reqs[1].Header.Get("X-Tenant")).To(Equal("b"))
+			Expect(reqs[1].Header.Get("X-Tenant")).To(Equal("a"))
 			Expect(e.ComponentType()).To(Equal("otlp_grpc_metric_exporter"))
 		})
 
-		It("redials when Reload finds a new CA file", func(ctx SpecContext) {
+		It("fails against a server its CA file doesn't vouch for", func(ctx SpecContext) {
 			s.TLS.CAFile = writeFile(dir, "ca.pem", pki.caB.PEM)
 			s.Interval = time.Second
 			s.Timeout = 300 * time.Millisecond
@@ -419,11 +399,6 @@ var _ = Describe("Exporter", func() {
 
 			Expect(e.Export(ctx, batch(1, 1))).NotTo(Succeed())
 			Expect(srv.Requests()).To(BeEmpty())
-
-			writeFile(dir, "ca.pem", pki.caA.PEM)
-			Expect(e.Reload()).To(Succeed())
-			Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
-			Expect(srv.Requests()).To(HaveLen(1))
 		}, SpecTimeout(10*time.Second))
 
 		It("times out each attempt after exporter.timeout and retries", func(ctx SpecContext) {
@@ -531,12 +506,8 @@ var _ = Describe("Exporter", func() {
 
 			Expect(err).To(MatchError(ContainSubstring(msg)))
 		},
-		Entry("an unknown protocol", func(s *settings.Exporter, _ string) { s.Protocol = "http/json" }, "protocol"),
 		Entry("an endpoint that is not an http or https URL",
 			func(s *settings.Exporter, _ string) { s.Endpoint = "ftp://127.0.0.1:4318" }, "endpoint"),
-		Entry("a timeout that leaves no time to retry within 0.9 × interval",
-			func(s *settings.Exporter, _ string) { s.Timeout = s.Interval }, "timeout"),
-		Entry("a timeout that is not positive", func(s *settings.Exporter, _ string) { s.Timeout = 0 }, "timeout"),
 		Entry("a missing headers file",
 			func(s *settings.Exporter, dir string) { s.HeadersFile = filepath.Join(dir, "missing") }, "headers"),
 		Entry("a headers entry without =",
@@ -569,4 +540,116 @@ var _ = Describe("Exporter", func() {
 			fmt.Errorf("failed to upload metrics: %w", errors.New("OTLP partial success: m (7) x (7 metric data points rejected)")),
 			"rejected", 7),
 	)
+
+	DescribeTable("resumes within two export intervals after five failed connection attempts",
+		func(ctx SpecContext, protocol string) {
+			var lc net.ListenConfig
+			lis, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
+			Expect(err).NotTo(HaveOccurred())
+			addr := lis.Addr().String()
+			endpoint := "http://" + addr
+			if protocol == settings.ProtocolHTTP {
+				endpoint += "/v1/metrics"
+			}
+			s := exporterSettings(protocol, endpoint)
+			s.Interval, s.Timeout = 2*time.Second, 800*time.Millisecond
+			e := newExporter(s)
+
+			refused := make(chan struct{})
+			go func() {
+				defer close(refused)
+				for range 5 {
+					conn, err := lis.Accept()
+					if err != nil {
+						return
+					}
+					if err := conn.Close(); err != nil {
+						return
+					}
+				}
+			}()
+			DeferCleanup(func() {
+				if err := lis.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+					Fail("close listener: " + err.Error())
+				}
+			})
+			Eventually(func() bool {
+				if err := e.Export(ctx, batch(1, 1)); err == nil {
+					return false
+				}
+				select {
+				case <-refused:
+					return true
+				default:
+					return false
+				}
+			}).WithTimeout(30 * time.Second).WithPolling(10 * time.Millisecond).Should(BeTrue())
+			Expect(lis.Close()).To(Succeed())
+
+			var srv *otlptest.Server
+			if protocol == settings.ProtocolGRPC {
+				srv, err = otlptest.NewGRPCAt(addr, nil)
+			} else {
+				srv, err = otlptest.NewHTTPAt(addr, nil)
+			}
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(srv.Close)
+			DeferCleanup(func() { Expect(srv.Err()).NotTo(HaveOccurred()) })
+
+			Eventually(func() error { return e.Export(ctx, batch(1, 1)) }).
+				WithTimeout(2 * s.Interval).WithPolling(50 * time.Millisecond).Should(Succeed())
+			Expect(srv.Requests()).NotTo(BeEmpty())
+		},
+		Entry("http/protobuf", settings.ProtocolHTTP),
+		Entry("grpc", settings.ProtocolGRPC),
+	)
+
+	It("reconnects within half an interval after the first failed connection attempt", func(ctx SpecContext) {
+		var lc net.ListenConfig
+		lis, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
+		Expect(err).NotTo(HaveOccurred())
+		addr := lis.Addr().String()
+		s := exporterSettings(settings.ProtocolGRPC, "http://"+addr)
+		s.Interval, s.Timeout = time.Second, 400*time.Millisecond
+		e := newExporter(s)
+
+		refused := make(chan error, 1)
+		go func() {
+			conn, err := lis.Accept()
+			if err != nil {
+				refused <- err
+				return
+			}
+			refused <- errors.Join(conn.Close(), lis.Close())
+		}()
+		first := make(chan error, 1) // the first export fails and only starts the connection
+		go func() { first <- e.Export(ctx, batch(1, 1)) }()
+		Eventually(refused).WithTimeout(10 * time.Second).Should(Receive(BeNil()))
+		srv, err := otlptest.NewGRPCAt(addr, nil)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(srv.Close)
+		DeferCleanup(func() { Expect(srv.Err()).NotTo(HaveOccurred()) })
+
+		Eventually(func() error { return e.Export(ctx, batch(1, 1)) }).
+			WithTimeout(800 * time.Millisecond).WithPolling(20 * time.Millisecond).Should(Succeed())
+	})
+
+	It("waits for an export in flight when it shuts down", func(ctx SpecContext) {
+		srv := newHTTPServer(nil)
+		release := make(chan struct{})
+		srv.Respond(otlptest.Response{Block: release})
+		e := newExporter(exporterSettings(settings.ProtocolHTTP, srv.URL))
+
+		exported := make(chan error, 1)
+		go func() { exported <- e.Export(ctx, batch(1, 1)) }()
+		Eventually(srv.Requests).Should(HaveLen(1))
+
+		shut := make(chan error, 1)
+		go func() { shut <- e.Shutdown(ctx) }()
+		Consistently(shut, 300*time.Millisecond).ShouldNot(Receive())
+
+		close(release)
+		Eventually(shut).Should(Receive(Succeed()))
+		Eventually(exported).Should(Receive())
+	})
 })

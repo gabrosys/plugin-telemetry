@@ -2,6 +2,7 @@ package operator_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	toolscache "k8s.io/client-go/tools/cache"
+	"sigs.k8s.io/controller-runtime/pkg/cache/informertest"
 
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
 )
@@ -25,9 +27,9 @@ func configMap(data map[string]string) *corev1.ConfigMap {
 	}
 }
 
-var _ = DescribeTable("ParseImageRef",
+var _ = DescribeTable("ImageStore.Set image references",
 	func(in string, ok bool) {
-		_, err := operator.ParseImageRef(in)
+		err := operator.NewImageStore().Set(configMap(map[string]string{operator.SidecarImageKey: in}))
 		if ok {
 			Expect(err).NotTo(HaveOccurred())
 		} else {
@@ -36,6 +38,14 @@ var _ = DescribeTable("ParseImageRef",
 	},
 	Entry("a digest reference", "ghcr.io/gabrosys/plugin-telemetry@sha256:"+hex64, true),
 	Entry("a registry with a port", "localhost:5001/plugin-telemetry@sha256:"+hex64, true),
+	Entry("repeated dashes in a path", "ghcr.io/my--org/plugin-telemetry@sha256:"+hex64, true),
+	Entry("a double underscore in a path", "ghcr.io/gabrosys/plugin__telemetry@sha256:"+hex64, true),
+	Entry("a triple underscore in a path", "ghcr.io/gabrosys/plugin___telemetry@sha256:"+hex64, false),
+	Entry("an underscore in a registry with a port", "my_registry:5000/plugin-telemetry@sha256:"+hex64, false),
+	Entry("a path over 255 characters", "ghcr.io/"+strings.Repeat("a", 256)+"@sha256:"+hex64, false),
+	Entry("an uppercase registry", "Registry.Example.com/plugin-telemetry@sha256:"+hex64, true),
+	Entry("a sha512 digest", "ghcr.io/x@sha512:"+hex64+hex64, false),
+	Entry("a registry with a port and no path", "localhost:5001@sha256:"+hex64, false),
 	Entry("a tag", "ghcr.io/gabrosys/plugin-telemetry:v0.1.0", false),
 	Entry("a tag and a digest", "ghcr.io/gabrosys/plugin-telemetry:v0.1.0@sha256:"+hex64, false),
 	Entry("uppercase hex", "ghcr.io/x@sha256:"+strings.ToUpper(hex64), false),
@@ -107,9 +117,9 @@ var _ = Describe("image event handler", func() {
 
 	BeforeEach(func(ctx context.Context) {
 		var logCtx context.Context
-		logCtx, logs = captureAll(ctx)
+		logCtx, logs = captureAll(ctx, 2)
 		store = operator.NewImageStore()
-		handler = operator.ImageEventHandler(log.FromContext(logCtx), store)
+		handler = operator.ImageEventHandler(log.FromContext(logCtx), store, "cnpg-system", "sidecar-image")
 	})
 
 	It("sets the image on add", func() {
@@ -117,21 +127,45 @@ var _ = Describe("image event handler", func() {
 
 		Expect(store.Image()).To(Equal(validImage))
 		Expect(logs()).NotTo(ContainElement(HaveKey("error")))
+		Expect(logs()).To(ContainElement(SatisfyAll(HaveKeyWithValue("msg", "sidecar image updated"), SatisfyAll(HaveKeyWithValue("namespace", "cnpg-system"), HaveKeyWithValue("configmap", "sidecar-image")))))
 	})
 
 	It("replaces the image on a valid update", func() {
 		handler.OnAdd(configMap(map[string]string{operator.SidecarImageKey: validImage}), true)
-		handler.OnUpdate(nil, configMap(map[string]string{operator.SidecarImageKey: otherImage}))
+		handler.OnUpdate(configMap(map[string]string{operator.SidecarImageKey: validImage}), configMap(map[string]string{operator.SidecarImageKey: otherImage}))
 
 		Expect(store.Image()).To(Equal(otherImage))
 	})
 
+	It("logs an update only when the image changed", func() {
+		handler.OnAdd(configMap(map[string]string{operator.SidecarImageKey: validImage}), true)
+		valid := configMap(map[string]string{operator.SidecarImageKey: validImage})
+		handler.OnUpdate(valid, valid)
+		handler.OnUpdate(valid, valid)
+
+		updated := func() []map[string]any {
+			var lines []map[string]any
+			for _, l := range logs() {
+				if l["msg"] == "sidecar image updated" {
+					lines = append(lines, l)
+				}
+			}
+
+			return lines
+		}
+		Expect(updated()).To(HaveLen(1))
+
+		handler.OnUpdate(valid, configMap(map[string]string{operator.SidecarImageKey: otherImage}))
+		Expect(updated()).To(HaveLen(2))
+		Expect(updated()[1]).To(HaveKeyWithValue("image", otherImage))
+	})
+
 	It("keeps the previous image and logs an error on an update to an invalid value", func() {
 		handler.OnAdd(configMap(map[string]string{operator.SidecarImageKey: validImage}), true)
-		handler.OnUpdate(nil, configMap(map[string]string{operator.SidecarImageKey: "ghcr.io/x:latest"}))
+		handler.OnUpdate(configMap(map[string]string{operator.SidecarImageKey: validImage}), configMap(map[string]string{operator.SidecarImageKey: "ghcr.io/x:latest"}))
 
 		Expect(store.Image()).To(Equal(validImage))
-		Expect(logs()).To(ContainElement(HaveKey("error")))
+		Expect(logs()).To(ContainElement(SatisfyAll(HaveKey("error"), SatisfyAll(HaveKeyWithValue("namespace", "cnpg-system"), HaveKeyWithValue("configmap", "sidecar-image")))))
 	})
 
 	It("logs an error on an unexpected object type", func() {
@@ -141,17 +175,33 @@ var _ = Describe("image event handler", func() {
 		Expect(logs()).To(ContainElement(HaveKeyWithValue("type", "string")))
 	})
 
-	DescribeTable("keeps the previous image and logs an error on a delete",
-		func(deleted func(*corev1.ConfigMap) any) {
-			handler.OnAdd(configMap(map[string]string{operator.SidecarImageKey: validImage}), true)
-			handler.OnDelete(deleted(configMap(nil)))
+	It("keeps the previous image and logs the configured ConfigMap on a delete", func() {
+		handler.OnAdd(configMap(map[string]string{operator.SidecarImageKey: validImage}), true)
+		handler.OnDelete(configMap(nil))
 
-			Expect(store.Image()).To(Equal(validImage))
-			Expect(logs()).To(ContainElement(HaveKey("error")))
-		},
-		Entry("of the object", func(cm *corev1.ConfigMap) any { return cm }),
-		Entry("seen as a tombstone", func(cm *corev1.ConfigMap) any {
-			return toolscache.DeletedFinalStateUnknown{Key: "cnpg-system/sidecar-image", Obj: cm}
-		}),
-	)
+		Expect(store.Image()).To(Equal(validImage))
+		Expect(logs()).To(ContainElement(SatisfyAll(HaveKey("error"), SatisfyAll(HaveKeyWithValue("namespace", "cnpg-system"), HaveKeyWithValue("configmap", "sidecar-image")))))
+	})
+})
+
+var _ = Describe("WatchSidecarImage", func() {
+	It("stores the image the ConfigMap informer delivers", func(ctx context.Context) {
+		informers := &informertest.FakeInformers{}
+		store := operator.NewImageStore()
+		image := "ghcr.io/x@sha256:" + hex64
+
+		Expect(operator.WatchSidecarImage(ctx, informers, store, "cnpg-system", "sidecar-image")).To(Succeed())
+
+		informer, err := informers.FakeInformerFor(ctx, &corev1.ConfigMap{})
+		Expect(err).NotTo(HaveOccurred())
+		informer.Add(configMap(map[string]string{operator.SidecarImageKey: image}))
+		Eventually(store.Image).Should(Equal(image))
+	})
+
+	It("returns the informer error", func(ctx context.Context) {
+		boom := errors.New("boom")
+		informers := &informertest.FakeInformers{Error: boom}
+
+		Expect(operator.WatchSidecarImage(ctx, informers, operator.NewImageStore(), "cnpg-system", "sidecar-image")).To(MatchError(boom))
+	})
 })

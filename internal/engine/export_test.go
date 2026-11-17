@@ -3,268 +3,326 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
+	"sync/atomic"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	"go.opentelemetry.io/otel/attribute"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/gabrosys/plugin-telemetry/internal/executor"
-	"github.com/gabrosys/plugin-telemetry/internal/pg"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
+	"github.com/gabrosys/plugin-telemetry/internal/queries"
+	"github.com/gabrosys/plugin-telemetry/internal/scheduler"
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
 	"github.com/gabrosys/plugin-telemetry/internal/snapshot"
 )
 
+// RunWith is Run with gather in place of the facts round's PostgreSQL queries; nil means those queries.
+func RunWith(ctx context.Context, o Options, gather func(context.Context, settings.Settings) (planner.Facts, error)) error {
+	e, err := newEngine(ctx, o, gather)
+	if err != nil {
+		return err
+	}
+	e.run(ctx)
+	return nil
+}
+
 // ErrorLog is errorLog.
 type ErrorLog = errorLog
-
-// MaxMessages is how many distinct messages errorLog remembers per failing query and database.
-const MaxMessages = maxMessages
-
-// WatchDebounce is the quiet time after a file change before the engine reacts.
-const WatchDebounce = watchDebounce
-
-// Replanner is the load and planning core without a watcher, a pool or an exporter.
-type Replanner struct{ r *replanner }
-
-// NewReplanner returns a Replanner for cfg; update receives every new plan.
-func NewReplanner(cfg Config, stats *selfmetrics.Stats, store *snapshot.Store, update func(planner.Plan)) *Replanner {
-	return &Replanner{r: newReplanner(cfg, stats, store, &errorLog{}, update, noComponents{})}
-}
-
-// Reload loads the settings and the sources and replans when they changed.
-func (r *Replanner) Reload(ctx context.Context) error { return r.r.reload(ctx) }
-
-// SetFacts replans when f differs from the last facts.
-func (r *Replanner) SetFacts(ctx context.Context, f planner.Facts) { r.r.setFacts(ctx, f) }
-
-type noComponents struct{}
-
-func (noComponents) watch(context.Context, []string) {}
-
-func (noComponents) apply(context.Context, *configuration, *configuration) error { return nil }
-
-// EarlyFactsAfter records res for its job, planned, and reports whether that asks for an early facts round.
-func EarlyFactsAfter(ctx context.Context, res executor.Result) (bool, error) {
-	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")})
-	if err != nil {
-		return false, err
-	}
-	e.plan.planned = map[snapshot.Key]string{{Query: res.Job.Query, Database: res.Job.Database}: res.Job.Fingerprint}
-	e.record(ctx, res)
-	var early bool
-	select {
-	case <-e.early:
-		early = true
-	default:
-	}
-	return early, e.mp.Shutdown(ctx)
-}
-
-// NewMeterProvider returns the engine's MeterProvider over reader.
-func NewMeterProvider(reader sdkmetric.Reader) *sdkmetric.MeterProvider {
-	return newMeterProvider(reader)
-}
-
-// collect returns the metric called name from one collection of e, and whether it was there.
-func (e *engine) collect(ctx context.Context, name string) (metricdata.Metrics, bool, error) {
-	var rm metricdata.ResourceMetrics
-	if err := e.reader.Collect(ctx, &rm); err != nil {
-		return metricdata.Metrics{}, false, err
-	}
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name == name {
-				return m, true, nil
-			}
-		}
-	}
-	return metricdata.Metrics{}, false, nil
-}
-
-// CollectorUp records one facts round per entry of rounds, true for a success, and returns
-// cnpg_collector_up as the engine reports it for cluster "c", and whether it is reported at all.
-func CollectorUp(ctx context.Context, rounds ...bool) (metricdata.Metrics, bool, error) {
-	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")})
-	if err != nil {
-		return metricdata.Metrics{}, false, err
-	}
-	cluster := "c"
-	e.cluster.Store(&cluster)
-	for _, ok := range rounds {
-		e.setUp(ok)
-	}
-	m, found, err := e.collect(ctx, upMetric)
-	return m, found, errors.Join(err, e.mp.Shutdown(ctx))
-}
-
-// unreachable is a configuration whose pool never connects: nothing listens on port 1.
-func unreachable() settings.Settings {
-	return settings.Settings{
-		Postgres: settings.Postgres{Host: "127.0.0.1", Port: 1, User: "u", Database: "app", MaxConnections: 2},
-		Limits:   settings.Limits{QueryTimeout: time.Second, LockTimeout: time.Second},
-	}
-}
-
-// RunWithBrokenBookkeeping runs job n times through the scheduler's RunFunc with bookkeeping that
-// panics, and returns the runs counted with outcome error.
-func RunWithBrokenBookkeeping(ctx context.Context, job planner.Job, n int) (int64, error) {
-	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")})
-	if err != nil {
-		return 0, err
-	}
-	e.setRunner(ctx, unreachable(), time.Minute)
-	// record dereferences the replanner first, so a nil one makes it panic.
-	e.plan = nil
-	for range n {
-		e.runJob(ctx, job)
-	}
-
-	m, _, err := e.collect(ctx, "cnpg_otel_query_runs_total")
-	var runs int64
-	if sum, ok := m.Data.(metricdata.Sum[int64]); ok {
-		want := attribute.NewSet(attribute.String("query", job.Query), attribute.String("database", job.Database),
-			attribute.String("outcome", string(selfmetrics.OutcomeError)))
-		for _, dp := range sum.DataPoints {
-			if dp.Attributes.Equals(&want) {
-				runs = dp.Value
-			}
-		}
-	}
-	return runs, errors.Join(err, e.mp.Shutdown(ctx))
-}
-
-// Pools changes the engine's runner as configuration changes do, without PostgreSQL.
-type Pools struct{ e *engine }
-
-// NewPools returns Pools over a new engine.
-func NewPools(ctx context.Context) (*Pools, error) {
-	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")})
-	if err != nil {
-		return nil, err
-	}
-	return &Pools{e: e}, nil
-}
-
-// Unreachable is a configuration whose pool never connects.
-func Unreachable() settings.Settings { return unreachable() }
-
-// Apply makes the runner match s and reports whether the pool was replaced.
-func (p *Pools) Apply(ctx context.Context, s settings.Settings) bool {
-	return p.e.setRunner(ctx, s, time.Minute)
-}
-
-// Begin starts a run on the current runner as runJob does; it returns the run's pool and the function that ends it.
-func (p *Pools) Begin() (*pg.Pool, func()) {
-	r, done := p.e.takeRunner()
-	return r.pool.Pool, done
-}
-
-// Close shuts the engine's meter provider down.
-func (p *Pools) Close(ctx context.Context) error { return p.e.mp.Shutdown(ctx) }
-
-// WatchSwapNotifies watches first, then second, and reports whether the swap asked for a look at the files.
-func WatchSwapNotifies(ctx context.Context, first, second []string) (bool, error) {
-	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")})
-	if err != nil {
-		return false, err
-	}
-	defer e.stopWatch()
-	e.watch(ctx, first)
-	select {
-	case <-e.changed:
-	default:
-	}
-	e.watch(ctx, second)
-	if e.watcher == nil || len(e.watcher.files) != len(second) {
-		return false, errors.Join(errors.New("the watcher was not swapped"), e.mp.Shutdown(ctx))
-	}
-	var notified bool
-	select {
-	case <-e.changed:
-		notified = true
-	default:
-	}
-	return notified, e.mp.Shutdown(ctx)
-}
 
 // FactsWait is the wait before the next facts round after failures consecutive failed ones.
 func FactsWait(failures int, planInterval time.Duration) time.Duration {
 	return factsWait(failures, planInterval)
 }
 
-// factsStep is the step by which FactsRounds moves its fake clock.
-const factsStep = 100 * time.Millisecond
-
-// FactsRounds drives the facts rounds of an engine whose PostgreSQL never answers, on a fake clock,
-// as the control goroutine does.
-type FactsRounds struct {
-	e   *engine
-	clk *clocktesting.FakeClock
-}
-
-// NewFactsRounds returns FactsRounds after a first configuration with the planning cycle planInterval.
-func NewFactsRounds(ctx context.Context, planInterval time.Duration) (*FactsRounds, error) {
-	clk := clocktesting.NewFakeClock(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
-	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml"), Clock: clk})
+// RunWithBrokenBookkeeping runs job n times through a scheduler over the engine's RunFunc with
+// bookkeeping that panics, and returns the runs counted with outcome error and whether the job's
+// snapshot entry is still there.
+func RunWithBrokenBookkeeping(ctx context.Context, job planner.Job, n int) (errorRuns int64, kept bool, err error) {
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, nil)
 	if err != nil {
-		return nil, err
+		return 0, false, err
 	}
-	s := unreachable()
-	s.PlanInterval = planInterval
-	e.plan.current = &configuration{settings: s}
-	e.setRunner(ctx, s, time.Minute)
-	e.setFactsTimer(0)
-	return &FactsRounds{e: e, clk: clk}, nil
+	s := settings.Settings{
+		Postgres: settings.Postgres{Host: "127.0.0.1", Port: 1, User: "u", Database: "app", MaxConnections: 2},
+		Limits:   settings.Limits{QueryTimeout: time.Second, LockTimeout: time.Second},
+	}
+	e.swapPool(ctx, s, time.Minute)
+	// record dereferences the replanner first, so a nil one makes it panic.
+	e.plan = nil
+	key := snapshot.Key{Query: job.Query, Database: job.Database}
+	sample := queries.Sample{Metric: "cnpg_" + job.Query + "_value", Kind: queries.KindGauge, Value: 1}
+	if err := e.store.Put(key, job.Fingerprint, []queries.Sample{sample}, time.Now()); err != nil {
+		return 0, false, errors.Join(err, e.mp.Shutdown(ctx))
+	}
+
+	rctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var runs atomic.Int32
+	e.sched = scheduler.New(e.clk, e.newRand(), func(c context.Context, j planner.Job) {
+		defer func() {
+			if int(runs.Add(1)) == n {
+				cancel()
+			}
+		}()
+		e.runJob(c, j)
+	}, func(planner.Job, int) {})
+	job.Interval = 10 * time.Millisecond
+	e.sched.Update(planner.Plan{Jobs: []planner.Job{job}})
+	if err := e.sched.Run(rctx); err != nil {
+		return 0, false, errors.Join(err, e.mp.Shutdown(ctx))
+	}
+
+	points, _ := e.store.Points()
+	for _, p := range points {
+		kept = kept || p.Key == key
+	}
+	errorRuns, err = queryRuns(ctx, e, job, selfmetrics.OutcomeError)
+	if r := e.setRunner(nil); r != nil {
+		r.pool.Close(ctx)
+	}
+	return errorRuns, kept, errors.Join(err, e.mp.Shutdown(ctx))
 }
 
-// Run moves the fake clock forward by d in steps of factsStep. At each step it runs the round the facts
-// timer is due for or, when early is set and earlyFactsGap has passed since the last round, the early
-// round a run that lost its connection asks for. It returns the times from the start of the rounds the
-// timer drove, and the number of early rounds.
-func (f *FactsRounds) Run(ctx context.Context, d time.Duration, early bool) ([]time.Duration, int) {
-	start := f.clk.Now()
-	var timed []time.Duration
-	var earlyRounds int
-	for elapsed := time.Duration(0); elapsed <= d; elapsed += factsStep {
-		f.clk.SetTime(start.Add(elapsed))
-		select {
-		case <-timerC(f.e.factsTimer):
-			timed = append(timed, elapsed)
-			f.e.factsRound(ctx, true)
-		default:
-			if early && f.clk.Since(f.e.lastFacts) >= earlyFactsGap {
-				f.e.requestFacts()
-				<-f.e.early
-				f.e.onEarlyFacts(ctx)
-				earlyRounds++
+// RecordResult records res for its planned job, whose snapshot entry holds one sample, and reports
+// whether that entry is still there and the runs counted with res's outcome.
+func RecordResult(ctx context.Context, res executor.Result) (kept bool, runs int64, err error) {
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, nil)
+	if err != nil {
+		return false, 0, err
+	}
+	job := res.Job
+	key := snapshot.Key{Query: job.Query, Database: job.Database}
+	e.plan.planned = map[snapshot.Key]string{key: job.Fingerprint}
+	sample := queries.Sample{Metric: "cnpg_" + job.Query + "_value", Kind: queries.KindGauge, Value: 1}
+	if err := e.store.Put(key, job.Fingerprint, []queries.Sample{sample}, time.Now()); err != nil {
+		return false, 0, errors.Join(err, e.mp.Shutdown(ctx))
+	}
+
+	e.record(ctx, res)
+	points, _ := e.store.Points()
+	for _, p := range points {
+		kept = kept || p.Key == key
+	}
+	runs, err = queryRuns(ctx, e, job, res.Outcome)
+	return kept, runs, errors.Join(err, e.mp.Shutdown(ctx))
+}
+
+// RecordAll records results in order for their planned jobs on one engine.
+func RecordAll(ctx context.Context, results ...executor.Result) error {
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, nil)
+	if err != nil {
+		return err
+	}
+	for _, res := range results {
+		e.plan.planned = map[snapshot.Key]string{{Query: res.Job.Query, Database: res.Job.Database}: res.Job.Fingerprint}
+		e.record(ctx, res)
+	}
+	return e.mp.Shutdown(ctx)
+}
+
+// RecordFailureBetweenSuccesses records an ok run of a counter at t0, then failed, then an ok run at t0+1m
+// with a higher value. It reports whether the job's series were exported after failed and the Start of
+// the series after the last run.
+func RecordFailureBetweenSuccesses(ctx context.Context, failed executor.Result) (exported bool, start, t0 time.Time, err error) {
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, nil)
+	if err != nil {
+		return false, time.Time{}, time.Time{}, err
+	}
+	job := failed.Job
+	key := snapshot.Key{Query: job.Query, Database: job.Database}
+	e.plan.planned = map[snapshot.Key]string{key: job.Fingerprint}
+	ok := func(value float64, started time.Time) executor.Result {
+		sample := queries.Sample{Metric: "cnpg_" + job.Query + "_total", Kind: queries.KindCounter, Value: value}
+		return executor.Result{Job: job, Outcome: selfmetrics.OutcomeOK, Samples: []queries.Sample{sample}, Started: started}
+	}
+	exportedKey := func() (found bool, started time.Time) {
+		points, _ := e.store.Points()
+		for _, p := range points {
+			if p.Key == key {
+				return true, p.Start
+			}
+		}
+		return false, time.Time{}
+	}
+
+	t0 = time.Now()
+	e.record(ctx, ok(10, t0))
+	e.record(ctx, failed)
+	exported, _ = exportedKey()
+	e.record(ctx, ok(15, t0.Add(time.Minute)))
+	_, start = exportedKey()
+	return exported, start, t0, e.mp.Shutdown(ctx)
+}
+
+// queryRuns returns cnpg_otel_query_runs_total for job with outcome, from one collection of e.
+func queryRuns(ctx context.Context, e *engine, job planner.Job, outcome selfmetrics.Outcome) (int64, error) {
+	var rm metricdata.ResourceMetrics
+	if err := e.reader.Collect(ctx, &rm); err != nil {
+		return 0, err
+	}
+	want := attribute.NewSet(attribute.String("query", job.Query), attribute.String("database", job.Database),
+		attribute.String("outcome", string(outcome)))
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if m.Name != "cnpg_otel_query_runs_total" || !ok {
+				continue
+			}
+			for _, dp := range sum.DataPoints {
+				if dp.Attributes.Equals(&want) {
+					return dp.Value, nil
+				}
 			}
 		}
 	}
-	return timed, earlyRounds
+	return 0, nil
 }
 
-// ReplacePool applies the configuration in force with another unreachable port, as a reload does,
-// and reports whether that replaced the pool.
-func (f *FactsRounds) ReplacePool(ctx context.Context) (bool, error) {
-	prev, before := f.e.plan.current, f.e.runner.pool
-	s := prev.settings
-	s.Postgres.Port++
-	next := &configuration{settings: s}
-	if err := f.e.apply(ctx, prev, next); err != nil {
-		return false, err
+// FactsRoundOnStop runs one timed facts round whose gather stops the engine's context and fails, with
+// cnpg_collector_up at 1 before it, and returns the value afterwards.
+func FactsRoundOnStop(ctx context.Context) (up int64) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	gather := func(context.Context, settings.Settings) (planner.Facts, error) {
+		cancel()
+		return planner.Facts{}, errors.New("acquire a connection: context canceled")
 	}
-	f.e.plan.current = next
-	return f.e.runner.pool != before, nil
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, gather)
+	if err != nil {
+		panic(fmt.Sprintf("FactsRoundOnStop: new engine: %v", err))
+	}
+	s := settings.Settings{
+		Postgres:     settings.Postgres{Host: "127.0.0.1", Port: 1, User: "u", Database: "app", MaxConnections: 2},
+		Limits:       settings.Limits{QueryTimeout: time.Second, LockTimeout: time.Second},
+		PlanInterval: time.Minute,
+	}
+	e.swapPool(ctx, s, time.Minute)
+	defer func() {
+		if r := e.setRunner(nil); r != nil {
+			r.pool.Close(ctx)
+		}
+	}()
+	e.plan.current = &configuration{settings: s}
+	e.up.Store(1)
+	e.factsRound(ctx, true)
+	return e.up.Load()
 }
 
-// Close closes the pools and shuts the meter provider down.
-func (f *FactsRounds) Close(ctx context.Context) error {
-	stopTimer(&f.e.factsTimer)
-	f.e.retired.Wait()
-	f.e.runner.pool.Close()
-	return f.e.mp.Shutdown(ctx)
+// FactsFailuresAfterPanicOnStop runs one timed facts round, with 3 failures counted before it, whose
+// gather succeeds and stops the engine's context and whose replanning panics, and returns the count after.
+func FactsFailuresAfterPanicOnStop(ctx context.Context) int {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	gather := func(context.Context, settings.Settings) (planner.Facts, error) {
+		cancel()
+		return planner.Facts{Version: *semver.MustParse("18.0.7"), Databases: []string{"app"}}, nil
+	}
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, gather)
+	if err != nil {
+		panic(fmt.Sprintf("FactsFailuresAfterPanicOnStop: new engine: %v", err))
+	}
+	s := settings.Settings{
+		Postgres:     settings.Postgres{Host: "127.0.0.1", Port: 1, User: "u", Database: "app", MaxConnections: 2},
+		Limits:       settings.Limits{QueryTimeout: time.Second, LockTimeout: time.Second},
+		PlanInterval: time.Minute,
+	}
+	e.swapPool(ctx, s, time.Minute)
+	defer func() {
+		if r := e.setRunner(nil); r != nil {
+			r.pool.Close(ctx)
+		}
+	}()
+	e.plan.current = &configuration{settings: s}
+	e.plan.update = func(planner.Plan) { panic("replan") }
+	e.factsFailures = 3
+	e.factsRound(ctx, true)
+	return e.factsFailures
+}
+
+// IdleTimeoutAfterIdleOnlyApply applies a configuration, then one that differs in the idle timeout only,
+// and reports whether the pool is the same and the idle timeout it has.
+func IdleTimeoutAfterIdleOnlyApply(ctx context.Context) (kept bool, idle time.Duration, err error) {
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, nil)
+	if err != nil {
+		return false, 0, err
+	}
+	s := settings.Settings{
+		Postgres: settings.Postgres{Host: "127.0.0.1", Port: 1, User: "u", Database: "app", MaxConnections: 2},
+		Limits:   settings.Limits{QueryTimeout: time.Second, LockTimeout: time.Second},
+		Exporter: settings.Exporter{
+			Protocol: "http/protobuf", Endpoint: "http://127.0.0.1:1/v1/metrics", Compression: "none",
+			Interval: time.Second, Timeout: time.Second / 2, MaxPointsPerRequest: 100,
+		},
+		PlanInterval: time.Minute,
+	}
+	first := &configuration{settings: s, idleTimeout: time.Minute}
+	second := &configuration{settings: s, idleTimeout: 2 * time.Minute}
+	defer e.teardown(ctx)
+	if err := e.apply(ctx, nil, first); err != nil {
+		return false, 0, errors.Join(err, e.mp.Shutdown(ctx))
+	}
+	pool := e.runner.pool
+	if err := e.apply(ctx, first, second); err != nil {
+		return false, 0, errors.Join(err, e.mp.Shutdown(ctx))
+	}
+	return e.runner.pool == pool, pool.IdleTimeout(), e.mp.Shutdown(ctx)
+}
+
+// RunJobWhileRefused refuses a superuser session, then runs a job on the engine's runner, which a
+// listener stands in for PostgreSQL of, and returns how many connections the listener accepted.
+func RunJobWhileRefused(ctx context.Context) (connections int, err error) {
+	lis, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	var (
+		accepted atomic.Int32
+		closeErr error // written by the accept goroutine, read after done is closed
+		done     = make(chan struct{})
+	)
+	go func() {
+		defer close(done)
+		for {
+			c, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			accepted.Add(1)
+			if err := c.Close(); err != nil {
+				closeErr = fmt.Errorf("close accepted connection: %w", err)
+				return
+			}
+		}
+	}()
+	defer func() {
+		err = errors.Join(err, lis.Close())
+		<-done
+		err = errors.Join(err, closeErr)
+	}()
+
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, nil)
+	if err != nil {
+		return 0, err
+	}
+	addr, ok := lis.Addr().(*net.TCPAddr)
+	if !ok {
+		return 0, fmt.Errorf("listener address %v is not TCP", lis.Addr())
+	}
+	s := settings.Settings{
+		Postgres:     settings.Postgres{Host: "127.0.0.1", Port: addr.AddrPort().Port(), User: "u", Database: "app", MaxConnections: 2},
+		Limits:       settings.Limits{QueryTimeout: time.Second, LockTimeout: time.Second},
+		PlanInterval: time.Minute,
+	}
+	e.swapPool(ctx, s, time.Minute)
+	defer e.teardown(ctx)
+	cur := &configuration{settings: s, idleTimeout: time.Minute}
+	e.plan.current = cur
+	e.refuse(ctx, cur, map[string]bool{"superuser": true})
+	e.runJob(ctx, planner.Job{Query: "backends", Database: "app", Fingerprint: "f"})
+	return int(accepted.Load()), e.mp.Shutdown(ctx)
 }

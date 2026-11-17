@@ -1,8 +1,11 @@
+// Package clusterconfig turns a CloudNativePG Cluster, its plugin parameters and its TelemetryExporter
+// into engine settings and into the list of Kubernetes objects the sidecar reads.
 package clusterconfig
 
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
@@ -18,11 +21,13 @@ const (
 
 	passwordHost    = "127.0.0.1"
 	passwordKey     = "password"
-	usernameKey     = "username"
 	clientCertKey   = "tls.crt"
 	clientKeyKey    = "tls.key"
 	defaultDatabase = "postgres"
 )
+
+// PasswordUsernameKey is the key of the passwordSecret that holds the user name.
+const PasswordUsernameKey = "username"
 
 // Inputs are what the settings are built from; the sidecar fills them from its watches.
 type Inputs struct {
@@ -37,13 +42,6 @@ type Inputs struct {
 // Build returns validated settings whose file fields hold virtual names, plus warnings.
 // An error never contains a value read from a Secret.
 func Build(in Inputs) (settings.Settings, []string, error) {
-	if in.Cluster == nil {
-		return settings.Settings{}, nil, errors.New("build settings: no Cluster")
-	}
-	if in.Exporter == nil {
-		return settings.Settings{}, nil, errors.New("build settings: no TelemetryExporter")
-	}
-
 	s := settings.Defaults()
 	s.Cluster = in.Cluster.Name
 	s.Namespace = in.Cluster.Namespace
@@ -58,8 +56,9 @@ func Build(in Inputs) (settings.Settings, []string, error) {
 	warnings := applyMetrics(&s, in.Cluster, spec.Metrics)
 	applyExporter(&s.Exporter, spec.Exporter)
 
-	env := otlpEnv{configMap: in.EnvConfigMap, secret: in.EnvSecret}
+	env := otlpEnv{configMap: in.EnvConfigMap}
 	if spec.EnvFrom != nil && spec.EnvFrom.Secret != nil {
+		env.secret = in.EnvSecret
 		env.secretName = spec.EnvFrom.Secret.Name
 	}
 	envWarnings, envErrs := env.apply(&s.Exporter, spec.Exporter)
@@ -115,7 +114,7 @@ func applyAuth(s *settings.Settings, in Inputs) error {
 		return errors.New("password mode needs the passwordSecret parameter")
 	}
 	if in.PasswordUsername == "" {
-		return fmt.Errorf("password Secret %q: key %q is empty", in.Params.PasswordSecret, usernameKey)
+		return fmt.Errorf("password Secret %q: key %q is empty", in.Params.PasswordSecret, PasswordUsernameKey)
 	}
 	s.Postgres.Host = passwordHost
 	s.Postgres.User = in.PasswordUsername
@@ -238,15 +237,11 @@ func resourceAttributes(in Inputs, env otlpEnv) (map[string]string, []string) {
 	if v, ok := env.get(envResourceAttrs); ok {
 		parsed, err := ParseResourceAttributes(v.value)
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("%s: ignored, %v", envResourceAttrs, err))
+			warnings = append(warnings, fmt.Sprintf("%v; ignored", err))
 		}
-		for k, val := range parsed {
-			out[k] = val
-		}
+		maps.Copy(out, parsed)
 	}
-	for k, v := range in.Exporter.Spec.ResourceAttributes {
-		out[k] = v
-	}
+	maps.Copy(out, in.Exporter.Spec.ResourceAttributes)
 	for _, key := range in.Exporter.Spec.ResourceLabels {
 		if key == instanceRoleLabel {
 			warnings = append(warnings, "spec.resourceLabels: "+instanceRoleLabel+" is ignored, it changes at switchover")

@@ -1,0 +1,30 @@
+[
+  {
+    "name": "cnpg_collector_wal_buffers_full",
+    "kind": "gauge",
+    "labels": [
+      "stats_reset"
+    ]
+  },
+  {
+    "name": "cnpg_collector_wal_bytes",
+    "kind": "gauge",
+    "labels": [
+      "stats_reset"
+    ]
+  },
+  {
+    "name": "cnpg_collector_wal_fpi",
+    "kind": "gauge",
+    "labels": [
+      "stats_reset"
+    ]
+  },
+  {
+    "name": "cnpg_collector_wal_records",
+    "kind": "gauge",
+    "labels": [
+      "stats_reset"
+    ]
+  }
+]

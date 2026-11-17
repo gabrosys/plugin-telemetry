@@ -3,6 +3,7 @@ package queries_test
 import (
 	"os"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -16,7 +17,7 @@ var _ = Describe("Define", func() {
 	DescribeTable("loads CNPG's default queries as the golden file says",
 		func(ref string) {
 			defs := defineAll(configMapQueries(readTestdata("default-monitoring-" + ref + ".yaml")))
-			Expect(defs).To(HaveLen(15))
+			Expect(defs).To(HaveLen(20))
 			Expect(defs).To(HaveKey("collector"))
 
 			Expect(defs["pg_stat_bgwriter_17"].Namespace).To(Equal("cnpg_pg_stat_bgwriter"))
@@ -290,7 +291,7 @@ q:
 
 	It("defines the built-in collector query", func() {
 		builtin := queries.Builtin()
-		Expect(builtin).To(HaveLen(1))
+		Expect(builtin).To(HaveLen(6))
 		Expect(builtin).To(HaveKey("collector"))
 
 		def := queries.Define("collector", builtin["collector"], opts)
@@ -300,6 +301,22 @@ q:
 		Expect(def.Columns["lo_pages"].Metric).To(Equal("cnpg_collector_lo_pages"))
 		Expect(def.Columns["lo_pages"].Kind).To(Equal(queries.KindGauge))
 	})
+
+	DescribeTable("quotes nothing from a sensitive source",
+		func(doc string, quoted string, named ...string) {
+			def := defineOne("q", doc, queries.Options{MaxLabelsPerSeries: 32, Sensitive: true})
+			text := strings.Join(append(def.Warnings, def.Disabled), "\n")
+			Expect(text).ToNot(BeEmpty())
+			Expect(text).ToNot(ContainSubstring(quoted))
+			for _, n := range named {
+				Expect(text).To(ContainSubstring(n))
+			}
+		},
+		Entry("an invalid pg_version", "q:\n  query: SELECT 1\n  metrics:\n    - v: {usage: GAUGE, pg_version: 'abc!'}\n", "abc!", `"q"`, `"v"`),
+		Entry("an unknown usage", "q:\n  query: SELECT 1\n  metrics:\n    - v: {usage: GAUGES}\n", "GAUGES", `"q"`, `"v"`),
+		Entry("an invalid runonserver", "q:\n  query: SELECT 1\n  runonserver: 'nope!'\n", "nope!", `"q"`),
+		Entry("a cluster-wide relation", "q:\n  query: SELECT 1 AS v FROM pg_stat_database\n  target_databases: ['*']\n  metrics:\n    - v: {usage: GAUGE}\n", "pg_stat_database", `"q"`),
+	)
 
 	DescribeTable("warns when a cluster-wide relation runs in more than one database",
 		func(sql, targets string, warns bool) {
@@ -325,6 +342,58 @@ q:
 		Entry("another schema", "SELECT 1 AS v FROM app.pg_stat_activity", "[a, b]", false),
 		Entry("a longer identifier", "SELECT 1 AS v FROM pg_stat_activity_copy", "[a, b]", false),
 		Entry("a column of that name", "SELECT 1 AS v FROM t WHERE x_pg_locks = 1", "[a, b]", false),
+		Entry("a line comment", "SELECT 1 AS v -- pg_stat_activity", "[a, b]", false),
+		Entry("a block comment", "SELECT /* pg_stat_activity */ 1 AS v", "[a, b]", false),
+		Entry("a string literal", "SELECT 1 AS v FROM pg_class WHERE relname = 'pg_stat_activity'", "[a, b]", false),
+		Entry("after a quoted name with a quote", `SELECT 1 AS \"a'b\" FROM pg_stat_activity`, "[a, b]", true),
+		Entry("after a quoted name with dashes", `SELECT 1 AS \"--c\" FROM pg_stat_activity`, "[a, b]", true),
+		Entry("a literal after a quoted name with a quote", `SELECT 1 AS \"x'\", 'pg_stat_activity'`, "[a, b]", false),
+		Entry("whitespace around the schema dot", "SELECT 1 AS v FROM pg_catalog . pg_locks", "[a, b]", true),
+		Entry("a database-qualified name", "SELECT 1 AS v FROM db.pg_catalog.pg_locks", "[a, b]", false),
+		Entry("a schema that merely ends in pg_catalog", "SELECT 1 AS v FROM x$pg_catalog.pg_locks", "[a, b]", false),
+	)
+
+	It("scans 10,000 relation names in under a second", func() {
+		sql := "SELECT 1 AS v FROM " + strings.Repeat("pg_locks, ", 10000) + "pg_settings"
+		start := time.Now()
+		def := queries.Define("q", queries.UserQuery{Query: sql, TargetDatabases: []string{"a", "b"}}, opts)
+
+		Expect(time.Since(start)).To(BeNumerically("<", time.Second))
+		Expect(def.Warnings).To(HaveLen(1))
+		Expect(def.ReadsSettings).To(BeTrue())
+	})
+
+	DescribeTable("ReadsSettings",
+		func(query, predicate string, want bool) {
+			def := queries.Define("q", queries.UserQuery{Query: query, PredicateQuery: predicate}, opts)
+			Expect(def.ReadsSettings).To(Equal(want))
+		},
+		Entry("pg_catalog.pg_settings", "SELECT name, setting FROM pg_catalog.pg_settings", "", true),
+		Entry("upper-case pg_settings", "select * from PG_SETTINGS", "", true),
+		Entry("pg_settings in the predicate", "SELECT 1", "SELECT count(*) > 0 FROM pg_settings", true),
+		Entry("pg_show_all_settings()", "SELECT * FROM pg_catalog.pg_show_all_settings()", "", true),
+		Entry("no relation", "SELECT 1", "", false),
+		Entry("a longer identifier", "SELECT my_pg_settings FROM t", "", false),
+		Entry("another schema", "SELECT * FROM other.pg_settings", "", false),
+		Entry("current_setting", "SELECT current_setting('jit')", "", false),
+		Entry("a line comment", "SELECT 1 -- pg_settings", "", false),
+		Entry("a block comment", "SELECT /* pg_settings */ 1", "", false),
+		Entry("a nested block comment", "SELECT /* a /* b */ pg_settings */ 1", "", false),
+		Entry("a string literal", "SELECT 1 FROM pg_class WHERE relname = 'pg_settings'", "", false),
+		Entry("a comment in the predicate", "SELECT 1", "SELECT true -- pg_settings", false),
+		Entry("after a literal with a quote", "SELECT 'it''s', name FROM pg_settings", "", true),
+		Entry("an escape string", `SELECT E'\' pg_settings '`, "", false),
+		Entry("after an escape string", `SELECT E'a\'b', name FROM pg_settings`, "", true),
+		Entry("a dollar-quoted string", "SELECT $$ pg_settings $$", "", false),
+		Entry("a tagged dollar-quoted string", "SELECT $q$ $$ pg_settings $q$", "", false),
+		Entry("after a dollar-quoted string", "SELECT $q$x$q$, name FROM pg_settings", "", true),
+		Entry("after a positional parameter", "SELECT $1, name FROM pg_settings", "", true),
+		Entry("after a quoted name with a quote", `SELECT "a'b" FROM pg_settings`, "", true),
+		Entry("after a quoted name with dashes", `SELECT "--c", name FROM pg_settings`, "", true),
+		Entry("after a quoted name with a doubled quote", `SELECT "a""--", name FROM pg_settings`, "", true),
+		Entry("a literal after a quoted name with a quote", `SELECT "x'" , 'pg_settings'`, "", false),
+		Entry("a quoted pg_settings", `SELECT name FROM "pg_settings"`, "", true),
+		Entry("after a comment", "SELECT name /* x */ FROM pg_settings -- y", "", true),
 	)
 
 	Describe("fingerprint", func() {

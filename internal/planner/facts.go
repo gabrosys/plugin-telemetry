@@ -5,20 +5,30 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
+	"unicode/utf8"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/gabrosys/plugin-telemetry/internal/pg"
 )
 
 // Facts are what the planner needs to know about the server.
 type Facts struct {
 	Version    semver.Version
 	InRecovery bool
-	Databases  []string // allow connections, not templates, CONNECT granted; sorted
-	// Checks are pg_monitor, read_only, track_io_timing, track_wal_io_timing and track_functions.
+	Databases  []string // allow connections, not templates, CONNECT granted, valid UTF-8 names; sorted
+	// SkippedDatabases are the connectable databases whose names are not valid UTF-8, quoted with
+	// strconv.QuoteToASCII and sorted; they are never planned.
+	SkippedDatabases []string
+	// Checks are pg_monitor, read_only, track_io_timing, track_wal_io_timing, track_functions and superuser: the
+	// keys are the values of the check attribute and true means the check holds.
 	Checks map[string]bool
+	// WALSegmentSize is wal_segment_size from pg_settings, in bytes; always positive.
+	WALSegmentSize float64
 	// ChecksErr joins the errors of the checks that could not be read; they are missing from Checks.
 	ChecksErr error
 }
@@ -33,6 +43,24 @@ func ParseVersionNum(s string) (semver.Version, error) {
 	return *semver.New(n/10000, (n/100)%100, n%100, "", ""), nil
 }
 
+// walSegmentSizeQuery reads the setting as CloudNativePG does (metricserver/wal.go:86-88 at v1.30.1).
+const walSegmentSizeQuery = "SELECT setting FROM pg_catalog.pg_settings WHERE name = 'wal_segment_size'"
+
+// errWALSegmentSize is what a wal_segment_size that is not a positive number of bytes wraps.
+var errWALSegmentSize = errors.New("wal_segment_size is not a positive number of bytes")
+
+// parseWALSegmentSize parses the pg_settings value of wal_segment_size, which PostgreSQL gives in bytes.
+func parseWALSegmentSize(setting string) (float64, error) {
+	v, err := strconv.ParseFloat(setting, 64)
+	if err != nil || v <= 0 || math.IsInf(v, 0) || math.IsNaN(v) {
+		return 0, fmt.Errorf("%w: %q", errWALSegmentSize, setting)
+	}
+	return v, nil
+}
+
+// ErrSuperuser comes with Facts{Checks: {"superuser": true}} when the session role is a superuser.
+var ErrSuperuser = errors.New("the session role is a superuser")
+
 // databasesQuery is CloudNativePG's (pkg/management/postgres/metrics/collector.go:286 at v1.30.1).
 const databasesQuery = `SELECT datname, pg_catalog.has_database_privilege(datname, 'CONNECT')
 		 FROM pg_catalog.pg_database
@@ -40,11 +68,10 @@ const databasesQuery = `SELECT datname, pg_catalog.has_database_privilege(datnam
 
 // checkSettings maps a check to the setting it reads; a setting the server does not have omits the check.
 // The settings are documented in PostgreSQL 18, "Run-time Statistics", track_io_timing, track_wal_io_timing and
-// track_functions (https://www.postgresql.org/docs/18/runtime-config-statistics.html), and default_transaction_read_only
-// (https://www.postgresql.org/docs/18/runtime-config-client.html).
-
+// track_functions (https://www.postgresql.org/docs/18/runtime-config-statistics.html), and transaction_read_only, the
+// access mode of the current transaction (https://www.postgresql.org/docs/18/sql-set-transaction.html).
 var checkSettings = map[string]string{
-	"read_only":           "default_transaction_read_only",
+	"read_only":           "transaction_read_only",
 	"track_io_timing":     "track_io_timing",
 	"track_wal_io_timing": "track_wal_io_timing",
 	"track_functions":     "track_functions",
@@ -98,23 +125,30 @@ func rollbackSavepoint(ctx context.Context, check string, sp pgx.Tx) error {
 	return nil
 }
 
-// GatherFacts reads the server version, the recovery state, the live checks and the connectable
+// GatherFacts reads the server version, the recovery state, wal_segment_size, the live checks and the connectable
 // databases in one read-only transaction on conn, which must be connected to the default database.
-func GatherFacts(ctx context.Context, conn *pgx.Conn) (Facts, error) {
-	return gatherFacts(ctx, conn, checkSettings)
+// guard (pg.Pool.Guard) runs first and sets the transaction's limits. A session role that is a superuser
+// gives ErrSuperuser and Facts with only the superuser check.
+func GatherFacts(ctx context.Context, conn *pgx.Conn, guard string) (Facts, error) {
+	return gatherFacts(ctx, conn, guard, checkSettings)
 }
 
-func gatherFacts(ctx context.Context, conn *pgx.Conn, settings map[string]string) (facts Facts, err error) {
-	tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return Facts{}, fmt.Errorf("begin facts transaction: %w", err)
+func gatherFacts(ctx context.Context, conn *pgx.Conn, guard string, settings map[string]string) (Facts, error) {
+	var facts Facts
+	superuser, err := pg.ReadOnly(ctx, conn, guard, func(tx pgx.Tx) (err error) {
+		facts, err = readFacts(ctx, tx, settings)
+		return err
+	})
+	if superuser {
+		return Facts{Checks: map[string]bool{"superuser": true}}, ErrSuperuser
 	}
-	defer func() {
-		if rbErr := tx.Rollback(context.WithoutCancel(ctx)); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
-			err = errors.Join(err, fmt.Errorf("roll back facts transaction: %w", rbErr))
-		}
-	}()
+	if err != nil {
+		return Facts{}, fmt.Errorf("facts transaction: %w", err)
+	}
+	return facts, nil
+}
 
+func readFacts(ctx context.Context, tx pgx.Tx, settings map[string]string) (Facts, error) {
 	var versionNum string
 	if err := tx.QueryRow(ctx, "SHOW server_version_num").Scan(&versionNum); err != nil {
 		return Facts{}, fmt.Errorf("show server_version_num: %w", err)
@@ -129,13 +163,23 @@ func gatherFacts(ctx context.Context, conn *pgx.Conn, settings map[string]string
 		return Facts{}, fmt.Errorf("check recovery state: %w", err)
 	}
 
+	var segment string
+	if err := tx.QueryRow(ctx, walSegmentSizeQuery).Scan(&segment); err != nil {
+		return Facts{}, fmt.Errorf("read wal_segment_size: %w", err)
+	}
+	walSegmentSize, err := parseWALSegmentSize(segment)
+	if err != nil {
+		return Facts{}, err
+	}
+
 	checks, checksErr := readChecks(ctx, tx, settings)
+	checks["superuser"] = false
 
 	rows, err := tx.Query(ctx, databasesQuery)
 	if err != nil {
 		return Facts{}, fmt.Errorf("discover databases: %w", err)
 	}
-	var databases []string
+	var databases, skipped []string
 	for rows.Next() {
 		var name string
 		var canConnect bool
@@ -143,8 +187,12 @@ func gatherFacts(ctx context.Context, conn *pgx.Conn, settings map[string]string
 			rows.Close()
 			return Facts{}, fmt.Errorf("scan pg_database row: %w", err)
 		}
-		if canConnect {
+		switch {
+		case !canConnect:
+		case utf8.ValidString(name):
 			databases = append(databases, name)
+		default:
+			skipped = append(skipped, strconv.QuoteToASCII(name))
 		}
 	}
 	rows.Close()
@@ -156,5 +204,9 @@ func gatherFacts(ctx context.Context, conn *pgx.Conn, settings map[string]string
 	}
 
 	sort.Strings(databases)
-	return Facts{Version: version, InRecovery: inRecovery, Databases: databases, Checks: checks, ChecksErr: checksErr}, nil
+	sort.Strings(skipped)
+	return Facts{
+		Version: version, InRecovery: inRecovery, WALSegmentSize: walSegmentSize,
+		Databases: databases, SkippedDatabases: skipped, Checks: checks, ChecksErr: checksErr,
+	}, nil
 }

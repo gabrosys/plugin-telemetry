@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 	"time"
 )
@@ -13,6 +14,12 @@ import (
 const (
 	minInterval     = time.Second
 	minQueryTimeout = 100 * time.Millisecond
+	// maxTimeoutMillis is the maximum of statement_timeout, lock_timeout and
+	// idle_in_transaction_session_timeout in PostgreSQL 18 (postgres --describe-config).
+	maxTimeoutMillis = 2147483647
+	// maxQueryTimeout keeps idle_in_transaction_session_timeout, twice the query timeout, in range.
+	maxQueryTimeout = maxTimeoutMillis / 2 * time.Millisecond
+	maxLockTimeout  = maxTimeoutMillis * time.Millisecond
 
 	// ProtocolHTTP is the OTLP/HTTP transport.
 	ProtocolHTTP = "http/protobuf"
@@ -170,8 +177,14 @@ func (s Settings) validateLimits() []error {
 	if l.QueryTimeout < minQueryTimeout {
 		errs = append(errs, fmt.Errorf("limits.queryTimeout: must be at least %s, got %s", minQueryTimeout, l.QueryTimeout))
 	}
+	if l.QueryTimeout > maxQueryTimeout {
+		errs = append(errs, fmt.Errorf("limits.queryTimeout: must be at most %dms, got %s", maxQueryTimeout.Milliseconds(), l.QueryTimeout))
+	}
 	if l.LockTimeout <= 0 {
 		errs = append(errs, fmt.Errorf("limits.lockTimeout: must be positive, got %s", l.LockTimeout))
+	}
+	if l.LockTimeout > maxLockTimeout {
+		errs = append(errs, fmt.Errorf("limits.lockTimeout: must be at most %dms, got %s", maxLockTimeout.Milliseconds(), l.LockTimeout))
 	}
 	for _, c := range []struct {
 		name string
@@ -203,14 +216,10 @@ func (s Settings) validateExporter() []error {
 	var errs []error
 	e := s.Exporter
 
-	switch e.Protocol {
-	case ProtocolHTTP, ProtocolGRPC:
-	default:
+	if !slices.Contains([]string{ProtocolHTTP, ProtocolGRPC}, e.Protocol) {
 		errs = append(errs, fmt.Errorf("exporter.protocol: must be %q or %q, got %q", ProtocolHTTP, ProtocolGRPC, e.Protocol))
 	}
-	switch e.Compression {
-	case "gzip", "none":
-	default:
+	if !slices.Contains([]string{"gzip", "none"}, e.Compression) {
 		errs = append(errs, fmt.Errorf(`exporter.compression: must be "gzip" or "none", got %q`, e.Compression))
 	}
 	if e.Interval < minInterval {
@@ -223,9 +232,7 @@ func (s Settings) validateExporter() []error {
 		errs = append(errs, fmt.Errorf("exporter.maxPointsPerRequest: must be at least 1, got %d", e.MaxPointsPerRequest))
 	}
 
-	switch e.TLS.MinVersion {
-	case "1.2", "1.3":
-	default:
+	if !slices.Contains([]string{"1.2", "1.3"}, e.TLS.MinVersion) {
 		errs = append(errs, fmt.Errorf(`exporter.tls.minVersion: must be "1.2" or "1.3", got %q`, e.TLS.MinVersion))
 	}
 	if (e.TLS.CertFile == "") != (e.TLS.KeyFile == "") {
@@ -301,10 +308,15 @@ func RedactEndpoint(endpoint string) string {
 	return u.Redacted()
 }
 
-// tlsConfigured reports whether any TLS option other than the default minVersion is set.
+// defaultMinVersion is the TLS minimum version when the file sets none.
+const defaultMinVersion = "1.2"
+
+// tlsConfigured reports whether any TLS option is set; a minVersion equal to the default is not one.
 func (e Exporter) tlsConfigured() bool {
 	t := e.TLS
-	t.MinVersion = ""
+	if t.MinVersion == defaultMinVersion {
+		t.MinVersion = ""
+	}
 	return !t.isZero()
 }
 
@@ -362,19 +374,10 @@ func (s Settings) Warnings(queryKeys []string) []string {
 	}
 	for _, g := range s.Groups {
 		for _, p := range g.Queries {
-			if !matchesAnyKey(p, queryKeys) {
+			if !slices.ContainsFunc(queryKeys, func(k string) bool { return matchAny([]string{p}, k) }) {
 				out = append(out, fmt.Sprintf("group %q: pattern %q matches no query", g.Name, p))
 			}
 		}
 	}
 	return out
-}
-
-func matchesAnyKey(pattern string, keys []string) bool {
-	for _, k := range keys {
-		if ok, err := path.Match(pattern, k); err == nil && ok {
-			return true
-		}
-	}
-	return false
 }

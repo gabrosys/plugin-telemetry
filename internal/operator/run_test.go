@@ -10,12 +10,14 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cloudnative-pg/cnpg-i/pkg/identity"
@@ -27,7 +29,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -49,6 +53,26 @@ func (f *fakeWaiter) Wait(ctx context.Context) error {
 		return ctx.Err()
 	}
 }
+
+// blockingWaiter is ready at once; Image signals entered, then blocks until release is closed.
+type blockingWaiter struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingWaiter() *blockingWaiter {
+	return &blockingWaiter{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (b *blockingWaiter) Image() string {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+
+	return "registry.example/sidecar:1"
+}
+
+func (*blockingWaiter) Wait(context.Context) error { return nil }
 
 type fakeCache struct {
 	cache.Cache
@@ -170,33 +194,55 @@ func canDial(addr string) bool {
 var _ = Describe("Run", func() {
 	var (
 		pki    *testPKI
+		addrMu sync.Mutex // guards addr
 		addr   string
 		waiter *fakeWaiter
+		images operator.ImageWaiter
 		caches *fakeCache
 		cancel context.CancelFunc
 		done   chan error
 	)
 
 	deps := func() operator.Deps {
-		return operator.Deps{Cache: caches, Reconciler: &operator.Reconciler{}, Status: &operator.Status{}}
+		return operator.Deps{Cache: caches, Status: &operator.Status{}}
 	}
 
+	address := func() string {
+		addrMu.Lock()
+		defer addrMu.Unlock()
+
+		return addr
+	}
+
+	// start runs Run on a new address when freeAddress was taken in the meantime.
 	start := func() {
 		var ctx context.Context
 		ctx, cancel = context.WithCancel(context.Background())
 		done = make(chan error, 1)
 		go func() {
-			done <- operator.Run(ctx, operator.Options{
-				ServerAddress:  addr,
-				ServerCertPath: pki.serverCert,
-				ServerKeyPath:  pki.serverKey,
-				ClientCAPath:   pki.clientCert,
-			}, waiter, deps())
+			defer GinkgoRecover()
+			for {
+				err := operator.Run(ctx, operator.Options{
+					ServerAddress:  address(),
+					ServerCertPath: pki.serverCert,
+					ServerKeyPath:  pki.serverKey,
+					ClientCAPath:   pki.clientCert,
+				}, images, deps())
+				if !errors.Is(err, syscall.EADDRINUSE) {
+					done <- err
+
+					return
+				}
+				next := freeAddress()
+				addrMu.Lock()
+				addr = next
+				addrMu.Unlock()
+			}
 		}()
 	}
 
 	dial := func(cfg *tls.Config) (*grpc.ClientConn, error) {
-		return grpc.NewClient(addr, grpc.WithTransportCredentials(credentials.NewTLS(cfg)))
+		return grpc.NewClient(address(), grpc.WithTransportCredentials(credentials.NewTLS(cfg)))
 	}
 
 	goodTLS := func() *tls.Config {
@@ -211,8 +257,11 @@ var _ = Describe("Run", func() {
 	BeforeEach(func() {
 		cancel, done = nil, nil
 		pki = newTestPKI()
+		addrMu.Lock()
 		addr = freeAddress()
+		addrMu.Unlock()
 		waiter = &fakeWaiter{ready: make(chan struct{})}
+		images = waiter
 		caches = &fakeCache{synced: make(chan struct{})}
 	})
 
@@ -221,33 +270,33 @@ var _ = Describe("Run", func() {
 			return
 		}
 		cancel()
-		Eventually(done, 5*time.Second).Should(Receive())
+		Eventually(done, 5*time.Second).Should(Receive(BeNil()))
 	})
 
 	It("does not listen before the sidecar image is known", func() {
 		start()
-		Consistently(func() bool { return canDial(addr) }, 500*time.Millisecond, 50*time.Millisecond).Should(BeFalse())
+		Consistently(func() bool { return canDial(address()) }, 500*time.Millisecond, 50*time.Millisecond).Should(BeFalse())
 		close(waiter.ready)
 		close(caches.synced)
-		Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
+		Eventually(func() bool { return canDial(address()) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
 	})
 
-	It("registers an informer for all six cached kinds before it listens", func() {
+	It("registers an informer for all seven cached kinds before it listens", func() {
 		close(waiter.ready)
 		start()
 		Eventually(caches.kinds, 5*time.Second).Should(ConsistOf(
 			"*v1.Cluster", "*v1alpha1.TelemetryExporter",
-			"*v1.ServiceAccount", "*v1.Role", "*v1.RoleBinding", "*v1.Secret",
+			"*v1.ServiceAccount", "*v1.Role", "*v1.RoleBinding", "*v1.Secret", "*v1.ConfigMap",
 		))
-		Expect(canDial(addr)).To(BeFalse())
+		Expect(canDial(address())).To(BeFalse())
 	})
 
 	It("does not listen before the caches have synced", func() {
 		close(waiter.ready)
 		start()
-		Consistently(func() bool { return canDial(addr) }, 500*time.Millisecond, 50*time.Millisecond).Should(BeFalse())
+		Consistently(func() bool { return canDial(address()) }, 500*time.Millisecond, 50*time.Millisecond).Should(BeFalse())
 		close(caches.synced)
-		Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
+		Eventually(func() bool { return canDial(address()) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
 	})
 
 	Context("once the image is known", func() {
@@ -255,7 +304,7 @@ var _ = Describe("Run", func() {
 			close(waiter.ready)
 			close(caches.synced)
 			start()
-			Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
+			Eventually(func() bool { return canDial(address()) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
 		})
 
 		It("serves identity over mTLS", func() {
@@ -282,32 +331,15 @@ var _ = Describe("Run", func() {
 			Expect(resp.GetLifecycleCapabilities()[0].GetKind()).To(Equal("Pod"))
 		})
 
-		It("serves ReconcilerHooks.GetCapabilities with KIND_CLUSTER", func() {
+		It("answers Unimplemented to ReconcilerHooks.GetCapabilities", func() {
 			conn, err := dial(goodTLS())
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(conn.Close)
 			ctx, c := context.WithTimeout(context.Background(), 5*time.Second)
 			defer c()
-			resp, err := reconciler.NewReconcilerHooksClient(conn).
+			_, err = reconciler.NewReconcilerHooksClient(conn).
 				GetCapabilities(ctx, &reconciler.ReconcilerHooksCapabilitiesRequest{})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.GetReconcilerCapabilities()).To(HaveLen(1))
-			Expect(resp.GetReconcilerCapabilities()[0].GetKind()).To(Equal(reconciler.ReconcilerHooksCapability_KIND_CLUSTER))
-		})
-
-		It("answers CONTINUE to Pre and Post", func() {
-			conn, err := dial(goodTLS())
-			Expect(err).NotTo(HaveOccurred())
-			DeferCleanup(conn.Close)
-			ctx, c := context.WithTimeout(context.Background(), 5*time.Second)
-			defer c()
-			client := reconciler.NewReconcilerHooksClient(conn)
-			pre, err := client.Pre(ctx, &reconciler.ReconcilerHooksRequest{})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(pre.GetBehavior()).To(Equal(reconciler.ReconcilerHooksResult_BEHAVIOR_CONTINUE))
-			post, err := client.Post(ctx, &reconciler.ReconcilerHooksRequest{})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(post.GetBehavior()).To(Equal(reconciler.ReconcilerHooksResult_BEHAVIOR_CONTINUE))
+			Expect(status.Code(err)).To(Equal(codes.Unimplemented))
 		})
 
 		It("serves Operator.GetCapabilities with only RPC_TYPE_SET_STATUS_IN_CLUSTER", func() {
@@ -373,11 +405,67 @@ var _ = Describe("Run", func() {
 		})
 	})
 
+	Context("with an EVALUATE call in flight", func() {
+		var (
+			blocking *blockingWaiter
+			release  func()
+			result   chan error
+			patch    chan []byte
+		)
+
+		BeforeEach(func() {
+			blocking = newBlockingWaiter()
+			images = blocking
+			release = sync.OnceFunc(func() { close(blocking.release) })
+			DeferCleanup(release)
+			close(caches.synced)
+			start()
+			Eventually(func() bool { return canDial(address()) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
+
+			conn, err := dial(goodTLS())
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(conn.Close)
+			result = make(chan error, 1)
+			patch = make(chan []byte, 1)
+			go func() {
+				ctx, c := context.WithTimeout(context.Background(), 10*time.Second)
+				defer c()
+				resp, err := lifecycle.NewOperatorLifecycleClient(conn).LifecycleHook(ctx,
+					request(lifecycle.OperatorOperationType_TYPE_EVALUATE, clusterJSON(ours(nil)), fixturePod("pod-main")))
+				patch <- resp.GetJsonPatch()
+				result <- err
+			}()
+			Eventually(blocking.entered, 5*time.Second).Should(BeClosed())
+		})
+
+		It("lets a call in flight finish after its context ends", func() {
+			cancel()
+			By("accepts no new connection once its context ends")
+			Eventually(func() bool { return canDial(address()) }, 5*time.Second, 50*time.Millisecond).Should(BeFalse())
+			By("finishing the call in flight after the dial is refused")
+			release()
+			Eventually(result, 5*time.Second).Should(Receive(BeNil()))
+			Expect(<-patch).NotTo(BeEmpty())
+			Eventually(done, 5*time.Second).Should(Receive(BeNil()))
+			done <- nil
+		})
+
+		It("ends a call still running when the drain timeout has passed", func() {
+			DeferCleanup(operator.SetDrainTimeout(200 * time.Millisecond))
+			cancel()
+			var err error
+			Eventually(result, 2*time.Second).Should(Receive(&err))
+			Expect(status.Code(err)).To(Equal(codes.Unavailable))
+			Eventually(done, 2*time.Second).Should(Receive(BeNil()))
+			done <- nil
+		})
+	})
+
 	It("stops when the context ends", func() {
 		close(waiter.ready)
 		close(caches.synced)
 		start()
-		Eventually(func() bool { return canDial(addr) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
+		Eventually(func() bool { return canDial(address()) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
 		cancel()
 		Eventually(done, 5*time.Second).Should(Receive(BeNil()))
 		done <- nil
@@ -411,7 +499,7 @@ var _ = Describe("Run", func() {
 		done = make(chan error, 1)
 		go func() {
 			done <- operator.Run(ctx, operator.Options{
-				ServerAddress:  addr,
+				ServerAddress:  address(),
 				ServerCertPath: pki.serverCert,
 				ServerKeyPath:  pki.serverKey,
 				ClientCAPath:   pki.clientCert,
@@ -424,46 +512,19 @@ var _ = Describe("Run", func() {
 		Eventually(logged, 5*time.Second).Should(ContainElement("sidecar image loaded, serving"))
 	})
 
+	It("returns nil when the context ends while it waits for the caches", func() {
+		close(waiter.ready)
+		start()
+		Eventually(caches.kinds, 5*time.Second).ShouldNot(BeEmpty())
+		cancel()
+		Eventually(done, 5*time.Second).Should(Receive(BeNil()))
+		done <- nil
+	})
+
 	It("returns nil when the context ends before the image is known", func() {
 		start()
 		cancel()
 		Eventually(done, 5*time.Second).Should(Receive(BeNil()))
 		done <- nil
 	})
-
-	DescribeTable("refuses to start without its dependencies",
-		func(mutate func(*operator.Deps)) {
-			d := deps()
-			mutate(&d)
-			close(waiter.ready)
-			Expect(operator.Run(context.Background(), operator.Options{
-				ServerAddress:  addr,
-				ServerCertPath: pki.serverCert,
-				ServerKeyPath:  pki.serverKey,
-				ClientCAPath:   pki.clientCert,
-			}, waiter, d)).To(MatchError(operator.ErrInvalidDeps))
-		},
-		Entry("no cache", func(d *operator.Deps) { d.Cache = nil }),
-		Entry("no reconciler", func(d *operator.Deps) { d.Reconciler = nil }),
-		Entry("no status", func(d *operator.Deps) { d.Status = nil }),
-	)
-
-	DescribeTable("refuses to start without TLS material",
-		func(mutate func(*operator.Options)) {
-			opts := operator.Options{
-				ServerAddress:  addr,
-				ServerCertPath: pki.serverCert,
-				ServerKeyPath:  pki.serverKey,
-				ClientCAPath:   pki.clientCert,
-			}
-			mutate(&opts)
-			close(waiter.ready)
-			Expect(operator.Run(context.Background(), opts, waiter, deps())).To(MatchError(operator.ErrInvalidOptions))
-			Consistently(func() bool { return canDial(addr) }, 200*time.Millisecond, 50*time.Millisecond).Should(BeFalse())
-		},
-		Entry("empty server address", func(o *operator.Options) { o.ServerAddress = "" }),
-		Entry("empty server cert", func(o *operator.Options) { o.ServerCertPath = "" }),
-		Entry("empty server key", func(o *operator.Options) { o.ServerKeyPath = "" }),
-		Entry("empty client CA", func(o *operator.Options) { o.ClientCAPath = "" }),
-	)
 })

@@ -7,6 +7,9 @@ import (
 )
 
 // GatherFactsWith is GatherFacts with the settings the checks read, keyed by check.
-func GatherFactsWith(ctx context.Context, conn *pgx.Conn, settings map[string]string) (Facts, error) {
-	return gatherFacts(ctx, conn, settings)
+func GatherFactsWith(ctx context.Context, conn *pgx.Conn, guard string, settings map[string]string) (Facts, error) {
+	return gatherFacts(ctx, conn, guard, settings)
 }
+
+// ParseWALSegmentSize is parseWALSegmentSize.
+var ParseWALSegmentSize = parseWALSegmentSize

@@ -1,9 +1,116 @@
 package policy_test
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.yaml.in/yaml/v4"
 )
+
+const rbacFile = "config/rbac.yaml"
+
+type rule struct {
+	APIGroups     []string `yaml:"apiGroups"`
+	Resources     []string `yaml:"resources"`
+	ResourceNames []string `yaml:"resourceNames"`
+	Verbs         []string `yaml:"verbs"`
+}
+
+type manifest struct {
+	Kind      string `yaml:"kind"`
+	Namespace string `yaml:"namespace"`
+	Metadata  struct {
+		Name        string            `yaml:"name"`
+		Namespace   string            `yaml:"namespace"`
+		Annotations map[string]string `yaml:"annotations"`
+	} `yaml:"metadata"`
+	ConfigMapGenerator []struct {
+		Name      string `yaml:"name"`
+		Namespace string `yaml:"namespace"`
+	} `yaml:"configMapGenerator"`
+	Spec struct {
+		MatchConditions []struct {
+			Name       string `yaml:"name"`
+			Expression string `yaml:"expression"`
+		} `yaml:"matchConditions"`
+		Validations []struct {
+			Message string `yaml:"message"`
+		} `yaml:"validations"`
+	} `yaml:"spec"`
+	Rules   []rule `yaml:"rules"`
+	RoleRef struct {
+		Kind string `yaml:"kind"`
+		Name string `yaml:"name"`
+	} `yaml:"roleRef"`
+	Subjects []struct {
+		Kind      string `yaml:"kind"`
+		Name      string `yaml:"name"`
+		Namespace string `yaml:"namespace"`
+	} `yaml:"subjects"`
+}
+
+func readManifests(file string) ([]manifest, error) {
+	raw, err := fs.ReadFile(os.DirFS(repoRoot), file)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", file, err)
+	}
+
+	var out []manifest
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	for {
+		var m manifest
+		err := dec.Decode(&m)
+		if errors.Is(err, io.EOF) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", file, err)
+		}
+		out = append(out, m)
+	}
+}
+
+// findAll returns every manifest of kind.
+func findAll(manifests []manifest, kind string) []manifest {
+	var out []manifest
+	for _, m := range manifests {
+		if m.Kind == kind {
+			out = append(out, m)
+		}
+	}
+
+	return out
+}
+
+func find(manifests []manifest, kind string) manifest {
+	GinkgoHelper()
+
+	for _, m := range manifests {
+		if m.Kind == kind {
+			return m
+		}
+	}
+	Fail("no " + kind)
+
+	return manifest{}
+}
+
+var _ = Describe("findAll", func() {
+	It("returns every manifest of the kind, in order", func() {
+		a, b := manifest{Kind: "Role"}, manifest{Kind: "Role"}
+		a.Metadata.Name, b.Metadata.Name = "a", "b"
+		in := []manifest{a, {Kind: "ClusterRole"}, b}
+
+		Expect(findAll(in, "Role")).To(Equal([]manifest{a, b}))
+		Expect(findAll(in, "Secret")).To(BeEmpty())
+	})
+})
 
 var _ = Describe("the plugin ClusterRole", func() {
 	var (
@@ -44,6 +151,20 @@ var _ = Describe("the plugin ClusterRole", func() {
 			Expect(r.Verbs).NotTo(ContainElements("bind"))
 			Expect(r.Verbs).NotTo(ContainElements("*"))
 			Expect(r.Resources).NotTo(ContainElements("*"))
+		}
+	})
+
+	It("holds one ClusterRole, and none grants serviceaccounts/token, escalate, bind or *", func() {
+		rbac, err := readManifests(rbacFile)
+		Expect(err).NotTo(HaveOccurred())
+
+		roles := findAll(rbac, "ClusterRole")
+		Expect(roles).To(HaveLen(1))
+		for _, r := range roles[0].Rules {
+			for _, banned := range []string{"serviceaccounts/token", "escalate", "bind", "*"} {
+				Expect(r.Resources).NotTo(ContainElement(banned))
+				Expect(r.Verbs).NotTo(ContainElement(banned))
+			}
 		}
 	})
 

@@ -5,17 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"sync"
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
+	"github.com/distribution/reference"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/rest"
 	toolscache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // SidecarImageKey is the ConfigMap data key holding the sidecar image reference.
@@ -28,15 +24,15 @@ var errUnexpectedObject = errors.New("unexpected object type")
 
 var errConfigMapDeleted = errors.New("sidecar image configmap deleted, a restarted replica will not serve")
 
-var imageRefPattern = regexp.MustCompile(
-	`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*@sha256:[0-9a-f]{64}$`)
-
-// ParseImageRef returns s when it is a digest reference, and ErrInvalidImageRef otherwise.
-func ParseImageRef(s string) (string, error) {
-	if !imageRefPattern.MatchString(s) {
-		return "", fmt.Errorf("parse image reference %q: %w", s, ErrInvalidImageRef)
+// digestRef reports whether image is a repository with a sha256 digest and no tag, by the distribution reference grammar.
+func digestRef(image string) bool {
+	ref, err := reference.Parse(image)
+	if err != nil {
+		return false
 	}
-	return s, nil
+	c, canonical := ref.(reference.Canonical)
+	_, tagged := ref.(reference.Tagged)
+	return canonical && !tagged && c.Digest().Algorithm() == "sha256"
 }
 
 // ImageStore holds the current sidecar image and signals when the first valid one arrives.
@@ -57,13 +53,12 @@ func (s *ImageStore) Set(cm *corev1.ConfigMap) error {
 	if cm == nil {
 		return fmt.Errorf("sidecar image configmap is nil: %w", ErrInvalidImageRef)
 	}
-	raw, ok := cm.Data[SidecarImageKey]
+	image, ok := cm.Data[SidecarImageKey]
 	if !ok {
 		return fmt.Errorf("configmap %s/%s has no key %q: %w", cm.Namespace, cm.Name, SidecarImageKey, ErrInvalidImageRef)
 	}
-	image, err := ParseImageRef(raw)
-	if err != nil {
-		return fmt.Errorf("configmap %s/%s key %q: %w", cm.Namespace, cm.Name, SidecarImageKey, err)
+	if !digestRef(image) {
+		return fmt.Errorf("configmap %s/%s key %q is %q: %w", cm.Namespace, cm.Name, SidecarImageKey, image, ErrInvalidImageRef)
 	}
 
 	s.mu.Lock()
@@ -90,69 +85,57 @@ func (s *ImageStore) Wait(ctx context.Context) error {
 	}
 }
 
-// WatchSidecarImage runs a cache for one ConfigMap and calls store.Set on add and update.
-// A delete keeps the stored value and logs. It returns when ctx ends.
-func WatchSidecarImage(
-	ctx context.Context,
-	cfg *rest.Config,
-	namespace, name string,
-	store *ImageStore,
-) error {
-	logger := log.FromContext(ctx).WithValues("namespace", namespace, "configmap", name)
-
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		return fmt.Errorf("register core/v1 scheme: %w", err)
-	}
-
-	c, err := cache.New(cfg, cache.Options{
-		Scheme:            scheme,
-		DefaultNamespaces: map[string]cache.Config{namespace: {}},
-		ByObject: map[client.Object]cache.ByObject{
-			&corev1.ConfigMap{}: {Field: fields.OneTermEqualSelector("metadata.name", name)},
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("create configmap cache: %w", err)
-	}
-
-	informer, err := c.GetInformer(ctx, &corev1.ConfigMap{})
+// WatchSidecarImage feeds the sidecar image ConfigMap informer, whose cache holds only the ConfigMap
+// namespace/name, to store: it calls store.Set on add and update, and a delete keeps the stored value and
+// logs. It does not wait for the informer to sync; the cache that owns it must be started by the caller.
+func WatchSidecarImage(ctx context.Context, informers cache.Informers, store *ImageStore, namespace, name string) error {
+	informer, err := informers.GetInformer(ctx, &corev1.ConfigMap{}, cache.BlockUntilSynced(false))
 	if err != nil {
 		return fmt.Errorf("get configmap informer: %w", err)
 	}
 
-	_, err = informer.AddEventHandler(imageEventHandler(logger, store))
-	if err != nil {
+	if _, err := informer.AddEventHandler(imageEventHandler(log.FromContext(ctx), store, namespace, name)); err != nil {
 		return fmt.Errorf("add configmap event handler: %w", err)
 	}
 
-	if err := c.Start(ctx); err != nil {
-		return fmt.Errorf("run configmap cache: %w", err)
-	}
 	return nil
 }
 
-// imageEventHandler feeds ConfigMap events to store. An invalid ConfigMap or a
-// delete (including a DeletedFinalStateUnknown tombstone) keeps the stored image.
-func imageEventHandler(logger log.Logger, store *ImageStore) toolscache.ResourceEventHandlerFuncs {
+// imageEventHandler feeds ConfigMap events to store; an invalid ConfigMap or a delete keeps the stored image.
+func imageEventHandler(logger log.Logger, store *ImageStore, namespace, name string) toolscache.ResourceEventHandlerFuncs {
 	set := func(obj any) {
 		cm, ok := obj.(*corev1.ConfigMap)
 		if !ok {
 			logger.Error(errUnexpectedObject, "ignoring event", "type", fmt.Sprintf("%T", obj))
 			return
 		}
+		logger := logger.WithValues("namespace", cm.Namespace, "configmap", cm.Name)
 		if err := store.Set(cm); err != nil {
 			logger.Error(err, "ignoring sidecar image configmap")
 			return
 		}
-		logger.Info("sidecar image updated", "image", store.Image())
+		logger.Info("sidecar image updated", "image", cm.Data[SidecarImageKey])
 	}
 
 	return toolscache.ResourceEventHandlerFuncs{
-		AddFunc:    set,
-		UpdateFunc: func(_, obj any) { set(obj) },
+		AddFunc: set,
+		UpdateFunc: func(oldObj, newObj any) {
+			if sameImage(oldObj, newObj) {
+				return
+			}
+			set(newObj)
+		},
 		DeleteFunc: func(any) {
-			logger.Error(errConfigMapDeleted, "keeping the last valid sidecar image")
+			logger.WithValues("namespace", namespace, "configmap", name).
+				Error(errConfigMapDeleted, "keeping the last valid sidecar image")
 		},
 	}
+}
+
+// sameImage reports whether two ConfigMaps hold the same image reference, as on a resync.
+func sameImage(a, b any) bool {
+	oldCM, okOld := a.(*corev1.ConfigMap)
+	newCM, okNew := b.(*corev1.ConfigMap)
+
+	return okOld && okNew && oldCM.Data[SidecarImageKey] == newCM.Data[SidecarImageKey]
 }

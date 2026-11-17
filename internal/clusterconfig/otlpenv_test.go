@@ -16,16 +16,6 @@ const (
 )
 
 var _ = Describe("OTEL_EXPORTER_OTLP_* keys", func() {
-	DescribeTable("appends v1/metrics to exporter.endpoint for http/protobuf",
-		func(endpoint string) {
-			in := newInputs()
-			in.Exporter.Spec.Exporter.Endpoint = endpoint
-			Expect(mustBuild(in).Exporter.Endpoint).To(HaveSuffix("/v1/metrics"))
-		},
-		Entry("a bare host", "http://c:4318"),
-		Entry("a bare host with a slash", "http://c:4318/"),
-	)
-
 	DescribeTable("builds the http/protobuf URL",
 		func(endpoint, want string) {
 			in := newInputs()
@@ -41,6 +31,12 @@ var _ = Describe("OTEL_EXPORTER_OTLP_* keys", func() {
 		Entry("a base path", "http://c:4318/base", "http://c:4318/base/v1/metrics"),
 		Entry("a base path with a slash", "http://c:4318/base/", "http://c:4318/base/v1/metrics"),
 	)
+
+	It("ignores an EnvSecret when spec.envFrom names no Secret", func() {
+		in := withEnv(nil, map[string]string{"OTEL_EXPORTER_OTLP_HEADERS": "a=1"})
+		in.Exporter.Spec.EnvFrom = &v1alpha1.EnvFromSource{ConfigMap: &v1alpha1.LocalObjectReference{Name: "envcm"}}
+		Expect(mustBuild(in).Exporter.HeadersFile).To(BeEmpty())
+	})
 
 	It("keeps OTEL_..._METRICS_ENDPOINT as is", func() {
 		in := withEnv(map[string]string{envMetricsEndpoint: "http://c:4318/custom/metrics"}, nil)

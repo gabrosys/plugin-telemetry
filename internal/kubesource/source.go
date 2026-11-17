@@ -4,22 +4,23 @@ package kubesource
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	"github.com/cloudnative-pg/machinery/pkg/log"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/clock"
@@ -28,18 +29,19 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/clusterconfig"
 	"github.com/gabrosys/plugin-telemetry/internal/engine"
 	"github.com/gabrosys/plugin-telemetry/internal/podpatch"
+	"github.com/gabrosys/plugin-telemetry/internal/safe"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
 	"github.com/gabrosys/plugin-telemetry/internal/sources"
 )
 
 const (
-	debounce      = time.Second
 	tokenPollTime = 5 * time.Second
+	startRetry    = 5 * time.Second // the wait before a watch whose start panicked, or whose informer died, is started again
 )
 
 var errNotSynced = errors.New("watch has not synced")
 
-// Options configure a Source.
+// Options configure a Source; the CLI checks that none is empty.
 type Options struct {
 	Namespace, Cluster string // NAMESPACE, CLUSTER_NAME
 	APIServer          string // "https://" + KUBERNETES_SERVICE_HOST:PORT
@@ -47,54 +49,38 @@ type Options struct {
 	Clock              clock.Clock
 }
 
-// subscriber is a Watch call.
-type subscriber struct {
-	wake    chan struct{}
-	onError func(error)
-}
-
 // Source implements engine.Config over named watches. Start must run before the engine uses it.
 type Source struct {
-	o Options
+	o      Options
+	replan chan struct{} // cap 1: a Cluster or exporter event, or new lastGood refs, asks run to reconcile
 
-	mu          sync.Mutex // covers every field below
-	entries     map[key]*entry
-	subs        map[*subscriber]struct{}
-	w           watcher
-	ctx         context.Context //nolint:containedctx // the lifetime of the watches, set once by begin
-	log         log.Logger
-	reconciling bool // a goroutine is running reconcile
-	dirty       bool // an event arrived while it was
+	mu       sync.Mutex // covers every field below
+	entries  map[key]*entry
+	subs     map[chan struct{}]struct{} // the wake channel of each Watch call
+	lastGood clusterconfig.Refs         // the references of the last Settings that built
+	log      log.Logger
+	warned   []string // the Build warnings of the last Settings that built
 }
 
-// New returns a Source; it fails only when an option is empty.
-func New(o Options) (*Source, error) {
-	switch {
-	case o.Namespace == "":
-		return nil, errors.New("new kubernetes source: empty namespace")
-	case o.Cluster == "":
-		return nil, errors.New("new kubernetes source: empty cluster name")
-	case o.APIServer == "":
-		return nil, errors.New("new kubernetes source: empty API server address")
-	case o.TokenDir == "":
-		return nil, errors.New("new kubernetes source: empty token directory")
-	}
+// New returns a Source.
+func New(o Options) *Source {
 	if o.Clock == nil {
 		o.Clock = clock.RealClock{}
 	}
 
 	return &Source{
 		o:       o,
+		replan:  make(chan struct{}, 1),
 		entries: map[key]*entry{},
-		subs:    map[*subscriber]struct{}{},
+		subs:    map[chan struct{}]struct{}{},
 		log:     log.GetLogger(),
-	}, nil
+	}
 }
 
 // Name returns "kubernetes".
 func (*Source) Name() string { return "kubernetes" }
 
-// Start waits for the token, builds the client and watches until ctx ends.
+// Start waits for the token, builds the client and watches until ctx ends; it returns nil then.
 func (s *Source) Start(ctx context.Context) error {
 	client, err := s.client(ctx)
 	if err != nil {
@@ -103,67 +89,78 @@ func (s *Source) Start(ctx context.Context) error {
 	if client == nil {
 		return nil
 	}
-	s.begin(ctx, dynamicWatcher(client))
-	<-ctx.Done()
-	s.stopAll()
+	s.run(ctx, dynamicWatcher(client))
 
 	return nil
 }
 
-// Snapshot gets every referenced object once, with no watch, for the instance tools.
-func Snapshot(ctx context.Context, o Options) (*Source, error) {
-	s, err := New(o)
-	if err != nil {
-		return nil, err
-	}
-	client, err := s.client(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if client == nil {
-		return nil, fmt.Errorf("snapshot: %w", ctx.Err())
-	}
+// Snapshot starts a Source on ctx, which keeps its watches until ctx ends, and waits up to wait for its
+// Settings to stop being not ready, for the instance tools.
+func Snapshot(ctx context.Context, o Options, wait time.Duration) (*Source, error) {
+	s := New(o)
 
-	w, errs := snapshotWatcher(client)
-	s.begin(ctx, w)
-	if err := errs(); err != nil {
-		return nil, fmt.Errorf("snapshot: %w", err)
+	return s.open(ctx, wait, s.Start)
+}
+
+// pollReady is how often open checks whether the Settings are ready.
+const pollReady = 100 * time.Millisecond
+
+// open runs start on its own goroutine, which ends with ctx, and returns s once every watch the wanted set
+// has has reported or been denied. It fails when start fails, or when wait or ctx ends first.
+func (s *Source) open(ctx context.Context, wait time.Duration, start func(context.Context) error) (*Source, error) {
+	started := make(chan error, 1)
+	go func() { started <- start(ctx) }()
+	waitCtx, stopWait := context.WithTimeout(ctx, wait)
+	defer stopWait()
+
+	for pending := s.pending(); len(pending) > 0; pending = s.pending() {
+		select {
+		case err := <-started:
+			if err != nil {
+				return nil, err
+			}
+			// Start returns without an error only when ctx has ended.
+			return nil, s.notReady(pending, ctx.Err())
+		case <-waitCtx.Done():
+			return nil, s.notReady(pending, waitCtx.Err())
+		case <-s.o.Clock.After(pollReady):
+		}
 	}
 
 	return s, nil
 }
 
-// snapshotWatcher gets each object once, synchronously; errs returns the failures other than 403 and 404.
-func snapshotWatcher(client dynamic.Interface) (w watcher, errs func() error) {
-	var (
-		mu       sync.Mutex // covers failures
-		failures []error
-	)
-	w = func(ctx context.Context, gvr schema.GroupVersionResource, namespace, name string, h handler) func() {
-		obj, err := client.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
-		switch {
-		case err == nil:
-			h.set(obj)
-		case apierrors.IsNotFound(err):
-			h.set(nil)
-		case apierrors.IsForbidden(err):
-			h.fail(fmt.Errorf("%w: %w", sources.ErrDenied, err))
-		default:
-			mu.Lock()
-			failures = append(failures, fmt.Errorf("get %s %s: %w", gvr.Resource, name, err))
-			mu.Unlock()
-			h.fail(err)
+// pending lists, sorted, each watch the wanted set has that has neither reported nor been denied, with
+// the text of its last watch error: "<kind> <name>: <error>".
+func (s *Source) pending() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for k := range s.wantedLocked() {
+		e := s.entries[k]
+		if e != nil && (e.synced || e.denied != nil) {
+			continue
 		}
-
-		return func() {}
+		reason := "no answer yet"
+		if e != nil && e.lastErr != "" {
+			reason = e.lastErr
+		}
+		out = append(out, fmt.Sprintf("%s %s: %s", k.kind, k.name, reason))
 	}
-	errs = func() error {
-		mu.Lock()
-		defer mu.Unlock()
-		return errors.Join(failures...)
+	slices.Sort(out)
+
+	return out
+}
+
+// notReady is the error of an open that ended before the watches synced: no token, or ErrNotReady
+// naming what is pending.
+func (s *Source) notReady(pending []string, cause error) error {
+	token := filepath.Join(s.o.TokenDir, "token")
+	if _, err := os.Stat(token); err != nil {
+		return fmt.Errorf("sidecar token %s did not appear: %w", token, cause)
 	}
 
-	return w, errs
+	return fmt.Errorf("the watched objects did not sync (%s): %w: %w", strings.Join(pending, "; "), engine.ErrNotReady, cause)
 }
 
 // client waits for the token and returns the dynamic client; nil when ctx ended first.
@@ -194,7 +191,7 @@ func (s *Source) waitForToken(ctx context.Context) bool {
 			return true
 		}
 		if !waited {
-			logger.Info("waiting for the sidecar token", "path", path)
+			logger.Info("waiting for the sidecar token", "path", path, "error", err.Error())
 		}
 		select {
 		case <-ctx.Done():
@@ -204,134 +201,125 @@ func (s *Source) waitForToken(ctx context.Context) bool {
 	}
 }
 
-// begin starts watching the Cluster with w and returns.
-func (s *Source) begin(ctx context.Context, w watcher) {
+// run alone starts and stops the watches: it reconciles at start, on each replan and startRetry after a
+// watch start panicked, and stops every watch when ctx ends.
+func (s *Source) run(ctx context.Context, w watcher) {
 	s.mu.Lock()
-	s.ctx, s.w, s.log = ctx, w, log.FromContext(ctx)
+	s.log = log.FromContext(ctx)
 	s.mu.Unlock()
 
-	s.reconcile()
-}
-
-func (s *Source) stopAll() {
-	s.mu.Lock()
-	var stops []func()
-	for k, e := range s.entries {
-		e.gone = true
-		if e.stop != nil {
-			stops = append(stops, e.stop)
-		}
-		delete(s.entries, k)
-	}
-	s.mu.Unlock()
-
-	for _, stop := range stops {
-		stop()
-	}
-}
-
-type start struct {
-	k key
-	e *entry
-}
-
-// reconcile starts the watches the Cluster and the exporter call for and stops the others. Events that
-// arrive while it runs, including those a watcher reports synchronously, make it plan again.
-func (s *Source) reconcile() {
-	s.mu.Lock()
-	if s.reconciling {
-		s.dirty = true
-		s.mu.Unlock()
-		return
-	}
-	s.reconciling = true
 	for {
-		s.dirty = false
-		starts, stops := s.planLocked()
-		w, ctx := s.w, s.ctx
-		s.mu.Unlock()
-
-		for _, stop := range stops {
-			stop()
+		var retry <-chan time.Time
+		if s.reconcile(ctx, w) {
+			retry = s.o.Clock.After(startRetry)
 		}
-		for _, st := range starts {
-			stop := w(ctx, resources[st.k.kind], s.o.Namespace, st.k.name, s.handler(st.k, st.e))
-			s.mu.Lock()
-			if st.e.gone {
-				s.mu.Unlock()
-				stop()
+		select {
+		case <-ctx.Done():
+			s.reconcile(ctx, nil)
+			return
+		case <-s.replan:
+		case <-retry:
+		}
+	}
+}
+
+// reconcile starts with w the watches the wanted set adds and stops those it drops; a nil w stops all.
+// It reports whether to run again later: a panic in it, or in a watch start, which then has no entry
+// so that the next reconcile starts it again.
+func (s *Source) reconcile(ctx context.Context, w watcher) (retry bool) {
+	logger := s.logger()
+	panicked := safe.Call(logger, "reconcile", func() {
+		stops, starts := s.diff(w)
+		for _, stop := range stops {
+			// One stop that panics must not leave the others, or the starts, undone.
+			safe.Call(logger, "stop of a watch", stop)
+		}
+		for k, e := range starts {
+			var stop func()
+			if safe.Call(logger, "start of the watch on "+string(k.kind)+" "+k.name, func() {
+				stop = w(ctx, resources[k.kind], s.o.Namespace, k.name, s.handler(ctx, k, e))
+			}) {
+				retry = true
+				s.forget(k, e)
 				continue
 			}
-			st.e.stop = stop
+			s.mu.Lock()
+			e.stop = stop
 			s.mu.Unlock()
 		}
-
-		s.mu.Lock()
-		if !s.dirty {
-			s.reconciling = false
-			s.mu.Unlock()
-			return
-		}
-	}
+	})
+	return retry || panicked
 }
 
-func (s *Source) planLocked() ([]start, []func()) {
-	wanted := s.wantedLocked()
-
-	var stops []func()
+// diff drops the entries the wanted set no longer has, returning their stops, and adds entries for the
+// watches to start.
+func (s *Source) diff(w watcher) (stops []func(), starts map[key]*entry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	wanted := map[key]struct{}{}
+	if w != nil {
+		wanted = s.wantedLocked()
+	}
 	for k, e := range s.entries {
 		if _, ok := wanted[k]; ok {
 			continue
 		}
-		e.gone = true
 		if e.stop != nil {
 			stops = append(stops, e.stop)
 		}
 		delete(s.entries, k)
 	}
-
-	var starts []start
+	starts = map[key]*entry{}
 	for k := range wanted {
-		if _, ok := s.entries[k]; ok {
-			continue
+		if _, ok := s.entries[k]; !ok {
+			e := &entry{}
+			s.entries[k] = e
+			starts[k] = e
 		}
-		e := &entry{}
-		s.entries[k] = e
-		starts = append(starts, start{k: k, e: e})
 	}
-
-	return starts, stops
+	return stops, starts
 }
 
-// wantedLocked is the Cluster, plus the exporter and everything References lists once the Cluster is known.
+// forget removes e, the entry of a watch that did not start.
+func (s *Source) forget(k key, e *entry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.entries[k] == e {
+		delete(s.entries, k)
+	}
+}
+
+// logger returns the logger set by run or snapshot.
+func (s *Source) logger() logr.Logger {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.log.GetLogger()
+}
+
+// wantedLocked is the Cluster, the references of the newest Cluster and exporter, and lastGood. While
+// the Cluster or the exporter is denied or can't be decoded, it also keeps every current watch.
 func (s *Source) wantedLocked() map[key]struct{} {
 	wanted := map[key]struct{}{{kind: kindCluster, name: s.o.Cluster}: {}}
-	if s.ctx == nil || s.ctx.Err() != nil {
-		return map[key]struct{}{}
+	addRefs(wanted, s.lastGood)
+
+	cluster, params, exporter, err := s.resolveLocked()
+	if err != nil && !errors.Is(err, engine.ErrNoConfiguration) && !errors.Is(err, errNotSynced) {
+		for k := range s.entries {
+			wanted[k] = struct{}{}
+		}
+		return wanted
+	}
+	if cluster != nil {
+		addRefs(wanted, clusterconfig.References(cluster, params, exporter))
 	}
 
-	cluster, err := s.clusterLocked()
-	if err != nil && !errors.Is(err, errNotSynced) {
-		return s.currentLocked()
-	}
-	if err != nil || cluster == nil {
-		return wanted
-	}
-	plugin, ok := clusterconfig.EnabledPlugin(cluster)
-	if !ok {
-		return wanted
-	}
-	parsed, err := podpatch.ParseParams(plugin.Parameters)
-	if err != nil {
-		return wanted
-	}
-	exporter, err := s.exporterLocked(parsed.Params.Exporter)
-	if err != nil && !errors.Is(err, errNotSynced) {
-		return s.currentLocked()
-	}
+	return wanted
+}
 
-	refs := clusterconfig.References(cluster, parsed.Params, exporter)
-	wanted[key{kind: kindExporter, name: refs.Exporter}] = struct{}{}
+func addRefs(wanted map[key]struct{}, refs clusterconfig.Refs) {
+	if refs.Exporter != "" {
+		wanted[key{kind: kindExporter, name: refs.Exporter}] = struct{}{}
+	}
 	for _, n := range refs.ConfigMaps {
 		wanted[key{kind: kindConfigMap, name: n}] = struct{}{}
 	}
@@ -341,50 +329,53 @@ func (s *Source) wantedLocked() map[key]struct{} {
 	for _, n := range refs.QuerySets {
 		wanted[key{kind: kindQuerySet, name: n}] = struct{}{}
 	}
-
-	return wanted
 }
 
-// currentLocked returns the keys being watched, for when the wanted set can't be computed.
-func (s *Source) currentLocked() map[key]struct{} {
-	keys := make(map[key]struct{}, len(s.entries))
-	for k := range s.entries {
-		keys[k] = struct{}{}
-	}
-
-	return keys
-}
-
-// clusterLocked returns the decoded Cluster; nil when it isn't known or doesn't exist.
-func (s *Source) clusterLocked() (*apiv1.Cluster, error) {
+// resolveLocked decodes the Cluster, its plugin parameters and the exporter they name. The Cluster is
+// nil unless the plugin is enabled with valid parameters; the exporter is nil while it isn't known
+// (errNotSynced), doesn't exist (engine.ErrNoConfiguration), is denied or can't be decoded.
+func (s *Source) resolveLocked() (*apiv1.Cluster, podpatch.Params, *v1alpha1.TelemetryExporter, error) {
 	obj, err := s.objectLocked(key{kind: kindCluster, name: s.o.Cluster})
-	if err != nil || obj == nil {
-		return nil, err
+	switch {
+	case errors.Is(err, errNotSynced):
+		return nil, podpatch.Params{}, nil, noConfiguration("cluster %q is not known yet", s.o.Cluster)
+	case err != nil:
+		return nil, podpatch.Params{}, nil, err
+	case obj == nil:
+		return nil, podpatch.Params{}, nil, noConfiguration("cluster %q does not exist", s.o.Cluster)
 	}
-	c := &apiv1.Cluster{}
-	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, c); err != nil {
-		return nil, fmt.Errorf("decode cluster %q: %w", s.o.Cluster, err)
-	}
-
-	return c, nil
-}
-
-// exporterLocked returns the decoded exporter; nil when it isn't known or doesn't exist.
-func (s *Source) exporterLocked(name string) (*v1alpha1.TelemetryExporter, error) {
-	obj, err := s.objectLocked(key{kind: kindExporter, name: name})
-	if err != nil || obj == nil {
-		return nil, err
-	}
-	e := &v1alpha1.TelemetryExporter{}
-	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, e); err != nil {
-		return nil, fmt.Errorf("decode telemetryexporter %q: %w", name, err)
+	cluster := &apiv1.Cluster{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, cluster); err != nil {
+		return nil, podpatch.Params{}, nil, fmt.Errorf("decode cluster %q: %w", s.o.Cluster, err)
 	}
 
-	return e, nil
+	plugin, ok := clusterconfig.EnabledPlugin(cluster)
+	if !ok {
+		return nil, podpatch.Params{}, nil, noConfiguration("the plugin is not enabled for cluster %q", s.o.Cluster)
+	}
+	parsed, err := podpatch.ParseParams(plugin.Parameters)
+	if err != nil {
+		return nil, podpatch.Params{}, nil, noConfiguration("%v", err)
+	}
+	params := parsed.Params
+
+	obj, err = s.objectLocked(key{kind: kindExporter, name: params.Exporter})
+	switch {
+	case err != nil:
+		return cluster, params, nil, err
+	case obj == nil:
+		return cluster, params, nil, noConfiguration("telemetryexporter %q does not exist", params.Exporter)
+	}
+	exporter := &v1alpha1.TelemetryExporter{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, exporter); err != nil {
+		return cluster, params, nil, fmt.Errorf("decode telemetryexporter %q: %w", params.Exporter, err)
+	}
+
+	return cluster, params, exporter, nil
 }
 
 // objectLocked returns a watched object: nil when it doesn't exist; an error when its watch has
-// not synced or was denied.
+// not reported yet or was denied.
 func (s *Source) objectLocked(k key) (*unstructured.Unstructured, error) {
 	e := s.entries[k]
 	switch {
@@ -398,93 +389,110 @@ func (s *Source) objectLocked(k key) (*unstructured.Unstructured, error) {
 }
 
 // handler returns what a watch on k reports to; reports from a watch that was stopped are dropped.
-func (s *Source) handler(k key, e *entry) handler {
+// Watch errors are only logged: the informer lists again and reports what it finds. A panic in a
+// report is logged and the next report is handled.
+func (s *Source) handler(ctx context.Context, k key, e *entry) handler {
+	watchOn := string(k.kind) + " " + k.name
 	return handler{
 		set: func(obj *unstructured.Unstructured) {
-			s.mu.Lock()
-			if s.entries[k] != e {
-				s.mu.Unlock()
-				return
-			}
-			e.synced, e.obj, e.denied, e.lastErr = true, obj, nil, ""
-			s.wakeLocked()
-			s.mu.Unlock()
-
-			if k.kind == kindCluster || k.kind == kindExporter {
-				s.reconcile()
-			}
+			safe.Call(s.logger(), "report of the watch on "+watchOn, func() { s.set(k, e, obj) })
 		},
 		fail: func(err error) {
-			s.mu.Lock()
-			if s.entries[k] != e {
-				s.mu.Unlock()
-				return
-			}
-			if errors.Is(err, sources.ErrDenied) {
-				changed := e.denied == nil
-				e.denied = err
-				if changed {
-					s.log.Info("access to object denied", "kind", k.kind, "name", k.name)
-					s.wakeLocked()
-				}
-				s.mu.Unlock()
-				return
-			}
-			if err.Error() == e.lastErr {
-				s.mu.Unlock()
-				return
-			}
-			e.lastErr = err.Error()
-			s.log.Error(err, "watch failed", "kind", k.kind, "name", k.name)
-			var handlers []func(error)
-			for sub := range s.subs {
-				handlers = append(handlers, sub.onError)
-			}
-			s.mu.Unlock()
-
-			for _, h := range handlers {
-				h(fmt.Errorf("watch %s %q: %w", k.kind, k.name, err))
-			}
+			safe.Call(s.logger(), "error of the watch on "+watchOn, func() { s.fail(k, e, err) })
 		},
+		crashed: func() { s.crashed(ctx, k, e) },
+	}
+}
+
+// crashed forgets the watch whose informer died and asks for a reconcile startRetry later, which starts it again.
+func (s *Source) crashed(ctx context.Context, k key, e *entry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.entries[k] != e {
+		return
+	}
+	delete(s.entries, k)
+	retry := s.o.Clock.After(startRetry)
+	go func() {
+		select {
+		case <-retry:
+			s.askReplan()
+		case <-ctx.Done():
+		}
+	}()
+}
+
+func (s *Source) set(k key, e *entry, obj *unstructured.Unstructured) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.entries[k] != e {
+		return
+	}
+	e.synced, e.obj, e.denied, e.lastErr = true, obj, nil, ""
+	s.wakeLocked()
+	if k.kind == kindCluster || k.kind == kindExporter {
+		s.askReplan()
+	}
+}
+
+func (s *Source) fail(k key, e *entry, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.entries[k] != e {
+		return
+	}
+	if errors.Is(err, sources.ErrDenied) {
+		e.lastErr = ""
+		if e.denied == nil {
+			s.log.Info("access to object denied", "kind", k.kind, "name", k.name)
+			s.wakeLocked()
+		}
+		e.denied = err
+		return
+	}
+	if err.Error() == e.lastErr {
+		return
+	}
+	e.lastErr = err.Error()
+	s.log.Error(err, "watch failed", "kind", k.kind, "name", k.name)
+}
+
+// askReplan wakes run without blocking; a pending request already covers this one.
+func (s *Source) askReplan() {
+	select {
+	case s.replan <- struct{}{}:
+	default:
 	}
 }
 
 func (s *Source) wakeLocked() {
-	for sub := range s.subs {
+	for wake := range s.subs {
 		select {
-		case sub.wake <- struct{}{}:
+		case wake <- struct{}{}:
 		default:
 		}
 	}
 }
 
-// Watch calls notify, debounced, after any event on a watched object. It returns nil when ctx ends.
-func (s *Source) Watch(ctx context.Context, _ []string, notify func(), opts ...sources.WatchOption) error {
-	ready, onError := sources.WatchHooks(opts...)
-	sub := &subscriber{wake: make(chan struct{}, 1), onError: onError}
+// Watch calls notify once it is watching, then after each event on a watched object. It ignores files: the objects it
+// watches follow the settings. It returns nil when ctx ends.
+func (s *Source) Watch(ctx context.Context, _ func() []string, notify func()) error {
+	wake := make(chan struct{}, 1)
 	s.mu.Lock()
-	s.subs[sub] = struct{}{}
+	s.subs[wake] = struct{}{}
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
-		delete(s.subs, sub)
+		delete(s.subs, wake)
 		s.mu.Unlock()
 	}()
 
-	timer := s.o.Clock.NewTimer(debounce)
-	if !timer.Stop() {
-		<-timer.C()
-	}
-	defer timer.Stop()
-
-	ready()
+	notify()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-sub.wake:
-			timer.Reset(debounce)
-		case <-timer.C():
+		case <-wake:
 			notify()
 		}
 	}
@@ -499,9 +507,6 @@ func (s *Source) ReadFile(name string) ([]byte, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.entries[k] == nil {
-		return nil, fmt.Errorf("file %q: %w", name, fs.ErrNotExist)
-	}
 	obj, err := s.objectLocked(k)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", name, err)
@@ -510,28 +515,61 @@ func (s *Source) ReadFile(name string) ([]byte, error) {
 	return content(k, dataKey, obj)
 }
 
+// Cluster returns the watched Cluster, whether or not the plugin is enabled with valid parameters; false
+// before its watch syncs, while it does not exist, is denied or does not decode.
+func (s *Source) Cluster() (*apiv1.Cluster, bool) {
+	s.mu.Lock()
+	obj, err := s.objectLocked(key{kind: kindCluster, name: s.o.Cluster})
+	s.mu.Unlock()
+	if err != nil || obj == nil {
+		return nil, false
+	}
+	// Watch reports replace the object; none changes it in place.
+	cluster := &apiv1.Cluster{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, cluster); err != nil {
+		return nil, false
+	}
+	return cluster, true
+}
+
 // Sensitive reports whether the virtual file holds Secret data.
 func (*Source) Sensitive(name string) bool { return strings.HasPrefix(name, "secret/") }
 
-// Settings builds the settings from the watched Cluster, exporter and the objects they name.
+// Settings builds the settings from the watched Cluster, exporter and the objects they name, and keeps
+// their references watched until settings that name others build or there is no configuration. The
+// bytes are the built settings as JSON, which only the engine's digest reads.
 func (s *Source) Settings() (settings.Settings, []byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	in, err := s.inputsLocked()
-	if err != nil {
-		return settings.Settings{}, nil, err
+	if errors.Is(err, errNotSynced) || errors.Is(err, sources.ErrDenied) {
+		err = fmt.Errorf("%w: %w", engine.ErrNotReady, err)
 	}
-	data, err := canonical(in)
 	if err != nil {
+		if errors.Is(err, engine.ErrNoConfiguration) && s.lastGood.Cluster != "" {
+			s.lastGood = clusterconfig.Refs{}
+			s.askReplan()
+		}
 		return settings.Settings{}, nil, err
 	}
 	built, warnings, err := clusterconfig.Build(in)
 	if err != nil {
-		return settings.Settings{}, data, fmt.Errorf("settings: %w", err)
+		return settings.Settings{}, nil, fmt.Errorf("settings: %w", err)
+	}
+	data, err := json.Marshal(built)
+	if err != nil {
+		return settings.Settings{}, nil, fmt.Errorf("encode settings: %w", err)
 	}
 	for _, w := range warnings {
-		s.log.Info("settings warning", "warning", w)
+		if !slices.Contains(s.warned, w) {
+			s.log.Warning("settings warning", "warning", w)
+		}
+	}
+	s.warned = warnings
+	if refs := clusterconfig.References(in.Cluster, in.Params, in.Exporter); !reflect.DeepEqual(refs, s.lastGood) {
+		s.lastGood = refs
+		s.askReplan()
 	}
 
 	return built, data, nil
@@ -542,32 +580,11 @@ func noConfiguration(format string, args ...any) error {
 }
 
 func (s *Source) inputsLocked() (clusterconfig.Inputs, error) {
-	cluster, err := s.clusterLocked()
-	switch {
-	case errors.Is(err, errNotSynced):
-		return clusterconfig.Inputs{}, noConfiguration("cluster %q is not known yet", s.o.Cluster)
-	case err != nil:
-		return clusterconfig.Inputs{}, err
-	case cluster == nil:
-		return clusterconfig.Inputs{}, noConfiguration("cluster %q does not exist", s.o.Cluster)
-	}
-
-	plugin, ok := clusterconfig.EnabledPlugin(cluster)
-	if !ok {
-		return clusterconfig.Inputs{}, noConfiguration("the plugin is not enabled for cluster %q", s.o.Cluster)
-	}
-	parsed, err := podpatch.ParseParams(plugin.Parameters)
+	cluster, params, exporter, err := s.resolveLocked()
 	if err != nil {
-		return clusterconfig.Inputs{}, noConfiguration("%v", err)
-	}
-
-	in := clusterconfig.Inputs{Cluster: cluster, Params: parsed.Params}
-	if in.Exporter, err = s.exporterLocked(parsed.Params.Exporter); err != nil {
 		return clusterconfig.Inputs{}, err
 	}
-	if in.Exporter == nil {
-		return clusterconfig.Inputs{}, noConfiguration("telemetryexporter %q does not exist", parsed.Params.Exporter)
-	}
+	in := clusterconfig.Inputs{Cluster: cluster, Params: params, Exporter: exporter}
 
 	if env := in.Exporter.Spec.EnvFrom; env != nil {
 		if env.ConfigMap != nil {
@@ -581,12 +598,12 @@ func (s *Source) inputsLocked() (clusterconfig.Inputs, error) {
 			}
 		}
 	}
-	if parsed.Params.Auth == podpatch.AuthPassword && parsed.Params.PasswordSecret != "" {
-		pw, err := s.dataLocked(kindSecret, parsed.Params.PasswordSecret)
+	if params.Auth == podpatch.AuthPassword && params.PasswordSecret != "" {
+		pw, err := s.dataLocked(kindSecret, params.PasswordSecret)
 		if err != nil {
 			return clusterconfig.Inputs{}, err
 		}
-		in.PasswordUsername = pw["username"]
+		in.PasswordUsername = pw[clusterconfig.PasswordUsernameKey]
 	}
 
 	return in, nil

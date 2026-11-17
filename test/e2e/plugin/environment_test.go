@@ -3,6 +3,7 @@
 package plugin_test
 
 import (
+	"context"
 	"os"
 	"slices"
 	"time"
@@ -11,6 +12,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -27,24 +29,32 @@ const (
 	setStatusInCluster      = "TYPE_SET_STATUS_IN_CLUSTER"
 	hookCallsMetric         = "cnpg_otel_plugin_hook_calls_total"
 	pluginServiceName       = "plugin-telemetry"
-	collectorTailLines      = 200
 	environmentTimeout      = 3 * time.Minute
 	environmentPollInterval = 2 * time.Second
+
+	hookEvaluate = "EVALUATE"
+	hookPatched  = "patched"
+	hookTimeout  = 2 * time.Minute
 )
 
-var _ = Describe("the plugin environment", Ordered, func() {
+// The restart spec rolls the plugin out; Serial runs this container after every parallel one, on process 1.
+var _ = Describe("the plugin environment", Ordered, Serial, ContinueOnFailure, func() {
 	var (
-		c     client.Client
-		cfg   *rest.Config
-		ns    string
-		start time.Time
+		env    framework.Env
+		c      client.Client
+		cfg    *rest.Config
+		reader *framework.CollectorReader
+		ns     string
+		start  time.Time
 	)
 
 	BeforeAll(func(ctx SpecContext) {
-		env, err := framework.LoadEnv(os.Getenv)
+		var err error
+		env, err = framework.LoadEnv(os.Getenv)
 		Expect(err).NotTo(HaveOccurred())
 		c, cfg, err = framework.NewClients(env.KubeContext)
 		Expect(err).NotTo(HaveOccurred())
+		reader = framework.NewCollectorReader(cfg)
 
 		Eventually(framework.PluginAvailable).WithContext(ctx).WithArguments(c).
 			WithTimeout(environmentTimeout).WithPolling(environmentPollInterval).Should(BeTrue())
@@ -70,7 +80,14 @@ var _ = Describe("the plugin environment", Ordered, func() {
 		}, NodeTimeout(4*time.Minute))
 	})
 
-	It("CNPG reports the reconciler hooks and SetStatusInCluster for a Cluster using the plugin", func(ctx SpecContext) {
+	It("runs against the requested CNPG version", func(ctx SpecContext) {
+		img, err := framework.OperatorImage(ctx, c)
+		Expect(err).NotTo(HaveOccurred())
+		AddReportEntry("cnpg-operator-image", img)
+		Expect(framework.MatchesCNPGVersion(img, env.CNPGVersion)).To(BeTrue(), img)
+	}, SpecTimeout(time.Minute))
+
+	It("CNPG reports SetStatusInCluster and no reconciler hooks", func(ctx SpecContext) {
 		Eventually(func(g Gomega, ctx SpecContext) {
 			var cluster apiv1.Cluster
 			g.Expect(c.Get(ctx, client.ObjectKey{Namespace: ns, Name: clusterName}, &cluster)).To(Succeed())
@@ -79,7 +96,7 @@ var _ = Describe("the plugin environment", Ordered, func() {
 				return ps.Name == metadata.PluginName
 			})
 			g.Expect(i).To(BeNumerically(">=", 0), "no pluginStatus entry for %s", metadata.PluginName)
-			g.Expect(cluster.Status.PluginStatus[i].Capabilities).To(ContainElement(reconcilerHooks))
+			g.Expect(cluster.Status.PluginStatus[i].Capabilities).NotTo(ContainElement(reconcilerHooks))
 			g.Expect(cluster.Status.PluginStatus[i].OperatorCapabilities).To(ContainElement(setStatusInCluster))
 
 			status, ok, err := framework.PluginStatus(&cluster)
@@ -91,7 +108,7 @@ var _ = Describe("the plugin environment", Ordered, func() {
 
 	It("the plugin's self-metrics reach the collector with the plugin resource", func(ctx SpecContext) {
 		Eventually(func(g Gomega, ctx SpecContext) {
-			lines, err := framework.CollectorLinesSince(ctx, cfg, collectorTailLines, start)
+			lines, err := reader.Since(ctx, start)
 			g.Expect(err).NotTo(HaveOccurred())
 
 			var plugin []map[string]string
@@ -110,4 +127,87 @@ var _ = Describe("the plugin environment", Ordered, func() {
 			g.Expect(otlp.Points(lines, hookCallsMetric)).NotTo(BeEmpty())
 		}).WithContext(ctx).WithTimeout(environmentTimeout).WithPolling(environmentPollInterval).Should(Succeed())
 	})
+
+	It("keeps the instance Pods across reconciles and a plugin restart", func(ctx SpecContext) {
+		clusterKey := client.ObjectKey{Namespace: ns, Name: clusterName}
+
+		Eventually(framework.ClusterReady).WithContext(ctx).WithArguments(c, clusterKey).
+			WithTimeout(clusterTimeout).WithPolling(5 * time.Second).Should(BeTrue())
+
+		type pod struct {
+			UID     types.UID
+			PodSpec string
+		}
+		instances := func(g Gomega, ctx context.Context) map[string]pod {
+			list, err := framework.InstancePods(ctx, c, clusterKey)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			out := map[string]pod{}
+			for _, p := range list {
+				out[p.Name] = pod{UID: p.UID, PodSpec: p.Annotations[framework.PodSpecAnnotation]}
+			}
+
+			return out
+		}
+		// awaitEvaluations waits until one of plugins logs, after since, an EVALUATE that patched each instance Pod.
+		awaitEvaluations := func(ctx context.Context, plugins []string, want map[string]pod, since time.Time) {
+			GinkgoHelper()
+
+			Eventually(func(g Gomega, ctx context.Context) {
+				found := map[string]bool{}
+				for _, plugin := range plugins {
+					calls, err := framework.HookCalls(ctx, cfg, plugin, since)
+					g.Expect(err).NotTo(HaveOccurred())
+					for _, call := range calls {
+						if call.Namespace == ns && call.Cluster == clusterName &&
+							call.Operation == hookEvaluate && call.Outcome == hookPatched {
+							found[call.Pod] = true
+						}
+					}
+				}
+				for name := range want {
+					g.Expect(found).To(HaveKey(name), "no %s of %s after %s by %v", hookEvaluate, name, since, plugins)
+				}
+			}).WithContext(ctx).WithTimeout(hookTimeout).WithPolling(5 * time.Second).Should(Succeed())
+		}
+		pluginPods := func(ctx context.Context) []string {
+			GinkgoHelper()
+
+			names, err := framework.PluginPods(ctx, c)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(names).NotTo(BeEmpty())
+
+			return names
+		}
+
+		var current apiv1.Cluster
+		Expect(c.Get(ctx, clusterKey, &current)).To(Succeed())
+		before := instances(Default, ctx)
+		Expect(before).To(HaveLen(current.Spec.Instances))
+		for name, in := range before {
+			Expect(in.PodSpec).NotTo(BeEmpty(), "pod %s has no %s annotation", name, framework.PodSpecAnnotation)
+		}
+
+		oldPlugins := pluginPods(ctx)
+		bumped := time.Now()
+		touchCluster(ctx, c, clusterKey, "restart-"+time.Now().UTC().Format(time.RFC3339Nano))
+		awaitEvaluations(ctx, oldPlugins, before, bumped)
+
+		Expect(framework.RestartPlugin(ctx, c)).To(Succeed())
+		Eventually(framework.PluginRolledOut).WithContext(ctx).WithArguments(c).
+			WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(BeTrue())
+		newPlugins := pluginPods(ctx)
+		Expect(newPlugins).NotTo(ContainElement(BeElementOf(oldPlugins)), "an old plugin Pod is still there")
+
+		bumped = time.Now()
+		touchCluster(ctx, c, clusterKey, "restart-"+time.Now().UTC().Format(time.RFC3339Nano))
+		awaitEvaluations(ctx, newPlugins, before, bumped)
+
+		Consistently(func(g Gomega, ctx context.Context) {
+			g.Expect(instances(g, ctx)).To(Equal(before))
+			var cluster apiv1.Cluster
+			g.Expect(c.Get(ctx, clusterKey, &cluster)).To(Succeed())
+			g.Expect(cluster.Status.Phase).To(Equal(apiv1.PhaseHealthy))
+		}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(10 * time.Second).Should(Succeed())
+	}, SpecTimeout(22*time.Minute))
 })

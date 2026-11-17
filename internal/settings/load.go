@@ -5,11 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"time"
 
 	"go.yaml.in/yaml/v4"
+
+	"github.com/gabrosys/plugin-telemetry/internal/queries"
 )
 
 // presence records which defaulted durations the file sets, so an explicit 0s is kept and fails validation.
@@ -22,7 +23,7 @@ type presence struct {
 	} `yaml:"exporter"`
 }
 
-// Defaults returns the settings Load starts from; Cluster, the endpoint and the exporter timeout are not defaulted here.
+// Defaults returns the settings Parse starts from; Cluster, the endpoint and the exporter timeout are not defaulted here.
 func Defaults() Settings {
 	return Settings{
 		Postgres: Postgres{
@@ -41,12 +42,12 @@ func Defaults() Settings {
 			MaxSeriesPerQuery:   10000,
 			MaxSeriesTotal:      50000,
 			MaxDatabases:        50,
-			MaxLabelValueLength: 1024,
+			MaxLabelValueLength: queries.DefaultMaxLabelValueLength,
 			MaxLabelsPerSeries:  32,
 		},
 		Exporter: Exporter{
 			Protocol:            ProtocolHTTP,
-			TLS:                 TLS{MinVersion: "1.2"},
+			TLS:                 TLS{MinVersion: defaultMinVersion},
 			Compression:         "gzip",
 			Interval:            30 * time.Second,
 			MaxPointsPerRequest: 2000,
@@ -59,39 +60,22 @@ func DefaultExporterTimeout(interval time.Duration) time.Duration {
 	return min(10*time.Second, interval/2)
 }
 
-// Load reads a YAML file and parses it with Parse. Relative file paths in the file resolve against
-// the file's directory.
-func Load(path string) (Settings, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // the config path is an operator-supplied flag
-	if err != nil {
-		return Settings{}, fmt.Errorf("read settings: %w", err)
-	}
-
-	abs, err := filepath.Abs(filepath.Dir(path))
-	if err != nil {
-		return Settings{}, fmt.Errorf("resolve settings directory: %w", err)
-	}
-
-	s, err := Parse(data, abs)
-	if err != nil {
-		return Settings{}, fmt.Errorf("settings %s: %w", path, err)
-	}
-	return s, nil
-}
-
 // Parse decodes YAML strictly (unknown keys are errors) over the defaults, resolves relative file paths
 // against dir and validates.
 func Parse(data []byte, dir string) (Settings, error) {
 	s := Defaults()
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true)
-	if err := dec.Decode(&s); err != nil && !errors.Is(err, io.EOF) {
+	var seen presence
+	doc, err := composeOne(data)
+	if err != nil {
 		return Settings{}, fmt.Errorf("parse settings: %w", err)
 	}
-
-	var seen presence
-	if err := yaml.NewDecoder(bytes.NewReader(data)).Decode(&seen); err != nil && !errors.Is(err, io.EOF) {
-		return Settings{}, fmt.Errorf("parse settings: %w", err)
+	if doc != nil {
+		if err := doc.Load(&s, yaml.WithKnownFields()); err != nil {
+			return Settings{}, fmt.Errorf("parse settings: %w", err)
+		}
+		if err := doc.Load(&seen); err != nil {
+			return Settings{}, fmt.Errorf("parse settings: %w", err)
+		}
 	}
 	if seen.Exporter.Timeout == nil {
 		s.Exporter.Timeout = DefaultExporterTimeout(s.Exporter.Interval)
@@ -108,6 +92,28 @@ func Parse(data []byte, dir string) (Settings, error) {
 		return Settings{}, fmt.Errorf("invalid settings: %w", err)
 	}
 	return s, nil
+}
+
+// composeOne reads the single YAML document of data; an empty file gives nil.
+func composeOne(data []byte) (*yaml.Node, error) {
+	loader, err := yaml.NewLoader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("open loader: %w", err)
+	}
+	var doc yaml.Node
+	if err := loader.Load(&doc); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("compose document: %w", err)
+	}
+	switch err := loader.Load(&yaml.Node{}); {
+	case err == nil:
+		return nil, errors.New("more than one YAML document")
+	case !errors.Is(err, io.EOF):
+		return nil, fmt.Errorf("compose second document: %w", err)
+	}
+	return &doc, nil
 }
 
 func (s *Settings) resolvePaths(dir string) {

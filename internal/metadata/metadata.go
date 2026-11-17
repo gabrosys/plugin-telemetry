@@ -1,8 +1,6 @@
 // Package metadata holds the names the plugin shares across packages.
 package metadata
 
-import "strings"
-
 const (
 	// PluginName is the plugin's name and the domain of its labels and paths.
 	PluginName = "telemetry.gabrosys.github.io"
@@ -22,24 +20,23 @@ const (
 	ManagedByValue = "plugin-telemetry"
 	// PeerUID is the OS user the sidecar runs as in peer mode.
 	PeerUID = int64(65534)
+	// ScratchVolume is the CloudNativePG instance Pod volume that holds the socket directory.
+	ScratchVolume = "scratch-data"
+	// TokenVolume is the sidecar's own ServiceAccount token volume.
+	TokenVolume = "telemetry-token"
+	// TokenMaskVolume is the empty volume that hides the Pod's default token from the sidecar.
+	TokenMaskVolume = "telemetry-sa-mask"
 )
 
 // identitySuffix ends the names of a Cluster's ServiceAccount, Role and RoleBinding.
-const identitySuffix = "-telemetry"
+const identitySuffix = ".telemetry"
 
 // ServiceAccountName returns the name of the cluster's sidecar ServiceAccount.
 func ServiceAccountName(cluster string) string {
 	return cluster + identitySuffix
 }
 
-// IdentityOwner returns the Cluster whose ServiceAccount, Role and RoleBinding are called name.
-func IdentityOwner(name string) (string, bool) {
-	cluster, ok := strings.CutSuffix(name, identitySuffix)
-
-	return cluster, ok && cluster != ""
-}
-
 // TokenSecretName returns the name of the Secret holding the sidecar's token.
 func TokenSecretName(cluster string) string {
-	return cluster + "-telemetry-token"
+	return ServiceAccountName(cluster) + "-token"
 }

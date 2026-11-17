@@ -42,6 +42,7 @@ var _ = Describe("conversions", func() {
 		},
 		Entry("uint64", uint64(7), uint64(7), true),
 		Entry("int64", int64(7), uint64(7), true),
+		Entry("negative int64 by Go conversion", int64(-1), uint64(math.MaxUint64), true),
 		Entry("float64", 7.9, uint64(7), true),
 		Entry("time", time.Unix(1700000000, 0), uint64(1700000000), true),
 		Entry("text", "7", uint64(7), true),

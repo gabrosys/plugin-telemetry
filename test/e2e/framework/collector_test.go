@@ -1,137 +1,116 @@
 package framework_test
 
 import (
+	"context"
 	"errors"
-	"strconv"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/gabrosys/plugin-telemetry/test/e2e/framework"
-	"github.com/gabrosys/plugin-telemetry/test/e2e/otlp"
 )
 
 const (
-	tailLine1 = `{"resourceMetrics":[{"resource":{},"scopeMetrics":[{"scope":{"name":"a"},"metrics":[{"name":"m1","gauge":` +
-		`{"dataPoints":[{"timeUnixNano":"1000000000","asInt":"1"}]}}]}]}]}`
-	tailLine2 = `{"resourceMetrics":[{"resource":{},"scopeMetrics":[{"scope":{"name":"a"},"metrics":[{"name":"m2","gauge":` +
-		`{"dataPoints":[{"timeUnixNano":"2000000000","asInt":"2"}]}}]}]}]}`
+	lineAt2 = `{"resourceMetrics":[{"resource":{},"scopeMetrics":[{"scope":{"name":"a"},"metrics":[{"name":"m","gauge":` +
+		`{"dataPoints":[{"timeUnixNano":"2000000000","asInt":"1"}]}}]}]}]}` + "\n"
+	lineAt3 = `{"resourceMetrics":[{"resource":{},"scopeMetrics":[{"scope":{"name":"a"},"metrics":[{"name":"m","gauge":` +
+		`{"dataPoints":[{"timeUnixNano":"3000000000","asInt":"2"}]}}]}]}]}` + "\n"
 )
 
-var _ = Describe("ParseLines", func() {
-	It("parses tail output into lines, skipping a partial last line", func() {
-		lines, err := framework.ParseLines(tailLine1 + "\n" + tailLine2 + "\n" + tailLine1[:20])
-		Expect(err).NotTo(HaveOccurred())
-		Expect(lines).To(HaveLen(2))
-		Expect(lines[1].Time.Unix()).To(Equal(int64(2)))
-	})
+var _ = Describe("CollectorReader", func() {
+	var (
+		files   map[types.UID]string // what each fake pod's file holds
+		offsets map[types.UID][]int  // offsets each read was asked for
+		reader  *framework.CollectorReader
+	)
 
-	It("returns no lines for empty output", func() {
-		lines, err := framework.ParseLines("")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(lines).To(BeEmpty())
-	})
-
-	It("fails on a complete line that is not OTLP/JSON", func() {
-		_, err := framework.ParseLines("garbage\n")
-		Expect(err).To(HaveOccurred())
-	})
-})
-
-var _ = Describe("ParseLinesSince", func() {
-	It("excludes the lines before since", func() {
-		lines, err := framework.ParseLinesSince(tailLine1+"\n"+tailLine2+"\n", time.Unix(2, 0))
-		Expect(err).NotTo(HaveOccurred())
-		Expect(lines).To(HaveLen(1))
-		Expect(lines[0].Time.Unix()).To(Equal(int64(2)))
-	})
-
-	It("returns no lines when all are older", func() {
-		lines, err := framework.ParseLinesSince(tailLine1+"\n", time.Unix(5, 0))
-		Expect(err).NotTo(HaveOccurred())
-		Expect(lines).To(BeEmpty())
-	})
-})
-
-var _ = Describe("RotatedFiles", func() {
-	It("lists the backups the file exporter names, oldest first, and ignores other files", func() {
-		listing := "metrics-2026-11-14T18-07-14.274-size.jsonl\n" +
-			"metrics.jsonl\n" +
-			"metrics-2026-11-14T17-59-01.000-size.jsonl\n" +
-			"metrics-2026-11-14T18-07-14.274.jsonl\n" +
-			"other-2026-11-14T17-00-00.000-size.jsonl\n" +
-			"metrics-2026-11-13T23-59-59.999-size.jsonl\n"
-		Expect(framework.RotatedFiles(listing)).To(Equal([]string{
-			"/data/metrics-2026-11-13T23-59-59.999-size.jsonl",
-			"/data/metrics-2026-11-14T17-59-01.000-size.jsonl",
-			"/data/metrics-2026-11-14T18-07-14.274-size.jsonl",
-		}))
-	})
-
-	It("lists nothing when the collector has not rotated", func() {
-		Expect(framework.RotatedFiles("metrics.jsonl\n")).To(BeEmpty())
-	})
-})
-
-var _ = Describe("ReadFiles", func() {
-	line := func(name string, sec int) string {
-		return `{"resourceMetrics":[{"resource":{},"scopeMetrics":[{"scope":{"name":"a"},"metrics":[{"name":"` + name +
-			`","gauge":{"dataPoints":[{"timeUnixNano":"` + strconv.Itoa(sec) + `000000000","asInt":"1"}]}}]}]}]}` + "\n"
-	}
-	names := func(lines []otlp.Line) []string {
-		var out []string
-		for _, l := range lines {
-			out = append(out, l.Request.GetResourceMetrics()[0].GetScopeMetrics()[0].GetMetrics()[0].GetName())
-		}
-
-		return out
-	}
-	files := []string{"old", "new", "current"}
-	content := map[string]string{
-		"old":     line("o1", 1) + line("o2", 2),
-		"new":     line("n1", 3) + line("n2", 4),
-		"current": line("c1", 5),
-	}
-	reader := func(requested map[string]int) func(string, int) (string, error) {
-		return func(file string, n int) (string, error) {
-			requested[file] = n
-
-			return content[file], nil
-		}
+	pod := func(uid types.UID) corev1.Pod {
+		return corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: uid}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}
 	}
 
-	It("returns the lines of the backups and the current file in order", func() {
-		got, err := framework.ReadFiles(files, reader(map[string]int{}), 100, time.Time{})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(names(got)).To(Equal([]string{"o1", "o2", "n1", "n2", "c1"}))
+	BeforeEach(func() {
+		files = map[types.UID]string{}
+		offsets = map[types.UID][]int{}
+		reader = framework.NewCollectorReaderWith(
+			func(context.Context) ([]corev1.Pod, error) {
+				var pods []corev1.Pod
+				for uid := range files {
+					pods = append(pods, pod(uid))
+				}
+
+				return pods, nil
+			},
+			func(_ context.Context, p *corev1.Pod, offset int) (string, error) {
+				offsets[p.UID] = append(offsets[p.UID], offset)
+
+				return files[p.UID][offset:], nil
+			})
 	})
 
-	It("bounds the lines across the files, asking older files only for what is left", func() {
-		requested := map[string]int{}
-		got, err := framework.ReadFiles(files, reader(requested), 3, time.Time{})
+	It("starts a new pod at offset 0", func(ctx SpecContext) {
+		files["a"] = lineAt2
+		_, err := reader.Since(ctx, time.Time{})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(requested).To(Equal(map[string]int{"current": 3, "new": 2}))
-		Expect(names(got)).To(Equal([]string{"n1", "n2", "c1"}))
+		Expect(offsets["a"]).To(Equal([]int{0}))
 	})
 
-	It("keeps the lines at or after since", func() {
-		got, err := framework.ReadFiles(files, reader(map[string]int{}), 100, time.Unix(4, 0))
+	It("accumulates lines across calls and filters them by time", func(ctx SpecContext) {
+		files["a"] = lineAt2
+		got, err := reader.Since(ctx, time.Time{})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(names(got)).To(Equal([]string{"n2", "c1"}))
+		Expect(got).To(HaveLen(1))
+
+		files["a"] += lineAt3
+		got, err = reader.Since(ctx, time.Time{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(HaveLen(2))
+		Expect(offsets["a"]).To(Equal([]int{0, len(lineAt2)}))
+
+		got, err = reader.Since(ctx, time.Unix(3, 0))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(HaveLen(1))
 	})
 
-	It("skips a last line without a newline in each file", func() {
-		partial := map[string]string{"old": line("o1", 1) + line("o2", 2)[:30], "current": line("c1", 5)}
-		got, err := framework.ReadFiles([]string{"old", "current"}, func(file string, _ int) (string, error) {
-			return partial[file], nil
-		}, 100, time.Time{})
+	It("leaves a partial last line for the next call", func(ctx SpecContext) {
+		files["a"] = lineAt2 + lineAt3[:10]
+		got, err := reader.Since(ctx, time.Time{})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(names(got)).To(Equal([]string{"o1", "c1"}))
+		Expect(got).To(HaveLen(1))
+
+		files["a"] = lineAt2 + lineAt3
+		got, err = reader.Since(ctx, time.Time{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(HaveLen(2))
+		Expect(offsets["a"]).To(Equal([]int{0, len(lineAt2)}))
 	})
 
-	It("fails when a file cannot be read", func() {
-		_, err := framework.ReadFiles(files, func(string, int) (string, error) { return "", errors.New("gone") }, 5, time.Time{})
-		Expect(err).To(MatchError(ContainSubstring("gone")))
+	It("reads two pods independently", func(ctx SpecContext) {
+		files["a"] = lineAt2
+		_, err := reader.Since(ctx, time.Time{})
+		Expect(err).NotTo(HaveOccurred())
+
+		files["b"] = lineAt3
+		got, err := reader.Since(ctx, time.Time{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(HaveLen(2))
+		Expect(offsets["b"]).To(Equal([]int{0}))
+		Expect(offsets["a"]).To(Equal([]int{0, len(lineAt2)}))
+	})
+
+	It("reports no running pod", func(ctx SpecContext) {
+		_, err := reader.Since(ctx, time.Time{})
+		Expect(err).To(MatchError(framework.ErrNoCollectorPod))
+	})
+
+	It("wraps the read error", func(ctx SpecContext) {
+		r := framework.NewCollectorReaderWith(
+			func(context.Context) ([]corev1.Pod, error) { return []corev1.Pod{pod("a")}, nil },
+			func(context.Context, *corev1.Pod, int) (string, error) { return "", errors.New("boom") })
+		_, err := r.Since(ctx, time.Time{})
+		Expect(err).To(MatchError(ContainSubstring("boom")))
 	})
 })

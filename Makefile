@@ -28,29 +28,39 @@ KIND := $(BIN)/kind-$(KIND_VERSION)
 KUBECTL := $(BIN)/kubectl-$(KUBECTL_VERSION)
 CMCTL := $(BIN)/cmctl-$(CMCTL_VERSION)
 
-KIND_CLUSTER ?= plugin-telemetry
+KIND_CLUSTER ?= plugin-telemetry-$(subst .,-,$(CNPG_VERSION))
 CNPG_VERSION ?= v1.30.1
 POSTGRES_IMAGE ?= ghcr.io/cloudnative-pg/postgresql:18.7-system-trixie@sha256:5a5dfbde88d5909fd4938189c141f53fb153f53c519f14907dce9e7c04baa153
 COLLECTOR_IMAGE ?= otel/opentelemetry-collector:0.165.0@sha256:34b24b740c3c88d3467740e8642a397c13898ef76d7295c5425164c482ed1b73
-E2E_SUITES := smoke spikes admission engine plugin
+E2E_SUITES := admission engine plugin collector-metrics resilience
 KIND_E2E_SUITES := $(filter-out engine,$(E2E_SUITES))
 E2E_TARGETS := $(addprefix e2e-,$(KIND_E2E_SUITES))
-# go test -timeout of a kind e2e suite: E2E_GO_TEST_TIMEOUT_<suite> when set, else E2E_GO_TEST_TIMEOUT.
-E2E_GO_TEST_TIMEOUT := 30m
-E2E_GO_TEST_TIMEOUT_plugin := 50m
+# Ginkgo --timeout of a suite: E2E_TIMEOUT_<suite> when set, else 30m. E2E_PROCS_<suite> sets --procs (default 1).
+E2E_TIMEOUT_plugin := 50m
+E2E_TIMEOUT_engine := 20m
+E2E_TIMEOUT_collector-metrics := 30m
+E2E_TIMEOUT_resilience := 60m
+E2E_TIMEOUT_measure := 4h
+E2E_PROCS_plugin := 3
+# Regex for ginkgo --focus; empty runs every spec.
+E2E_FOCUS ?=
+override E2E_FOCUS := $(value E2E_FOCUS)
+export E2E_FOCUS
 
 DEV_ENV := KIND=$(KIND) KUBECTL=$(KUBECTL) CMCTL=$(CMCTL) KIND_CLUSTER=$(KIND_CLUSTER) KIND_NODE_IMAGE=$(KIND_NODE_IMAGE) \
 	CNPG_VERSION=$(CNPG_VERSION) CERT_MANAGER_VERSION=$(CERT_MANAGER_VERSION)
 
 IMG ?= ghcr.io/gabrosys/plugin-telemetry:$(VERSION)
 PLATFORMS ?= linux/amd64,linux/arm64
-# image-multiarch needs the containerd image store or a docker-container builder.
+# buildx passes SOURCE_DATE_EPOCH to the build as a build arg; with rewrite-timestamp it fixes every timestamp in the image.
+export SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null || echo 0)
+# Builds are reproducible on the containerd image store or a non-docker builder; the classic store ignores rewrite-timestamp. image-multiarch needs the containerd store or a docker-container builder.
 BUILDX_BUILDER ?=
 
 .PHONY: help
 help: ## Show the available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_%-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
-	@printf '  %-16s %s\n' 'e2e-<suite>' 'Run an e2e suite on the kind environment ($(KIND_E2E_SUITES))'
+	@printf '  %-16s %s\n' 'e2e-<suite>' 'Run an e2e suite on the kind environment ($(KIND_E2E_SUITES)); E2E_FOCUS=<regex> runs matching specs only'
 
 .PHONY: build
 build: ## Build bin/plugin-telemetry and compile every package
@@ -67,19 +77,20 @@ test-integration: ## Run the tests that need Docker (PostgreSQL in a container)
 
 .PHONY: generate
 generate: ## Regenerate docs/self-metrics.md, the deepcopy code and the CRDs
-	$(GO) run ./internal/selfmetrics/gen > docs/self-metrics.md
+	@mkdir -p $(BIN) && $(GO) run ./internal/selfmetrics/gen > $(BIN)/self-metrics.md && mv $(BIN)/self-metrics.md docs/self-metrics.md
 	$(GO) run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION) object crd:allowDangerousTypes=true paths=./api/... output:crd:dir=config/crd
 
 .PHONY: image
 image: ## Build the image for the local platform and load it into Docker
-	docker buildx build --load --build-arg VERSION=$(VERSION) -t $(IMG) .
+	docker buildx build --output type=docker,name=$(IMG),rewrite-timestamp=true,unpack=false \
+		--provenance=false --build-arg VERSION=$(VERSION) .
 
 .PHONY: image-multiarch
 image-multiarch: ## Build all platforms with an SBOM into bin/image-oci
 	rm -rf $(BIN)/image-oci
 	docker buildx build $(if $(BUILDX_BUILDER),--builder $(BUILDX_BUILDER)) \
-		--platform $(PLATFORMS) --sbom=true --build-arg VERSION=$(VERSION) \
-		--output type=oci,dest=$(BIN)/image-oci,tar=false .
+		--platform $(PLATFORMS) --sbom=true --provenance=false --build-arg VERSION=$(VERSION) \
+		--output type=oci,dest=$(BIN)/image-oci,tar=false,rewrite-timestamp=true .
 
 .PHONY: dev-up
 dev-up: $(KIND) $(KUBECTL) $(CMCTL) ## Create the kind environment (CNPG_VERSION=v1.30.1|main)
@@ -90,37 +101,70 @@ dev-down: $(KIND) ## Delete the kind environment
 	$(DEV_ENV) hack/dev-env.sh down
 
 .PHONY: kind-load
-kind-load: $(KIND) ## Load the plugin image into kind, pull the collector image on its nodes and record the plugin digest reference in bin/image-ref
+kind-load: image dev-up $(KIND) ## Load the plugin image into kind, pull the collector image on its nodes and record the plugin digest reference in bin/image-ref
 	$(KIND) load docker-image $(IMG) --name $(KIND_CLUSTER)
 	for node in $$($(KIND) get nodes --name $(KIND_CLUSTER)); do docker exec $$node crictl pull $(COLLECTOR_IMAGE) || exit 1; done
+	mkdir -p $(BIN)
 	KIND=$(KIND) hack/kind-image-ref.sh $(KIND_CLUSTER) $(IMG) > $(BIN)/image-ref
 
 .PHONY: deploy
-deploy: $(KUBECTL) ## Deploy the plugin to the kind environment (after image and kind-load)
-	@test -s $(BIN)/image-ref || { echo "run make image kind-load first" >&2; exit 1; }
+deploy: kind-load $(KUBECTL) ## Build and load the image, then deploy the plugin to the kind environment
 	KUBECTL=$(KUBECTL) KIND_CLUSTER=$(KIND_CLUSTER) BIN=$(BIN) COLLECTOR_IMAGE=$(COLLECTOR_IMAGE) POSTGRES_IMAGE=$(POSTGRES_IMAGE) \
 		hack/deploy.sh "$$(cat $(BIN)/image-ref)"
 
-.PHONY: $(E2E_TARGETS)
-$(E2E_TARGETS): e2e-%: dev-up
-	E2E_KUBE_CONTEXT=kind-$(KIND_CLUSTER) CNPG_VERSION=$(CNPG_VERSION) POSTGRES_IMAGE=$(POSTGRES_IMAGE) \
-		$(GO) test -tags e2e -count=1 -timeout $(or $(E2E_GO_TEST_TIMEOUT_$*),$(E2E_GO_TEST_TIMEOUT)) -v ./test/e2e/$*/... -ginkgo.v
+# ginkgo-run: $(1) names the suite (timeout and procs), $(2) is the package directory.
+ginkgo-run = $(GO) run github.com/onsi/ginkgo/v2/ginkgo run --tags e2e -v --fail-on-empty \
+	--procs=$(or $(E2E_PROCS_$(1)),1) --timeout=$(or $(E2E_TIMEOUT_$(1)),30m) $(if $(E2E_FOCUS),--focus="$$E2E_FOCUS") ./$(2)/...
 
-e2e-spikes: image kind-load deploy
-e2e-admission: image kind-load deploy
-e2e-plugin: image kind-load deploy
+.PHONY: $(E2E_TARGETS)
+$(E2E_TARGETS): e2e-%: deploy
+	$(KUBECTL) --context kind-$(KIND_CLUSTER) rollout restart deployment/collector -n telemetry-e2e
+	$(KUBECTL) --context kind-$(KIND_CLUSTER) rollout status deployment/collector -n telemetry-e2e --timeout=180s
+	E2E_KUBE_CONTEXT=kind-$(KIND_CLUSTER) CNPG_VERSION=$(CNPG_VERSION) POSTGRES_IMAGE=$(POSTGRES_IMAGE) CMCTL=$(CMCTL) \
+		$(call ginkgo-run,$*,test/e2e/$*)
+
+.PHONY: measure
+measure: deploy ## Measure resource use on the kind environment (E2E_FOCUS=<regex>); JSON in bin/measure
+	mkdir -p $(BIN)/measure
+	$(KUBECTL) --context kind-$(KIND_CLUSTER) rollout restart deployment/collector -n telemetry-e2e
+	$(KUBECTL) --context kind-$(KIND_CLUSTER) rollout status deployment/collector -n telemetry-e2e --timeout=180s
+	MEASURE_OUT=$(abspath $(BIN)/measure) E2E_KUBE_CONTEXT=kind-$(KIND_CLUSTER) CNPG_VERSION=$(CNPG_VERSION) POSTGRES_IMAGE=$(POSTGRES_IMAGE) \
+		$(call ginkgo-run,measure,test/measure)
 
 .PHONY: e2e-engine
-e2e-engine: build ## Run the engine e2e suite with Docker, without kind
+e2e-engine: build ## Run the engine e2e suite with Docker, without kind (E2E_FOCUS=<regex>)
 	ENGINE_BIN=$(BIN)/plugin-telemetry POSTGRES_IMAGE=$(POSTGRES_IMAGE) COLLECTOR_IMAGE=$(COLLECTOR_IMAGE) \
-		$(GO) test -tags e2e -count=1 -timeout 20m -v ./test/e2e/engine/...
+		$(call ginkgo-run,engine,test/e2e/engine)
+
+E2E_MATRIX_CNPG ?= v1.30.1 main
+E2E_MATRIX_SUITES ?= $(KIND_E2E_SUITES)
+
+# One lane: the suites in order on one kind cluster.
+.PHONY: e2e-lane
+e2e-lane: $(addprefix e2e-,$(E2E_MATRIX_SUITES))
+
+# One lane per CNPG version, each with its own cluster and BIN; logs in bin/e2e/<v>.log.
+.PHONY: e2e-matrix
+e2e-matrix: image $(KIND) $(KUBECTL) $(CMCTL) ## Run the kind suites on one kind cluster per CNPG version, in parallel
+	mkdir -p $(BIN)/e2e
+	pids=(); failed=0; \
+	for v in $(E2E_MATRIX_CNPG); do \
+		( start=$$SECONDS; rc=0; \
+		$(MAKE) --no-print-directory -k -o image e2e-lane CNPG_VERSION=$$v KIND_CLUSTER=plugin-telemetry-$${v//./-} \
+			BIN=$(BIN)/lanes/$$v KIND=$(KIND) KUBECTL=$(KUBECTL) CMCTL=$(CMCTL) >$(BIN)/e2e/$$v.log 2>&1 || rc=$$?; \
+		echo "$$v exit=$$rc $$((SECONDS - start))s"; \
+		exit $$rc ) & \
+		pids+=($$!); \
+	done; \
+	for pid in "$${pids[@]}"; do wait "$$pid" || failed=1; done; \
+	exit $$failed
 
 .PHONY: lint
 lint: $(GOLANGCI_LINT) ## Run linters and the vulnerability scan
 	$(GOLANGCI_LINT) config verify
 	$(GOLANGCI_LINT) run ./...
 	$(GO) run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
-	docker run --rm -v "$(CURDIR):/mnt:ro" -w /mnt $(SHELLCHECK_IMAGE) hack/*.sh test/devenv/testdata/* test/pgtest/server.sh
+	docker run --rm -v "$(CURDIR):/mnt:ro" -w /mnt $(SHELLCHECK_IMAGE) hack/*.sh test/pgtest/server.sh
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) -tags e2e,integration ./...
 
 .PHONY: fmt

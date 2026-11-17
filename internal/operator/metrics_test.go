@@ -2,30 +2,33 @@ package operator_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/cloudnative-pg/cnpg-i/pkg/lifecycle"
 	cnpgoperator "github.com/cloudnative-pg/cnpg-i/pkg/operator"
-	"github.com/cloudnative-pg/cnpg-i/pkg/reconciler"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	"github.com/gabrosys/plugin-telemetry/internal/export/otlptest"
 	"github.com/gabrosys/plugin-telemetry/internal/identity"
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
+	"github.com/gabrosys/plugin-telemetry/test/otlptest"
 )
 
 // metricByName collects m and returns the metric called name.
 func metricByName(m *operator.PluginMetrics, name string) (metricdata.Metrics, bool) {
 	GinkgoHelper()
 
-	rm, err := operator.CollectMetrics(m, context.Background())
+	rm, err := operator.CollectMetrics(context.Background(), m)
 	Expect(err).NotTo(HaveOccurred())
 	for _, sm := range rm.ScopeMetrics {
 		for _, got := range sm.Metrics {
@@ -74,16 +77,16 @@ const (
 )
 
 var _ = Describe("PluginMetrics", func() {
-	It("counts hook calls by service, operation and outcome and records their duration", func() {
+	It("counts hook calls by service, operation and outcome and records their duration", func(ctx context.Context) {
 		m := operator.NewPluginMetrics()
 
-		m.Hook("lifecycle", "create", "patched", 20*time.Millisecond)
-		m.Hook("lifecycle", "create", "patched", 40*time.Millisecond)
-		m.Hook("reconciler", "pre", "applied", time.Second)
+		m.Hook(ctx, "lifecycle", "create", "patched", 20*time.Millisecond)
+		m.Hook(ctx, "lifecycle", "create", "patched", 40*time.Millisecond)
+		m.Hook(ctx, "operator", "set_status", "status", time.Second)
 
 		Expect(counts(m, hookCalls)).To(Equal(map[string]int64{
-			"operation=create,outcome=patched,service=lifecycle": 2,
-			"operation=pre,outcome=applied,service=reconciler":   1,
+			"operation=create,outcome=patched,service=lifecycle":   2,
+			"operation=set_status,outcome=status,service=operator": 1,
 		}))
 
 		got, ok := metricByName(m, hookDuration)
@@ -99,7 +102,7 @@ var _ = Describe("PluginMetrics", func() {
 			case "operation=create,service=lifecycle":
 				Expect(p.Count).To(BeEquivalentTo(2))
 				Expect(p.Sum).To(BeNumerically("~", 0.06, 1e-9))
-			case "operation=pre,service=reconciler":
+			case "operation=set_status,service=operator":
 				Expect(p.Count).To(BeEquivalentTo(1))
 			default:
 				Fail("unexpected attributes " + attrKey(p.Attributes))
@@ -107,33 +110,52 @@ var _ = Describe("PluginMetrics", func() {
 		}
 	})
 
-	It("counts identity reconciles by outcome", func() {
+	It("counts identity reconciles by outcome and, for errors, by reason", func(ctx context.Context) {
 		m := operator.NewPluginMetrics()
 
-		m.IdentityReconcile("ok")
-		m.IdentityReconcile("ok")
-		m.IdentityReconcile("error")
+		m.IdentityReconcile(ctx, nil)
+		m.IdentityReconcile(ctx, nil)
+		m.IdentityReconcile(ctx, errors.New("boom"))
+		m.IdentityReconcile(ctx, fmt.Errorf("get cluster: %w", context.DeadlineExceeded))
+		m.IdentityReconcile(ctx, fmt.Errorf("ensure: %w", apierrors.NewForbidden(schema.GroupResource{Resource: "rolebindings"}, "pg", errors.New("denied"))))
 
-		Expect(counts(m, identityCount)).To(Equal(map[string]int64{"outcome=ok": 2, "outcome=error": 1}))
+		Expect(counts(m, identityCount)).To(Equal(map[string]int64{
+			"outcome=ok":                     2,
+			"outcome=error,reason=Unknown":   1,
+			"outcome=error,reason=Timeout":   1,
+			"outcome=error,reason=Forbidden": 1,
+		}))
 	})
 
-	It("records nothing on a nil receiver", func() {
+	It("records Unknown for a server-supplied reason outside the API's list", func(ctx context.Context) {
+		m := operator.NewPluginMetrics()
+
+		m.IdentityReconcile(ctx, fmt.Errorf("ensure: %w", &apierrors.StatusError{ErrStatus: metav1.Status{Reason: "SomethingCustom"}}))
+		m.IdentityReconcile(ctx, fmt.Errorf("ensure: %w", apierrors.NewForbidden(schema.GroupResource{Resource: "roles"}, "pg", errors.New("denied"))))
+
+		Expect(counts(m, identityCount)).To(Equal(map[string]int64{
+			"outcome=error,reason=Unknown":   1,
+			"outcome=error,reason=Forbidden": 1,
+		}))
+	})
+
+	It("records nothing on a nil receiver", func(ctx context.Context) {
 		var m *operator.PluginMetrics
 
 		Expect(func() {
-			m.Hook("lifecycle", "create", "patched", time.Second)
-			m.IdentityReconcile("ok")
+			m.Hook(ctx, "lifecycle", "create", "patched", time.Second)
+			m.IdentityReconcile(ctx, errors.New("boom"))
 		}).NotTo(Panic())
 	})
 
-	It("is safe for concurrent use", func() {
+	It("is safe for concurrent use", func(ctx context.Context) {
 		m := operator.NewPluginMetrics()
 		var wg sync.WaitGroup
 		for range 8 {
 			wg.Go(func() {
 				for range 50 {
-					m.Hook("operator", "set_status", "noop", time.Millisecond)
-					m.IdentityReconcile("ok")
+					m.Hook(ctx, "operator", "set_status", "noop", time.Millisecond)
+					m.IdentityReconcile(ctx, nil)
 				}
 			})
 		}
@@ -154,7 +176,7 @@ var _ = Describe("PluginMetrics", func() {
 		Expect(enabled).To(BeTrue())
 
 		m := operator.NewPluginMetrics()
-		m.Hook("lifecycle", "evaluate", "unchanged", time.Millisecond)
+		m.Hook(ctx, "lifecycle", "evaluate", "unchanged", time.Millisecond)
 
 		runCtx, cancel := context.WithCancel(ctx)
 		done := make(chan error, 1)
@@ -249,31 +271,9 @@ var _ = Describe("hooks recording metrics", func() {
 		}))
 	})
 
-	It("records the reconciler hooks", func(ctx context.Context) {
-		c := newClient(nil, interceptor.Funcs{})
-		r := &operator.Reconciler{Identity: &identity.Ensurer{Reader: c, Live: c, Writer: c}, Cache: c, Metrics: m}
-		cluster := newCluster("ns", "pg", ours(nil))
-
-		_, err := r.Pre(ctx, hookRequest(cluster))
-		Expect(err).NotTo(HaveOccurred())
-		_, err = r.Pre(ctx, hookRequest(cluster))
-		Expect(err).NotTo(HaveOccurred())
-		_, err = r.Post(ctx, hookRequest(cluster))
-		Expect(err).NotTo(HaveOccurred())
-		_, err = r.Post(ctx, &reconciler.ReconcilerHooksRequest{})
-		Expect(err).NotTo(HaveOccurred())
-
-		Expect(counts(m, hookCalls)).To(Equal(map[string]int64{
-			"operation=pre,outcome=applied,service=reconciler":   1,
-			"operation=pre,outcome=unchanged,service=reconciler": 1,
-			"operation=post,outcome=skipped,service=reconciler":  1,
-			"operation=post,outcome=error,service=reconciler":    1,
-		}))
-	})
-
 	It("records SetStatusInCluster as status, noop or error", func(ctx context.Context) {
 		c := newClient(nil, interceptor.Funcs{})
-		s := &operator.Status{Reader: c, Identity: &identity.Ensurer{Reader: c, Live: c, Writer: c}, Metrics: m}
+		s := &operator.Status{Reader: c, Identity: &identity.Ensurer{Reader: c, Writer: c}, Metrics: m}
 
 		_, err := s.SetStatusInCluster(ctx, hookStatusRequest(newCluster("ns", "pg", ours(nil))))
 		Expect(err).NotTo(HaveOccurred())
@@ -289,23 +289,16 @@ var _ = Describe("hooks recording metrics", func() {
 		}))
 	})
 
-	It("records identity reconciles as ok or error", func(ctx context.Context) {
-		c := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{})
-		ctrl := &operator.IdentityController{Client: c, Identity: &identity.Ensurer{Reader: c, Live: c, Writer: c}, Metrics: m}
-		_, err := ctrl.Reconcile(ctx, requestFor("ns", "pg"))
-		Expect(err).NotTo(HaveOccurred())
-		_, err = ctrl.Reconcile(ctx, requestFor("ns", "gone"))
-		Expect(err).NotTo(HaveOccurred())
+	DescribeTable("counts EVALUATE as an error when it can't inject the sidecar",
+		func(ctx context.Context, images string, cluster []byte) {
+			l := &operator.Lifecycle{Images: fakeImages(images), Metrics: m}
 
-		failing := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{
-			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-				return errApply
-			},
-		})
-		ctrl = &operator.IdentityController{Client: failing, Identity: &identity.Ensurer{Reader: failing, Live: failing, Writer: failing}, Metrics: m}
-		_, err = ctrl.Reconcile(ctx, requestFor("ns", "pg"))
-		Expect(err).To(HaveOccurred())
+			_, _ = l.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, cluster, fixturePod("pod-main")))
 
-		Expect(counts(m, identityCount)).To(Equal(map[string]int64{"outcome=ok": 2, "outcome=error": 1}))
-	})
+			Expect(counts(m, hookCalls)).To(Equal(map[string]int64{"operation=evaluate,outcome=error,service=lifecycle": 1}))
+		},
+		Entry("no image", "", clusterJSON(ours(nil))),
+		Entry("auth ldap", testImage, clusterJSON(ours(map[string]string{"auth": "ldap"}))),
+		Entry("malformed Cluster", testImage, []byte(`{"spec":`)),
+	)
 })

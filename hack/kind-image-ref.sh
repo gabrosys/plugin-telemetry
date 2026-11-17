@@ -4,6 +4,18 @@
 # Tags IMAGE as REPO@DIGEST on every node of CLUSTER and prints REPO@DIGEST.
 set -euo pipefail
 
+# parse_ref REF sets repo (REF without tag and digest) and image (repo:tag, latest by default).
+parse_ref() {
+	local ref=${1%@sha256:*}
+	if [[ ${ref##*/} == *:* ]]; then
+		repo=${ref%:*}
+	else
+		repo=$ref
+		ref=$ref:latest
+	fi
+	image=$ref
+}
+
 : "${KIND:?}"
 
 if [[ $# -ne 2 ]]; then
@@ -12,8 +24,7 @@ if [[ $# -ne 2 ]]; then
 fi
 
 cluster=$1
-image=$2
-repo=${image%:*}
+parse_ref "$2"
 
 nodes=$("$KIND" get nodes --name "$cluster")
 [[ -n $nodes ]] || {

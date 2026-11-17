@@ -15,37 +15,35 @@ spec:
         operations: [CREATE]
         resources: [serviceaccounts/token]
   matchConditions:
-    - name: plugin-service-account
-      expression: request.userInfo.username == 'system:serviceaccount:cnpg-system:plugin-telemetry'
+    - name: plugin-or-identity-account
+      expression: >-
+        request.userInfo.username.startsWith('system:serviceaccount:') &&
+          (request.userInfo.username.endsWith(':plugin-telemetry') ||
+            request.userInfo.username.endsWith('.telemetry'))
   variables:
     - name: tokenRequest
       expression: request.resource.resource == 'serviceaccounts' && request.?subResource.orValue('') == 'token'
     - name: secret
       expression: request.resource.resource == 'secrets'
-    - name: newAllowed
+    - name: target
+      expression: "request.operation == 'DELETE' ? oldObject : object"
+    - name: allowed
       expression: >-
-        request.operation == 'DELETE' || (variables.secret
-          ? object.?type.orValue('') == 'kubernetes.io/service-account-token' &&
-            object.?metadata.annotations['kubernetes.io/service-account.name'].orValue('').endsWith('-telemetry') &&
-            object.metadata.name == object.metadata.annotations['kubernetes.io/service-account.name'] + '-token'
-          : object.metadata.name.endsWith('-telemetry'))
-    - name: oldAllowed
-      expression: >-
-        request.operation == 'CREATE' || (variables.secret
-          ? oldObject.?type.orValue('') == 'kubernetes.io/service-account-token' &&
-            oldObject.?metadata.annotations['kubernetes.io/service-account.name'].orValue('').endsWith('-telemetry') &&
-            oldObject.metadata.name == oldObject.metadata.annotations['kubernetes.io/service-account.name'] + '-token'
-          : oldObject.metadata.name.endsWith('-telemetry'))
+        variables.secret
+          ? variables.target.?type.orValue('') == 'kubernetes.io/service-account-token' &&
+            variables.target.?metadata.annotations['kubernetes.io/service-account.name'].orValue('').endsWith('.telemetry') &&
+            variables.target.metadata.name == variables.target.metadata.annotations['kubernetes.io/service-account.name'] + '-token' &&
+            (request.operation != 'UPDATE' ||
+              oldObject.?metadata.annotations['kubernetes.io/service-account.name'].orValue('') ==
+                variables.target.metadata.annotations['kubernetes.io/service-account.name'])
+          : variables.target.metadata.name.endsWith('.telemetry')
   validations:
-    - expression: variables.tokenRequest || (variables.newAllowed && variables.oldAllowed)
+    - expression: variables.tokenRequest || variables.allowed
       reason: Forbidden
-      message: >-
-        plugin-telemetry-identities: plugin-telemetry may write only ServiceAccounts named *-telemetry and their
-        kubernetes.io/service-account-token Secrets named <account>-token
+      message: only ServiceAccounts named *.telemetry, and kubernetes.io/service-account-token Secrets named <account>-token for them, may be written
     - expression: '!variables.tokenRequest'
       reason: Forbidden
-      message: >-
-        plugin-telemetry-identities: plugin-telemetry may not request ServiceAccount tokens (TokenRequest)
+      message: ServiceAccount tokens may not be requested (TokenRequest)
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -68,8 +66,11 @@ spec:
         operations: [CREATE, UPDATE, DELETE]
         resources: [roles, rolebindings]
   matchConditions:
-    - name: plugin-service-account
-      expression: request.userInfo.username == 'system:serviceaccount:cnpg-system:plugin-telemetry'
+    - name: plugin-or-identity-account
+      expression: >-
+        request.userInfo.username.startsWith('system:serviceaccount:') &&
+          (request.userInfo.username.endsWith(':plugin-telemetry') ||
+            request.userInfo.username.endsWith('.telemetry'))
   variables:
     - name: deleting
       expression: request.operation == 'DELETE'
@@ -81,12 +82,15 @@ spec:
     - name: readOnly
       expression: >-
         object.rules == null || object.rules.all(rule, rule.verbs.all(verb, verb in ['get', 'list', 'watch']))
-    - name: rulesKept
-      expression: request.operation == 'UPDATE' && object.rules == oldObject.rules
-    - name: ownRole
+    - name: named
       expression: >-
-        object.roleRef.apiGroup == 'rbac.authorization.k8s.io' && object.roleRef.kind == 'Role' &&
-          object.roleRef.name == object.metadata.name
+        object.rules == null || object.rules.all(rule, rule.?resourceNames.orValue([]).size() > 0)
+    - name: noSubresource
+      expression: >-
+        object.rules == null ||
+          object.rules.all(rule, rule.?resources.orValue([]).all(r, r != '*' && !r.contains('/')))
+    - name: ownRole
+      expression: object.roleRef.kind == 'Role' && object.roleRef.name == object.metadata.name
     - name: subjects
       expression: object.?subjects.orValue([])
     - name: ownAccount
@@ -94,27 +98,25 @@ spec:
         size(variables.subjects) == 1 && variables.subjects[0].kind == 'ServiceAccount' &&
           variables.subjects[0].name == object.metadata.name &&
           variables.subjects[0].?namespace.orValue('') == request.namespace
-    - name: subjectsKept
-      expression: request.operation == 'UPDATE' && variables.subjects == oldObject.?subjects.orValue([])
   validations:
-    - expression: >-
-        (variables.deleting ? oldObject : object).metadata.name.endsWith('-telemetry')
+    - expression: "(variables.deleting ? oldObject : object).metadata.name.endsWith('.telemetry')"
       reason: Forbidden
-      message: >-
-        plugin-telemetry-roles: plugin-telemetry may write only Roles and RoleBindings named *-telemetry
-    - expression: variables.deleting || !variables.role || variables.readOnly || variables.rulesKept
+      message: only Roles and RoleBindings named *.telemetry may be written or deleted
+    - expression: variables.deleting || !variables.role || variables.readOnly
       reason: Forbidden
-      message: >-
-        plugin-telemetry-roles: plugin-telemetry may grant only get, list and watch in a Role
+      message: a Role may grant only get, list and watch
+    - expression: variables.deleting || !variables.role || variables.named
+      reason: Forbidden
+      message: every rule of a Role must name the objects it covers (resourceNames)
+    - expression: variables.deleting || !variables.role || variables.noSubresource
+      reason: Forbidden
+      message: a Role may not name subresources, or * for every resource
     - expression: variables.deleting || !variables.binding || variables.ownRole
       reason: Forbidden
-      message: >-
-        plugin-telemetry-roles: plugin-telemetry may bind a RoleBinding only to the Role of the same name
-    - expression: variables.deleting || !variables.binding || variables.ownAccount || variables.subjectsKept
+      message: a RoleBinding may refer only to the Role of its own name
+    - expression: variables.deleting || !variables.binding || variables.ownAccount
       reason: Forbidden
-      message: >-
-        plugin-telemetry-roles: plugin-telemetry may bind only the ServiceAccount of the same name, in the
-        RoleBinding's namespace
+      message: a RoleBinding may bind only the ServiceAccount of its own name, in its own namespace
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -122,4 +124,29 @@ metadata:
   name: plugin-telemetry-roles
 spec:
   policyName: plugin-telemetry-roles
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: plugin-telemetry-reserved-names
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [postgresql.cnpg.io]
+        apiVersions: [v1]
+        operations: [CREATE]
+        resources: [poolers]
+  validations:
+    - expression: "!object.metadata.name.endsWith('.telemetry')"
+      reason: Invalid
+      message: Pooler names ending in .telemetry are reserved for the telemetry plugin's identity objects
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: plugin-telemetry-reserved-names
+spec:
+  policyName: plugin-telemetry-reserved-names
   validationActions: [Deny]

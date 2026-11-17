@@ -1,6 +1,7 @@
 package settings_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -11,8 +12,22 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
 )
 
+// loadFile reads the file at path and parses it relative to its directory, as the engine does.
+func loadFile(path string) (settings.Settings, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // test fixture path
+	if err != nil {
+		return settings.Settings{}, fmt.Errorf("read settings: %w", err)
+	}
+	dir, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		return settings.Settings{}, fmt.Errorf("resolve settings directory: %w", err)
+	}
+
+	return settings.Parse(data, dir)
+}
+
 func load(name string) (settings.Settings, error) {
-	return settings.Load(filepath.Join("testdata", name))
+	return loadFile(filepath.Join("testdata", name))
 }
 
 func mustLoad(name string) settings.Settings {
@@ -70,7 +85,7 @@ var _ = Describe("Load", func() {
 	It("defaults the exporter timeout to half the interval when that is below 10s", func() {
 		p := writeConfig("cluster: c\nexporter:\n  endpoint: http://x\n  interval: 6s\n")
 
-		s, err := settings.Load(p)
+		s, err := loadFile(p)
 
 		Expect(err).ToNot(HaveOccurred())
 		Expect(s.Exporter.Timeout).To(Equal(3 * time.Second))
@@ -146,19 +161,19 @@ var _ = Describe("Load", func() {
 
 	It("fails on a malformed duration", func() {
 		p := writeConfig("cluster: c\nplanInterval: soon\nexporter:\n  endpoint: http://x\n")
-		_, err := settings.Load(p)
+		_, err := loadFile(p)
 		Expect(err).To(HaveOccurred())
 	})
 
 	It("reports an empty file as a missing cluster", func() {
-		_, err := settings.Load(writeConfig(""))
+		_, err := loadFile(writeConfig(""))
 		Expect(err).To(MatchError(ContainSubstring("cluster")))
 	})
 
 	It("gives a group without interval the default interval", func() {
 		p := writeConfig("cluster: c\ndefaultInterval: 45s\nexporter:\n  endpoint: http://x\ngroups:\n  - name: g\n    queries: [q]\n")
 
-		s, err := settings.Load(p)
+		s, err := loadFile(p)
 
 		Expect(err).ToNot(HaveOccurred())
 		Expect(s.Groups[0].Interval).To(Equal(45 * time.Second))
@@ -167,14 +182,14 @@ var _ = Describe("Load", func() {
 	It("rejects an explicit zero group interval", func() {
 		p := writeConfig("cluster: c\nexporter:\n  endpoint: http://x\ngroups:\n  - name: g\n    interval: 0s\n    queries: [q]\n")
 
-		_, err := settings.Load(p)
+		_, err := loadFile(p)
 
 		Expect(err).To(MatchError(ContainSubstring("groups[0].interval")))
 	})
 
 	DescribeTable("rejects an unknown key at every level",
 		func(doc, key string) {
-			_, err := settings.Load(writeConfig(doc))
+			_, err := loadFile(writeConfig(doc))
 			Expect(err).To(MatchError(ContainSubstring(key)))
 		},
 		Entry("top level", "cluster: c\nbogusTop: 1\nexporter:\n  endpoint: http://x\n", "bogusTop"),
@@ -187,7 +202,7 @@ var _ = Describe("Load", func() {
 
 	It("rejects a zero exporter timeout instead of defaulting it", func() {
 		p := writeConfig("cluster: c\nexporter:\n  endpoint: http://x\n  timeout: 0s\n")
-		_, err := settings.Load(p)
+		_, err := loadFile(p)
 		Expect(err).To(MatchError(ContainSubstring("exporter.timeout")))
 	})
 })
@@ -232,6 +247,7 @@ var _ = Describe("Validate", func() {
 			s.Exporter.Endpoint = "https://x"
 			s.Exporter.TLS.KeyFile = "/k.pem"
 		}, "exporter.tls.certFile"),
+		Entry("tls minVersion 1.3 with an http endpoint", func(s *settings.Settings) { s.Exporter.TLS.MinVersion = "1.3" }, "exporter.tls"),
 		Entry("tls minVersion", func(s *settings.Settings) { s.Exporter.TLS.MinVersion = "1.1" }, "exporter.tls.minVersion"),
 		Entry("protocol", func(s *settings.Settings) { s.Exporter.Protocol = "http/json" }, "exporter.protocol"),
 		Entry("compression", func(s *settings.Settings) { s.Exporter.Compression = "zstd" }, "exporter.compression"),
@@ -258,6 +274,24 @@ var _ = Describe("Validate", func() {
 		Entry("maxDatabases", func(s *settings.Settings) { s.Limits.MaxDatabases = 0 }, "limits.maxDatabases"),
 		Entry("maxLabelValueLength", func(s *settings.Settings) { s.Limits.MaxLabelValueLength = 0 }, "limits.maxLabelValueLength"),
 		Entry("maxLabelsPerSeries", func(s *settings.Settings) { s.Limits.MaxLabelsPerSeries = 0 }, "limits.maxLabelsPerSeries"),
+	)
+
+	DescribeTable("bounds the timeouts by PostgreSQL's integer milliseconds",
+		func(mutate func(*settings.Settings), message string) {
+			s := mustLoad("minimal.yaml")
+			mutate(&s)
+			if message == "" {
+				Expect(s.Validate()).To(Succeed())
+				return
+			}
+			Expect(s.Validate()).To(MatchError(ContainSubstring(message)))
+		},
+		Entry("queryTimeout at INT_MAX/2 ms", func(s *settings.Settings) { s.Limits.QueryTimeout = 1073741823 * time.Millisecond }, ""),
+		Entry("queryTimeout one past", func(s *settings.Settings) { s.Limits.QueryTimeout = 1073741824 * time.Millisecond },
+			"limits.queryTimeout: must be at most 1073741823ms"),
+		Entry("lockTimeout at INT_MAX ms", func(s *settings.Settings) { s.Limits.LockTimeout = 2147483647 * time.Millisecond }, ""),
+		Entry("lockTimeout one past", func(s *settings.Settings) { s.Limits.LockTimeout = 2147483648 * time.Millisecond },
+			"limits.lockTimeout: must be at most 2147483647ms"),
 	)
 
 	DescribeTable("never echoes the user info, the query or the fragment of a rejected endpoint",

@@ -19,12 +19,12 @@ var _ = Describe("ParseParams", func() {
 			Expect(r.Ignored).To(ConsistOf(ignored))
 			Expect(r.Defaulted).To(BeEmpty())
 		},
-		Entry("no parameters", map[string]string(nil), podpatch.AuthPeer, "50m", "64Mi", nil),
-		Entry("password mode", map[string]string{"auth": "password", "passwordSecret": "s"}, podpatch.AuthPassword, "50m", "64Mi", nil),
+		Entry("no parameters", map[string]string(nil), podpatch.AuthPeer, "50m", "96Mi", nil),
+		Entry("password mode", map[string]string{"auth": "password", "passwordSecret": "s"}, podpatch.AuthPassword, "50m", "96Mi", nil),
 		Entry("resources", map[string]string{"sidecarCPU": "100m", "sidecarMemory": "128Mi"}, podpatch.AuthPeer, "100m", "128Mi", nil),
 		Entry("the floors", map[string]string{"sidecarCPU": "10m", "sidecarMemory": "32Mi"}, podpatch.AuthPeer, "10m", "32Mi", nil),
-		Entry("keys that don't shape the Pod", map[string]string{"exporter": "default"}, podpatch.AuthPeer, "50m", "64Mi", nil),
-		Entry("an unknown key", map[string]string{"sidecarMemroy": "1Gi"}, podpatch.AuthPeer, "50m", "64Mi", []string{"sidecarMemroy"}),
+		Entry("keys that don't shape the Pod", map[string]string{"exporter": "default"}, podpatch.AuthPeer, "50m", "96Mi", nil),
+		Entry("an unknown key", map[string]string{"sidecarMemroy": "1Gi"}, podpatch.AuthPeer, "50m", "96Mi", []string{"sidecarMemroy"}),
 	)
 
 	It("returns ignored keys sorted", func() {
@@ -44,19 +44,19 @@ var _ = Describe("ParseParams", func() {
 			Expect(r.Defaulted[0]).To(MatchError(ContainSubstring(key)))
 			Expect(r.Defaulted[0]).To(MatchError(ContainSubstring(raw[key])))
 		},
-		Entry("memory without a unit", map[string]string{"sidecarMemory": "64"}, "50m", "64Mi", "sidecarMemory"),
-		Entry("memory below 32Mi", map[string]string{"sidecarMemory": "16Mi"}, "50m", "64Mi", "sidecarMemory"),
-		Entry("CPU below 10m", map[string]string{"sidecarCPU": "5m"}, "50m", "64Mi", "sidecarCPU"),
-		Entry("a negative CPU", map[string]string{"sidecarCPU": "-1"}, "50m", "64Mi", "sidecarCPU"),
-		Entry("a quantity that doesn't parse", map[string]string{"sidecarCPU": "lots"}, "50m", "64Mi", "sidecarCPU"),
-		Entry("a valid CPU next to an invalid memory", map[string]string{"sidecarCPU": "100m", "sidecarMemory": "x"}, "100m", "64Mi", "sidecarMemory"),
+		Entry("memory without a unit", map[string]string{"sidecarMemory": "64"}, "50m", "96Mi", "sidecarMemory"),
+		Entry("memory below 32Mi", map[string]string{"sidecarMemory": "16Mi"}, "50m", "96Mi", "sidecarMemory"),
+		Entry("CPU below 10m", map[string]string{"sidecarCPU": "5m"}, "50m", "96Mi", "sidecarCPU"),
+		Entry("a negative CPU", map[string]string{"sidecarCPU": "-1"}, "50m", "96Mi", "sidecarCPU"),
+		Entry("a quantity that doesn't parse", map[string]string{"sidecarCPU": "lots"}, "50m", "96Mi", "sidecarCPU"),
+		Entry("a valid CPU next to an invalid memory", map[string]string{"sidecarCPU": "100m", "sidecarMemory": "x"}, "100m", "96Mi", "sidecarMemory"),
 	)
 
 	It("defaults both invalid resources, CPU first", func() {
 		r, err := podpatch.ParseParams(map[string]string{"sidecarMemory": "x", "sidecarCPU": "y"})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(r.Params.CPU.Cmp(resource.MustParse("50m"))).To(BeZero())
-		Expect(r.Params.Memory.Cmp(resource.MustParse("64Mi"))).To(BeZero())
+		Expect(r.Params.Memory.Cmp(resource.MustParse("96Mi"))).To(BeZero())
 		Expect(r.Defaulted).To(HaveLen(2))
 		Expect(r.Defaulted[0]).To(MatchError(ContainSubstring("sidecarCPU")))
 		Expect(r.Defaulted[1]).To(MatchError(ContainSubstring("sidecarMemory")))
@@ -95,5 +95,14 @@ var _ = Describe("ParseParams", func() {
 		_, err := podpatch.ParseParams(map[string]string{"auth": "ldap", "sidecarCPU": "lots"})
 		Expect(err).To(MatchError(ContainSubstring("auth")))
 		Expect(err).NotTo(MatchError(ContainSubstring("sidecarCPU")))
+	})
+
+	It("returns every parsed field with the auth error", func() {
+		r, err := podpatch.ParseParams(map[string]string{"auth": "ldap", "atuh": "password", "sidecarCPU": "lots", "exporter": "prod"})
+		Expect(err).To(MatchError(podpatch.ErrInvalidParameters))
+		Expect(r.Ignored).To(Equal([]string{"atuh"}))
+		Expect(r.Defaulted).To(HaveLen(1))
+		Expect(r.Params.Exporter).To(Equal("prod"))
+		Expect(r.Params.Auth).To(Equal(podpatch.AuthPeer))
 	})
 })

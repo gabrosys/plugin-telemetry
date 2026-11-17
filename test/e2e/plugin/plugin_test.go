@@ -22,6 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
@@ -29,6 +30,8 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/export"
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
+	"github.com/gabrosys/plugin-telemetry/internal/preflight"
+	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/framework"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/otlp"
 )
@@ -47,18 +50,19 @@ const (
 	partOfLabel    = "app.kubernetes.io/part-of"
 	partOfValue    = "plugin-e2e"
 	unlistedLabel  = "plugin-e2e/unlisted"
-	touchAnnot     = "plugin-e2e/touch"
 	extraAttribute = "plugin.e2e.extra"
 	extraValue     = "extra-value"
 	resourceLabel  = "cnpg.cluster.label."
-	collectorTail  = 300
 	exportInterval = 10 * time.Second
 
 	clusterTimeout = 10 * time.Minute
+	badGlob        = "pg_stat_["
 	specPoll       = 3 * time.Second
 
 	// invalid_authorization_specification, sent for peer and pg_hba rejections.
 	sqlStateAuthClass = "28"
+	// sqlStateInvalidAuthorization is the full state of a refused peer or pg_hba login.
+	sqlStateInvalidAuthorization = "28000"
 )
 
 var cnpgGroup = apiv1.SchemeGroupVersion.Group
@@ -83,6 +87,20 @@ type instance struct {
 	PodSpec  string
 	Restarts int32
 	Deleting bool
+}
+
+// touchCluster retries framework.Touch on API errors and returns the write's resourceVersion.
+func touchCluster(ctx context.Context, c client.Client, key client.ObjectKey, value string) string {
+	GinkgoHelper()
+
+	var rv string
+	Eventually(func(g Gomega) {
+		var err error
+		rv, err = framework.Touch(ctx, c, key, value)
+		g.Expect(err).NotTo(HaveOccurred())
+	}).WithContext(ctx).WithTimeout(30 * time.Second).WithPolling(time.Second).Should(Succeed())
+
+	return rv
 }
 
 func readTestdata(name string) []byte {
@@ -161,11 +179,12 @@ func sidecarLogs(ctx context.Context, cfg *rest.Config, ns, pod string) (string,
 
 //nolint:maintidx // one Ordered container per mode; the specs share its state
 func describeMode(m mode) {
-	Describe(m.name, Ordered, func() {
+	Describe(m.name, Ordered, Serial, func() {
 		var (
 			env     framework.Env
 			c       client.Client
 			cfg     *rest.Config
+			reader  *framework.CollectorReader
 			ns      string
 			cluster *apiv1.Cluster
 
@@ -182,30 +201,30 @@ func describeMode(m mode) {
 		key := func(name string) client.ObjectKey { return client.ObjectKey{Namespace: ns, Name: name} }
 		sidecarUser := func() string { return framework.ServiceAccountUser(ns, metadata.ServiceAccountName(cname)) }
 
-		getCluster := func(ctx context.Context) *apiv1.Cluster {
+		getCluster := func(g Gomega, ctx context.Context) *apiv1.Cluster {
 			GinkgoHelper()
 
 			var cl apiv1.Cluster
-			Expect(c.Get(ctx, key(cname), &cl)).To(Succeed())
+			g.Expect(c.Get(ctx, key(cname), &cl)).To(Succeed())
 
 			return &cl
 		}
 
-		pods := func(ctx context.Context) []corev1.Pod {
+		pods := func(g Gomega, ctx context.Context) []corev1.Pod {
 			GinkgoHelper()
 
 			list, err := framework.InstancePods(ctx, c, key(cname))
-			Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).NotTo(HaveOccurred())
 			slices.SortFunc(list, func(a, b corev1.Pod) int { return strings.Compare(a.Name, b.Name) })
 
 			return list
 		}
 
-		states := func(ctx context.Context) map[string]instance {
+		states := func(g Gomega, ctx context.Context) map[string]instance {
 			GinkgoHelper()
 
 			out := map[string]instance{}
-			for _, pod := range pods(ctx) {
+			for _, pod := range pods(g, ctx) {
 				in := instance{
 					UID: pod.UID, PodSpec: pod.Annotations[framework.PodSpecAnnotation],
 					Deleting: pod.DeletionTimestamp != nil,
@@ -224,11 +243,41 @@ func describeMode(m mode) {
 		noRollout := func(ctx context.Context) {
 			GinkgoHelper()
 
-			Expect(states(ctx)).To(Equal(baseline), "an instance Pod was replaced, or its sidecar restarted")
+			Eventually(func(g Gomega) {
+				g.Expect(states(g, ctx)).To(Equal(baseline), "an instance Pod was replaced, or its sidecar restarted")
+			}).WithTimeout(30 * time.Second).WithPolling(specPoll).Should(Succeed())
+		}
+
+		touch := func(ctx context.Context, value string) string {
+			GinkgoHelper()
+
+			return touchCluster(ctx, c, key(cname), value)
+		}
+
+		primary := func(ctx context.Context) types.NamespacedName {
+			GinkgoHelper()
+
+			current := getCluster(Default, ctx).Status.CurrentPrimary
+			Expect(current).NotTo(BeEmpty())
+
+			return key(current)
+		}
+
+		reviewAll := func(ctx context.Context, checks []authorizationv1.ResourceAttributes) []review {
+			GinkgoHelper()
+
+			reviews := make([]review, 0, len(checks))
+			for _, attrs := range checks {
+				ok, err := framework.CanI(ctx, cfg, sidecarUser(), attrs)
+				Expect(err).NotTo(HaveOccurred())
+				reviews = append(reviews, review{attrs: attrs, allowed: ok})
+			}
+
+			return reviews
 		}
 
 		status := func(g Gomega, ctx context.Context) operator.ClusterStatus {
-			st, ok, err := framework.PluginStatus(getCluster(ctx))
+			st, ok, err := framework.PluginStatus(getCluster(g, ctx))
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(ok).To(BeTrue(), "the Cluster has no status from the plugin")
 
@@ -236,10 +285,54 @@ func describeMode(m mode) {
 		}
 
 		lines := func(g Gomega, ctx context.Context, since time.Time) []otlp.Line {
-			out, err := framework.CollectorLinesSince(ctx, cfg, collectorTail, since)
+			out, err := reader.Since(ctx, since)
 			g.Expect(err).NotTo(HaveOccurred())
 
 			return out
+		}
+
+		// pluginExported asserts the collector got an export from the plugin since the time.
+		pluginExported := func(g Gomega, ctx context.Context, since time.Time) {
+			var plugin []map[string]string
+			for _, r := range otlp.Resources(lines(g, ctx, since)) {
+				if r["service.name"] == pluginServiceName {
+					plugin = append(plugin, r)
+				}
+			}
+			g.Expect(plugin).NotTo(BeEmpty(), "the collector received nothing from the plugin since %s", since)
+		}
+
+		// identityReconciles sums, over the plugin pods, the latest value of every
+		// cnpg_otel_plugin_identity_reconciles_total series the collector holds.
+		identityReconciles := func(g Gomega, ctx SpecContext) float64 {
+			pluginPods, err := framework.PluginPods(ctx, c)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			recent := lines(g, ctx, time.Now().Add(-time.Minute))
+			var total float64
+			found := false
+			for _, pod := range pluginPods {
+				latest := map[string]float64{}
+				for _, p := range otlp.Points(otlp.ForResource(recent, "k8s.pod.name", pod), selfmetrics.IdentityReconciles) {
+					latest[fmt.Sprint(p.Attrs)] = p.Value
+				}
+				for _, v := range latest {
+					total += v
+					found = true
+				}
+			}
+
+			g.Expect(found).To(BeTrue(), "the collector holds no %s point", selfmetrics.IdentityReconciles)
+
+			return total
+		}
+
+		awaitPluginExport := func(ctx SpecContext, since time.Time) {
+			GinkgoHelper()
+
+			Eventually(func(g Gomega, ctx SpecContext) {
+				pluginExported(g, ctx, since)
+			}).WithContext(ctx).WithTimeout(3 * time.Minute).WithPolling(specPoll).Should(Succeed())
 		}
 
 		// exports are the exports of this Cluster's pods in lines.
@@ -272,11 +365,11 @@ func describeMode(m mode) {
 			return slices.Compact(out)
 		}
 
-		instanceNames := func(ctx context.Context) []string {
+		instanceNames := func(g Gomega, ctx context.Context) []string {
 			GinkgoHelper()
 
 			var out []string
-			for _, pod := range pods(ctx) {
+			for _, pod := range pods(g, ctx) {
 				out = append(out, pod.Name)
 			}
 
@@ -288,7 +381,7 @@ func describeMode(m mode) {
 			GinkgoHelper()
 
 			Eventually(func(g Gomega, ctx SpecContext) {
-				g.Expect(podsExporting(lines(g, ctx, since), name)).To(ConsistOf(instanceNames(ctx)), "metric %s", name)
+				g.Expect(podsExporting(lines(g, ctx, since), name)).To(ConsistOf(instanceNames(g, ctx)), "metric %s", name)
 			}).WithContext(ctx).WithTimeout(timeout).WithPolling(specPoll).Should(Succeed())
 		}
 
@@ -299,30 +392,15 @@ func describeMode(m mode) {
 			return objects.Role.Rules
 		}
 
-		allowed := func(ctx context.Context, verb, group, resource, name string) bool {
+		allowed := func(g Gomega, ctx context.Context, verb, group, resource, name string) bool {
 			GinkgoHelper()
 
 			ok, err := framework.CanI(ctx, cfg, sidecarUser(), authorizationv1.ResourceAttributes{
 				Namespace: ns, Verb: verb, Group: group, Resource: resource, Name: name,
 			})
-			Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).NotTo(HaveOccurred())
 
 			return ok
-		}
-
-		// touch sets an annotation on the Cluster and returns the resourceVersion of that write.
-		touch := func(ctx context.Context, value string) string {
-			GinkgoHelper()
-
-			cl := getCluster(ctx)
-			patch := client.MergeFrom(cl.DeepCopy())
-			if cl.Annotations == nil {
-				cl.Annotations = map[string]string{}
-			}
-			cl.Annotations[touchAnnot] = value
-			Expect(c.Patch(ctx, cl, patch)).To(Succeed())
-
-			return cl.ResourceVersion
 		}
 
 		// identityGone fails until none of the four identity objects exists.
@@ -354,6 +432,7 @@ func describeMode(m mode) {
 			Expect(err).NotTo(HaveOccurred())
 			c, cfg, err = framework.NewClients(env.KubeContext)
 			Expect(err).NotTo(HaveOccurred())
+			reader = framework.NewCollectorReader(cfg)
 
 			Eventually(framework.PluginAvailable).WithContext(ctx).WithArguments(c).
 				WithTimeout(environmentTimeout).WithPolling(environmentPollInterval).Should(BeTrue())
@@ -412,19 +491,19 @@ func describeMode(m mode) {
 				return framework.ClusterReady(ctx, c, key(cname))
 			}).WithContext(ctx).WithTimeout(clusterTimeout).WithPolling(5 * time.Second).Should(BeTrue())
 
-			baseline = states(ctx)
+			baseline = states(Default, ctx)
 			Expect(baseline).To(HaveLen(2))
 			for name, in := range baseline {
 				Expect(in.PodSpec).NotTo(BeEmpty(), "pod %s has no %s annotation", name, framework.PodSpecAnnotation)
 			}
 		}, NodeTimeout(clusterTimeout+2*time.Minute))
 
-		// A failed spec reports what the sidecars logged and what CloudNativePG says of the Cluster.
+		// A failed spec reports what the sidecars logged.
 		JustAfterEach(func(ctx SpecContext) {
 			if !CurrentSpecReport().Failed() {
 				return
 			}
-			for _, pod := range pods(ctx) {
+			for _, pod := range pods(Default, ctx) {
 				logs, err := sidecarLogs(ctx, cfg, ns, pod.Name)
 				if err != nil {
 					logs = err.Error()
@@ -435,7 +514,7 @@ func describeMode(m mode) {
 
 		It("AC5: a Cluster whose TelemetryExporter doesn't exist yet gets its sidecar, reports exporterState missing, and exports nothing",
 			func(ctx SpecContext) {
-				for _, pod := range pods(ctx) {
+				for _, pod := range pods(Default, ctx) {
 					i := slices.IndexFunc(pod.Status.InitContainerStatuses, func(s corev1.ContainerStatus) bool {
 						return s.Name == metadata.SidecarContainerName
 					})
@@ -450,7 +529,7 @@ func describeMode(m mode) {
 					g.Expect(st.Identity).To(Equal("ready"))
 				}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(specPoll).Should(Succeed())
 
-				for _, pod := range pods(ctx) {
+				for _, pod := range pods(Default, ctx) {
 					Eventually(func(ctx SpecContext) (string, error) {
 						return sidecarLogs(ctx, cfg, ns, pod.Name)
 					}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(specPoll).Should(
@@ -461,13 +540,14 @@ func describeMode(m mode) {
 				Consistently(func(g Gomega, ctx SpecContext) {
 					g.Expect(exports(lines(g, ctx, since))).To(BeEmpty(), "the sidecars export without a TelemetryExporter")
 				}).WithContext(ctx).WithTimeout(3 * exportInterval).WithPolling(specPoll).Should(Succeed())
+				awaitPluginExport(ctx, since)
 
 				noRollout(ctx)
-			}, SpecTimeout(5*time.Minute))
+			}, SpecTimeout(8*time.Minute))
 
 		It("AC2: the ServiceAccount, Role, RoleBinding and token exist, owned by the Cluster, and the Role names exactly the referenced objects",
 			func(ctx SpecContext) {
-				owner := getCluster(ctx)
+				owner := getCluster(Default, ctx)
 				objects, err := framework.Identity(ctx, c, ns, cname)
 				Expect(err).NotTo(HaveOccurred())
 
@@ -506,16 +586,164 @@ func describeMode(m mode) {
 				Expect(objects.Role.Rules).To(ConsistOf(want))
 
 				for _, verb := range []string{"get", "list", "watch"} {
-					Expect(allowed(ctx, verb, "", "configmaps", baseQueries)).To(BeTrue(), verb)
-					Expect(allowed(ctx, verb, "", "configmaps", "unreferenced")).To(BeFalse(), verb)
+					Expect(allowed(Default, ctx, verb, "", "configmaps", baseQueries)).To(BeTrue(), verb)
+					Expect(allowed(Default, ctx, verb, "", "configmaps", "unreferenced")).To(BeFalse(), verb)
 				}
 			}, SpecTimeout(2*time.Minute))
 
+		It("M1 AC1: the sidecar is injected into every instance with the designed container", func(ctx SpecContext) {
+			image, err := framework.SidecarImage(ctx, c)
+			Expect(err).NotTo(HaveOccurred())
+
+			list := pods(Default, ctx)
+			Expect(list).To(HaveLen(getCluster(Default, ctx).Spec.Instances))
+			for _, pod := range list {
+				Expect(pod.Status.Phase).To(Equal(corev1.PodRunning), pod.Name)
+
+				i := slices.IndexFunc(pod.Spec.InitContainers, func(ctr corev1.Container) bool {
+					return ctr.Name == metadata.SidecarContainerName
+				})
+				Expect(i).To(BeNumerically(">=", 0), "pod %s has no %s init container", pod.Name, metadata.SidecarContainerName)
+				sidecar := pod.Spec.InitContainers[i]
+
+				j := slices.IndexFunc(pod.Status.InitContainerStatuses, func(s corev1.ContainerStatus) bool {
+					return s.Name == metadata.SidecarContainerName
+				})
+				Expect(j).To(BeNumerically(">=", 0), "pod %s has no %s status", pod.Name, metadata.SidecarContainerName)
+
+				Expect(sidecar.Image).To(Equal(image), pod.Name)
+				Expect(sidecar.RestartPolicy).To(HaveValue(Equal(corev1.ContainerRestartPolicyAlways)), pod.Name)
+				Expect(sidecar.SecurityContext).To(Equal(sidecarSecurityContext(!m.password)), pod.Name)
+				Expect(sidecar.VolumeMounts).To(ConsistOf(sidecarMounts(!m.password)), pod.Name)
+				Expect(sidecar.VolumeMounts).NotTo(ContainElement(HaveField("Name", HavePrefix("kube-api-access"))), pod.Name)
+				Expect(pod.Status.InitContainerStatuses[j].Started).To(HaveValue(BeTrue()), pod.Name)
+			}
+		}, SpecTimeout(2*time.Minute))
+
+		It("M1 AC4: the sidecar identity reads what it needs, nothing else, and has no Pod token", func(ctx SpecContext) {
+			owner := getCluster(Default, ctx)
+			readable := []authorizationv1.ResourceAttributes{
+				{Namespace: ns, Group: cnpgGroup, Resource: "clusters", Name: cname},
+				{Namespace: ns, Group: metadata.PluginName, Resource: "telemetryexporters", Name: exporterName},
+			}
+			for _, name := range monitoredConfigMaps(owner) {
+				readable = append(readable, authorizationv1.ResourceAttributes{Namespace: ns, Resource: "configmaps", Name: name})
+			}
+			if m.password {
+				readable = append(readable, authorizationv1.ResourceAttributes{Namespace: ns, Resource: "secrets", Name: monitorSecret})
+			}
+
+			var checks []authorizationv1.ResourceAttributes
+			for _, attrs := range readable {
+				for _, verb := range []string{"get", "watch"} {
+					attrs.Verb = verb
+					checks = append(checks, attrs)
+				}
+			}
+			reviews := reviewAll(ctx, checks)
+			AddReportEntry("can-i (want true)", table(reviews))
+			Expect(decided(reviews, false)).To(BeEmpty())
+
+			other := cname + "-other"
+			reviews = reviewAll(ctx, forbidden(ns, cname, other, readable))
+			AddReportEntry("can-i (want false)", table(reviews))
+			Expect(decided(reviews, true)).To(BeEmpty())
+
+			rules, nonResource, err := framework.Rules(ctx, cfg, sidecarUser(), ns)
+			Expect(err).NotTo(HaveOccurred())
+			AddReportEntry("rules", formatRules(rules))
+			Expect(framework.UnexpectedRules(rules)).To(BeEmpty(), formatRules(rules))
+			Expect(framework.UnexpectedNonResourceRules(nonResource)).To(BeEmpty(), "%v", nonResource)
+
+			rep, err := framework.Preflight(ctx, cfg, primary(ctx))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rep.PodTokenPresent).To(BeFalse())
+			Expect(rep.Kube).NotTo(BeNil())
+			Expect(rep.Kube.Username).To(Equal(sidecarUser()))
+			Expect(rep.Kube.ClusterReadable).To(BeTrue(), rep.Kube.Error)
+		}, SpecTimeout(3*time.Minute))
+
+		if !m.password {
+			It("M1 AC2: the sidecar connects as cnpg_metrics_exporter through the read-only socket mount", func(ctx SpecContext) {
+				rep, err := framework.Preflight(ctx, cfg, primary(ctx))
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(rep.UID).To(BeEquivalentTo(metadata.PeerUID))
+				Expect(rep.Postgres).NotTo(BeNil())
+				Expect(rep.Postgres.Host).To(Equal(metadata.SocketDir))
+				Expect(rep.Postgres.Connected).To(BeTrue(), rep.Postgres.Error)
+				Expect(rep.Postgres.CurrentUser).To(Equal(metadata.MetricsExporterRole))
+				Expect(rep.Postgres.WALFiles).To(BeNumerically(">=", 1))
+				Expect(rep.Postgres.SQLState).To(BeEmpty())
+				Expect(rep.Postgres.Error).To(BeEmpty())
+			}, SpecTimeout(time.Minute))
+		}
+
+		if m.password {
+			It("M1 AC3: the sidecar connects as the dedicated role over 127.0.0.1", func(ctx SpecContext) {
+				pod := primary(ctx)
+				var rep preflight.Report
+				Eventually(func(g Gomega, ctx context.Context) {
+					var err error
+					rep, err = framework.Preflight(ctx, cfg, pod,
+						"--pg-host", "127.0.0.1", "--pg-user", monitorRole, "--password-secret", monitorSecret)
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(rep.Postgres).NotTo(BeNil())
+					g.Expect(rep.Postgres.Connected).To(BeTrue(), rep.Postgres.Error)
+					g.Expect(rep.Postgres.CurrentUser).To(Equal(monitorRole))
+				}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+				Expect(rep.Postgres.Host).To(Equal("127.0.0.1"))
+			}, SpecTimeout(3*time.Minute))
+
+			It("M1 AC3: refused from another Pod", func(ctx SpecContext) {
+				image, err := framework.SidecarImage(ctx, c)
+				Expect(err).NotTo(HaveOccurred())
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: cname + "-client"},
+					Spec: corev1.PodSpec{
+						RestartPolicy:                corev1.RestartPolicyNever,
+						AutomountServiceAccountToken: ptr.To(false),
+						Containers: []corev1.Container{{
+							Name:            "preflight",
+							Image:           image,
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Args: []string{
+								"instance", "preflight", "--kube=false",
+								"--pg-host", cname + apiv1.ServiceReadWriteSuffix, "--pg-user", monitorRole,
+							},
+							Env: []corev1.EnvVar{{
+								Name: "PGPASSWORD",
+								ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+									LocalObjectReference: corev1.LocalObjectReference{Name: monitorSecret},
+									Key:                  corev1.BasicAuthPasswordKey,
+								}},
+							}},
+							SecurityContext: &corev1.SecurityContext{
+								RunAsNonRoot:             ptr.To(true),
+								AllowPrivilegeEscalation: ptr.To(false),
+								Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+								SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+							},
+						}},
+					},
+				}
+
+				logs, err := framework.RunPod(ctx, c, cfg, pod)
+				Expect(err).NotTo(HaveOccurred(), logs)
+
+				rep, err := framework.DecodeReportFromLogs(logs)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rep.Postgres).NotTo(BeNil())
+				Expect(rep.Postgres.Connected).To(BeFalse())
+				Expect(rep.Postgres.SQLState).To(Equal(sqlStateInvalidAuthorization))
+				Expect(rep.Postgres.Error).To(ContainSubstring("pg_hba.conf rejects connection"))
+			}, SpecTimeout(3*time.Minute))
+		}
+
 		It("AC5: an exporter that is invalid from the start leaves the sidecar idle", func(ctx SpecContext) {
-			// Without metrics.interval the interval is 30 s, so a 20 s timeout fails Build; the CRD only checks both set.
+			// The CRD doesn't check glob syntax, so a bad exclude pattern fails Build.
 			exporter := desiredExporter(ns)
-			exporter.Spec.Metrics.Interval = nil
-			exporter.Spec.Exporter.Timeout = &metav1.Duration{Duration: 20 * time.Second}
+			exporter.Spec.Metrics.Exclude.Queries = []string{badGlob}
 
 			created := time.Now()
 			Expect(c.Create(ctx, exporter)).To(Succeed())
@@ -523,29 +751,21 @@ func describeMode(m mode) {
 			// CloudNativePG stops polling the status while the exporter is missing; each touch is a reconcile that
 			// asks again, in case the plugin's cache didn't hold the exporter yet.
 			Eventually(func(g Gomega, ctx SpecContext) {
-				touch(ctx, fmt.Sprint("created-invalid-", time.Now().UnixNano()))
+				_, err := framework.Touch(ctx, c, key(cname), fmt.Sprint("created-invalid-", time.Now().UnixNano()))
+				g.Expect(err).NotTo(HaveOccurred())
 				st := status(g, ctx)
 				g.Expect(st.ExporterState).To(Equal("invalid"))
-				g.Expect(st.Message).To(ContainSubstring("exporter.timeout"))
+				g.Expect(st.Message).To(ContainSubstring("exclude.queries[0]"))
 			}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(specPoll).Should(Succeed())
 
-			for _, pod := range pods(ctx) {
+			for _, pod := range pods(Default, ctx) {
 				Eventually(func(ctx SpecContext) (string, error) {
 					return sidecarLogs(ctx, cfg, ns, pod.Name)
 				}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(specPoll).Should(
 					ContainSubstring("invalid configuration, waiting for a valid one"), pod.Name)
 			}
 
-			// The collector receives other exporters in the window, so an empty result is not a dead collector.
-			Eventually(func(g Gomega, ctx SpecContext) {
-				var plugin []map[string]string
-				for _, r := range otlp.Resources(lines(g, ctx, created)) {
-					if r["service.name"] == pluginServiceName {
-						plugin = append(plugin, r)
-					}
-				}
-				g.Expect(plugin).NotTo(BeEmpty(), "the collector received nothing from the plugin since %s", created)
-			}).WithContext(ctx).WithTimeout(3 * time.Minute).WithPolling(specPoll).Should(Succeed())
+			awaitPluginExport(ctx, created)
 			Consistently(func(g Gomega, ctx SpecContext) {
 				g.Expect(exports(lines(g, ctx, created))).To(BeEmpty(), "the sidecars export with an invalid TelemetryExporter")
 			}).WithContext(ctx).WithTimeout(4 * exportInterval).WithPolling(specPoll).Should(Succeed())
@@ -569,16 +789,16 @@ func describeMode(m mode) {
 				}).WithContext(ctx).WithTimeout(3 * time.Minute).WithPolling(time.Second).Should(Succeed())
 				statusOKAfter = time.Since(exporterCreated)
 
-				cl := getCluster(ctx)
+				cl := getCluster(Default, ctx)
 				Eventually(func(g Gomega, ctx SpecContext) {
 					ls := lines(g, ctx, exporterCreated)
-					g.Expect(podsExporting(ls, "cnpg_e2e_base_one")).To(ConsistOf(instanceNames(ctx)))
+					g.Expect(podsExporting(ls, "cnpg_e2e_base_one")).To(ConsistOf(instanceNames(g, ctx)))
 
 					// The primary-only query runs on the primary and nowhere else, as seen in one export.
 					g.Expect(podsExporting(ls, "cnpg_e2e_primary_one")).To(ConsistOf(cl.Status.CurrentPrimary))
 				}).WithContext(ctx).WithTimeout(3 * time.Minute).WithPolling(specPoll).Should(Succeed())
 
-				ls, err := framework.CollectorLinesSince(ctx, cfg, collectorTail, exporterCreated)
+				ls, err := reader.Since(ctx, exporterCreated)
 				Expect(err).NotTo(HaveOccurred())
 				byPod := map[string]otlp.Export{}
 				for _, e := range exports(ls) {
@@ -586,7 +806,7 @@ func describeMode(m mode) {
 						byPod[e.Resource["k8s.pod.name"]] = e
 					}
 				}
-				stdout, stderr, err := framework.Exec(ctx, cfg, types.NamespacedName{Namespace: ns, Name: pods(ctx)[0].Name},
+				stdout, stderr, err := framework.Exec(ctx, cfg, types.NamespacedName{Namespace: ns, Name: pods(Default, ctx)[0].Name},
 					metadata.SidecarContainerName, []string{"/plugin-telemetry", "version"})
 				Expect(err).NotTo(HaveOccurred(), stderr)
 				versionFields := strings.Fields(stdout)
@@ -594,7 +814,7 @@ func describeMode(m mode) {
 				sidecarVersion := versionFields[1]
 				Expect(sidecarVersion).NotTo(BeEmpty())
 
-				for _, pod := range pods(ctx) {
+				for _, pod := range pods(Default, ctx) {
 					e, ok := byPod[pod.Name]
 					Expect(ok).To(BeTrue(), pod.Name)
 					Expect(e.Resource).To(SatisfyAll(
@@ -634,7 +854,7 @@ func describeMode(m mode) {
 		}, SpecTimeout(2*time.Minute))
 
 		It("AC2: adding a ConfigMap to spec.monitoring grants it and its metrics arrive", func(ctx SpecContext) {
-			cl := getCluster(ctx)
+			cl := getCluster(Default, ctx)
 			patch := client.MergeFrom(cl.DeepCopy())
 			cl.Spec.Monitoring.CustomQueriesConfigMap = append(cl.Spec.Monitoring.CustomQueriesConfigMap, apiv1.ConfigMapKeySelector{
 				LocalObjectReference: apiv1.LocalObjectReference{Name: addedQueries},
@@ -643,12 +863,12 @@ func describeMode(m mode) {
 			Expect(c.Patch(ctx, cl, patch)).To(Succeed())
 
 			Eventually(func(g Gomega, ctx SpecContext) {
-				names := monitoredConfigMaps(getCluster(ctx))
+				names := monitoredConfigMaps(getCluster(g, ctx))
 				g.Expect(names).To(ContainElements(addedQueries, baseQueries))
 				g.Expect(role(g, ctx)).To(ContainElement(readRule("", "configmaps", names...)))
 			}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(time.Second).Should(Succeed())
 			for _, verb := range []string{"get", "list", "watch"} {
-				Expect(allowed(ctx, verb, "", "configmaps", addedQueries)).To(BeTrue(), verb)
+				Expect(allowed(Default, ctx, verb, "", "configmaps", addedQueries)).To(BeTrue(), verb)
 			}
 
 			// The ConfigMap is granted before it exists; creating it later is picked up.
@@ -661,7 +881,7 @@ func describeMode(m mode) {
 
 		It("AC2: adding a query set to the TelemetryExporter grants it without a Cluster edit, and its metrics arrive", func(ctx SpecContext) {
 			Expect(c.Create(ctx, querySet(ns, "metricqueryset.yaml"))).To(Succeed())
-			generation := getCluster(ctx).Generation
+			generation := getCluster(Default, ctx).Generation
 
 			var exporter v1alpha1.TelemetryExporter
 			Expect(c.Get(ctx, key(exporterName), &exporter)).To(Succeed())
@@ -673,7 +893,7 @@ func describeMode(m mode) {
 			Eventually(func(g Gomega, ctx SpecContext) {
 				g.Expect(role(g, ctx)).To(ContainElement(readRule(metadata.PluginName, "metricquerysets", querySetName)))
 			}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(time.Second).Should(Succeed())
-			Expect(getCluster(ctx).Generation).To(Equal(generation), "the Cluster was edited")
+			Expect(getCluster(Default, ctx).Generation).To(Equal(generation), "the Cluster was edited")
 
 			awaitMetric(ctx, "cnpg_e2e_set_five", created, 2*time.Minute)
 
@@ -686,7 +906,7 @@ func describeMode(m mode) {
 					{"", "configmaps", baseQueries},
 					{"", "secrets", headersSecret},
 				} {
-					Expect(allowed(ctx, verb, target.group, target.resource, target.name)).To(BeTrue(),
+					Expect(allowed(Default, ctx, verb, target.group, target.resource, target.name)).To(BeTrue(),
 						"%s %s/%s", verb, target.resource, target.name)
 				}
 			}
@@ -738,6 +958,13 @@ func describeMode(m mode) {
 					}
 				}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(specPoll).Should(Succeed())
 
+				var reconcilesBefore float64
+				mark := time.Now()
+				Eventually(func(g Gomega, ctx SpecContext) {
+					pluginExported(g, ctx, mark)
+					reconcilesBefore = identityReconciles(g, ctx)
+				}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(specPoll).Should(Succeed())
+
 				edits := time.Now()
 				var lastWrite string
 				for i := range 10 {
@@ -747,7 +974,7 @@ func describeMode(m mode) {
 
 				// The status is a subresource with its own field manager: CloudNativePG wrote it after the edits began.
 				Eventually(func(g Gomega, ctx SpecContext) {
-					cl := getCluster(ctx)
+					cl := getCluster(g, ctx)
 					g.Expect(cl.ManagedFields).To(ContainElement(SatisfyAll(
 						HaveField("Subresource", "status"),
 						HaveField("Time", HaveValue(HaveField("Time", BeTemporally(">=", edits.Truncate(time.Second))))),
@@ -765,8 +992,33 @@ func describeMode(m mode) {
 					Expect(after[pod].Series).To(ContainElements(e.Series), "series of %s disappeared", pod)
 				}
 
+				// Annotation edits don't change the generation, so the identity controller has nothing to reconcile.
+				Eventually(func(g Gomega, ctx SpecContext) {
+					pluginExported(g, ctx, edits.Add(2*exportInterval))
+					g.Expect(identityReconciles(g, ctx)).To(Equal(reconcilesBefore))
+				}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(specPoll).Should(Succeed())
+
 				noRollout(ctx)
 			}, SpecTimeout(6*time.Minute))
+
+		It("identity controller: a deleted RoleBinding comes back with the same Cluster generation and no rollout",
+			func(ctx SpecContext) {
+				objects, err := framework.Identity(ctx, c, ns, cname)
+				Expect(err).NotTo(HaveOccurred())
+				oldUID := objects.RoleBinding.UID
+				generation := getCluster(Default, ctx).Generation
+
+				Expect(c.Delete(ctx, objects.RoleBinding)).To(Succeed())
+
+				Eventually(func(g Gomega, ctx SpecContext) {
+					recreated, err := framework.Identity(ctx, c, ns, cname)
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(recreated.RoleBinding.UID).NotTo(Equal(oldUID))
+				}).WithContext(ctx).WithTimeout(30 * time.Second).WithPolling(time.Second).Should(Succeed())
+
+				Expect(getCluster(Default, ctx).Generation).To(Equal(generation))
+				noRollout(ctx)
+			}, SpecTimeout(2*time.Minute))
 
 		It("AC2: removing a ConfigMap and a query set revokes them, stops their metrics and ignores later edits", func(ctx SpecContext) {
 			var exporter v1alpha1.TelemetryExporter
@@ -775,7 +1027,7 @@ func describeMode(m mode) {
 			exporter.Spec.Metrics.QuerySets = nil
 			Expect(c.Patch(ctx, &exporter, exporterPatch)).To(Succeed())
 
-			cl := getCluster(ctx)
+			cl := getCluster(Default, ctx)
 			clusterPatch := client.MergeFrom(cl.DeepCopy())
 			cl.Spec.Monitoring.CustomQueriesConfigMap = slices.DeleteFunc(cl.Spec.Monitoring.CustomQueriesConfigMap,
 				func(s apiv1.ConfigMapKeySelector) bool { return s.Name == addedQueries })
@@ -783,13 +1035,13 @@ func describeMode(m mode) {
 
 			Eventually(func(g Gomega, ctx SpecContext) {
 				rules := role(g, ctx)
-				names := monitoredConfigMaps(getCluster(ctx))
+				names := monitoredConfigMaps(getCluster(g, ctx))
 				g.Expect(names).NotTo(ContainElement(addedQueries))
 				g.Expect(rules).To(ContainElement(readRule("", "configmaps", names...)))
 				g.Expect(rules).NotTo(ContainElement(HaveField("Resources", ContainElement("metricquerysets"))))
 			}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(time.Second).Should(Succeed())
-			Expect(allowed(ctx, "get", "", "configmaps", addedQueries)).To(BeFalse())
-			Expect(allowed(ctx, "watch", metadata.PluginName, "metricquerysets", querySetName)).To(BeFalse())
+			Expect(allowed(Default, ctx, "get", "", "configmaps", addedQueries)).To(BeFalse())
+			Expect(allowed(Default, ctx, "watch", metadata.PluginName, "metricquerysets", querySetName)).To(BeFalse())
 
 			removed := []string{"cnpg_e2e_added_three", "cnpg_e2e_set_five"}
 			Eventually(func(g Gomega, ctx SpecContext) {
@@ -816,12 +1068,12 @@ func describeMode(m mode) {
 				}
 			}).WithContext(ctx).WithTimeout(4 * exportInterval).WithPolling(specPoll).Should(Succeed())
 
-			Expect(podsExporting(lines(Default, ctx, edited), "cnpg_e2e_base_one")).To(ConsistOf(instanceNames(ctx)))
+			Expect(podsExporting(lines(Default, ctx, edited), "cnpg_e2e_base_one")).To(ConsistOf(instanceNames(Default, ctx)))
 			noRollout(ctx)
 		}, SpecTimeout(6*time.Minute))
 
 		It("security: the sidecar can't log in as postgres and its token can't read the Cluster's Secrets", func(ctx SpecContext) {
-			for _, pod := range pods(ctx) {
+			for _, pod := range pods(Default, ctx) {
 				name := types.NamespacedName{Namespace: ns, Name: pod.Name}
 				if m.password {
 					// The role's own password is sent, so it is the user that is refused.
@@ -838,7 +1090,7 @@ func describeMode(m mode) {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(rep.Postgres).NotTo(BeNil())
 				Expect(rep.Postgres.Connected).To(BeFalse(), pod.Name)
-				Expect(rep.Postgres.SQLState).To(Equal("28000"))
+				Expect(rep.Postgres.SQLState).To(Equal(sqlStateInvalidAuthorization))
 				Expect(rep.Postgres.Error).To(ContainSubstring(`Peer authentication failed for user "postgres"`))
 			}
 
@@ -848,25 +1100,20 @@ func describeMode(m mode) {
 				cname + apiv1.DefaultServerCaSecretSuffix,
 				cname + apiv1.ReplicationSecretSuffix,
 			} {
-				Expect(allowed(ctx, "get", "", "secrets", secret)).To(BeFalse(), secret)
+				Expect(allowed(Default, ctx, "get", "", "secrets", secret)).To(BeFalse(), secret)
 			}
-			Expect(allowed(ctx, "list", "", "secrets", "")).To(BeFalse())
+			Expect(allowed(Default, ctx, "list", "", "secrets", "")).To(BeFalse())
 		}, SpecTimeout(3*time.Minute))
 
-		It("security: no seeded Secret value appears in the sidecar's logs or in print-config", func(ctx SpecContext) {
-			for _, pod := range pods(ctx) {
-				logs, err := sidecarLogs(ctx, cfg, ns, pod.Name)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(logs).NotTo(BeEmpty())
-
+		It("security: print-config names the headers file and shows no seeded Secret value", func(ctx SpecContext) {
+			for _, pod := range pods(Default, ctx) {
 				stdout, stderr, err := framework.Exec(ctx, cfg, types.NamespacedName{Namespace: ns, Name: pod.Name},
 					metadata.SidecarContainerName, []string{"/plugin-telemetry", "instance", "print-config"})
 				Expect(err).NotTo(HaveOccurred(), stderr)
 				Expect(stdout).To(ContainSubstring("headersFile: secret/"+headersSecret+"/"+headersKey), "print-config shows no configuration")
-				Expect(stdout).To(ContainSubstring(headerName + ": <redacted>"))
+				Expect(stdout).NotTo(ContainSubstring(headerName), "print-config lists no header key")
 
 				for _, sentinel := range sentinels {
-					Expect(logs).NotTo(ContainSubstring(sentinel), "logs of %s", pod.Name)
 					Expect(stdout).NotTo(ContainSubstring(sentinel), "print-config of %s", pod.Name)
 					Expect(stderr).NotTo(ContainSubstring(sentinel), "print-config stderr of %s", pod.Name)
 				}
@@ -874,13 +1121,12 @@ func describeMode(m mode) {
 		}, SpecTimeout(3*time.Minute))
 
 		It("AC5: an invalid TelemetryExporter is reported, and the sidecars keep the configuration in force", func(ctx SpecContext) {
-			// Without metrics.interval the interval is 30 s, so a 20 s timeout fails Build; the CRD only checks both set.
+			// The CRD doesn't check glob syntax, so a bad exclude pattern fails Build.
 			var exporter v1alpha1.TelemetryExporter
 			Expect(c.Get(ctx, key(exporterName), &exporter)).To(Succeed())
 			valid := exporter.DeepCopy()
 			patch := client.MergeFrom(exporter.DeepCopy())
-			exporter.Spec.Metrics.Interval = nil
-			exporter.Spec.Exporter.Timeout = &metav1.Duration{Duration: 20 * time.Second}
+			exporter.Spec.Metrics.Exclude.Queries = []string{badGlob}
 			invalidAt := time.Now()
 			Expect(c.Patch(ctx, &exporter, patch)).To(Succeed())
 
@@ -888,10 +1134,10 @@ func describeMode(m mode) {
 			Eventually(func(g Gomega, ctx SpecContext) {
 				st := status(g, ctx)
 				g.Expect(st.ExporterState).To(Equal("invalid"))
-				g.Expect(st.Message).To(ContainSubstring("exporter.timeout"))
+				g.Expect(st.Message).To(ContainSubstring("exclude.queries[0]"))
 			}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(specPoll).Should(Succeed())
 
-			for _, pod := range pods(ctx) {
+			for _, pod := range pods(Default, ctx) {
 				Eventually(func(ctx SpecContext) (string, error) {
 					return sidecarLogs(ctx, cfg, ns, pod.Name)
 				}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(specPoll).Should(
@@ -901,7 +1147,7 @@ func describeMode(m mode) {
 			// The configuration was valid before, so it stays in force: the sidecars keep exporting every 10 s.
 			Eventually(func(g Gomega, ctx SpecContext) {
 				g.Expect(podsExporting(lines(g, ctx, invalidAt.Add(2*exportInterval)), "cnpg_e2e_base_one")).
-					To(ConsistOf(instanceNames(ctx)))
+					To(ConsistOf(instanceNames(g, ctx)))
 			}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(specPoll).Should(Succeed())
 			noRollout(ctx)
 
@@ -923,7 +1169,7 @@ func describeMode(m mode) {
 		}, SpecTimeout(6*time.Minute))
 
 		itParity(func() parityTarget {
-			return parityTarget{env: env, c: c, cfg: cfg, ns: ns, cluster: cname, mode: m.name}
+			return parityTarget{env: env, c: c, cfg: cfg, reader: reader, ns: ns, cluster: cname, mode: m.name, sentinels: sentinels}
 		})
 
 		It("AC5: deleting the TelemetryExporter stops exports, and the status says missing after the next reconcile", func(ctx SpecContext) {
@@ -938,6 +1184,7 @@ func describeMode(m mode) {
 			Consistently(func(g Gomega, ctx SpecContext) {
 				g.Expect(exports(lines(g, ctx, quiet))).To(BeEmpty(), "the sidecars export after %s without a TelemetryExporter", deleted)
 			}).WithContext(ctx).WithTimeout(4 * exportInterval).WithPolling(specPoll).Should(Succeed())
+			awaitPluginExport(ctx, quiet)
 
 			// CloudNativePG calls SetStatusInCluster on a reconcile, which an annotation edit triggers.
 			touch(ctx, "after-delete")
@@ -948,16 +1195,28 @@ func describeMode(m mode) {
 			}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(specPoll).Should(Succeed())
 
 			// A Pod that a rollout deletes keeps its UID and annotations until it is gone, so look for a while.
-			Consistently(func(ctx SpecContext) map[string]instance {
-				return states(ctx)
+			Consistently(func(g Gomega, ctx SpecContext) map[string]instance {
+				return states(g, ctx)
 			}).WithContext(ctx).WithTimeout(30*time.Second).WithPolling(specPoll).Should(Equal(baseline),
 				"an instance Pod is being replaced, or its sidecar restarted")
 		}, SpecTimeout(8*time.Minute))
 
+		It("security: no seeded Secret value appears in the sidecar's logs", func(ctx SpecContext) {
+			for _, pod := range pods(Default, ctx) {
+				logs, err := sidecarLogs(ctx, cfg, ns, pod.Name)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(logs).NotTo(BeEmpty())
+
+				for _, sentinel := range sentinels {
+					Expect(logs).NotTo(ContainSubstring(sentinel), "logs of %s", pod.Name)
+				}
+			}
+		}, SpecTimeout(3*time.Minute))
+
 		It("AC2: deleting the Cluster deletes the four objects", func(ctx SpecContext) {
 			Expect(identityGone(ctx)).NotTo(Succeed(), "the identity is gone before the Cluster is deleted")
 
-			Expect(c.Delete(ctx, getCluster(ctx))).To(Succeed())
+			Expect(c.Delete(ctx, getCluster(Default, ctx))).To(Succeed())
 
 			Eventually(identityGone).WithContext(ctx).WithTimeout(3 * time.Minute).WithPolling(specPoll).Should(Succeed())
 		}, SpecTimeout(5*time.Minute))

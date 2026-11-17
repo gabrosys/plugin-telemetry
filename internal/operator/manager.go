@@ -7,6 +7,7 @@ import (
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -22,14 +23,15 @@ import (
 
 // NewManager builds the plugin's manager: no leader election and no metrics, probe or pprof listeners.
 // Its cache holds Clusters and TelemetryExporters from every namespace, and only the ServiceAccounts,
-// Roles, RoleBindings and Secrets the plugin created, all without managedFields.
-func NewManager(cfg *rest.Config) (manager.Manager, error) {
+// Roles, RoleBindings and Secrets the plugin created, and the one sidecar image ConfigMap in namespace,
+// all without managedFields.
+func NewManager(cfg *rest.Config, namespace, imageConfigMap string) (manager.Manager, error) {
 	scheme, err := newScheme()
 	if err != nil {
 		return nil, err
 	}
 
-	mgr, err := manager.New(cfg, managerOptions(scheme))
+	mgr, err := manager.New(cfg, managerOptions(scheme, namespace, imageConfigMap))
 	if err != nil {
 		return nil, fmt.Errorf("create manager: %w", err)
 	}
@@ -60,14 +62,19 @@ func managedObjects() []client.Object {
 
 // cachedObjects are all the kinds the plugin reads from the cache.
 func cachedObjects() []client.Object {
-	return append([]client.Object{&apiv1.Cluster{}, &v1alpha1.TelemetryExporter{}}, managedObjects()...)
+	return append([]client.Object{&apiv1.Cluster{}, &v1alpha1.TelemetryExporter{}, &corev1.ConfigMap{}}, managedObjects()...)
 }
 
-func managerOptions(scheme *runtime.Scheme) manager.Options {
+func managerOptions(scheme *runtime.Scheme, namespace, imageConfigMap string) manager.Options {
 	managed := cache.ByObject{Label: labels.SelectorFromSet(labels.Set{metadata.ManagedByLabel: metadata.ManagedByValue})}
 	byObject := make(map[client.Object]cache.ByObject)
 	for _, obj := range managedObjects() {
 		byObject[obj] = managed
+	}
+
+	byObject[&corev1.ConfigMap{}] = cache.ByObject{
+		Namespaces: map[string]cache.Config{namespace: {}},
+		Field:      fields.OneTermEqualSelector("metadata.name", imageConfigMap),
 	}
 
 	return manager.Options{

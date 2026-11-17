@@ -1,6 +1,7 @@
 package operator_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -30,10 +31,15 @@ type fakeImages string
 
 func (f fakeImages) Image() string { return string(f) }
 
-func fixturePod(name string) []byte {
+const (
+	podpatchData = "../podpatch/testdata"
+	operatorData = "testdata"
+)
+
+func readData(dir, name string) []byte {
 	GinkgoHelper()
 
-	root, err := os.OpenRoot("../podpatch/testdata")
+	root, err := os.OpenRoot(dir)
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(root.Close)
 
@@ -41,6 +47,40 @@ func fixturePod(name string) []byte {
 	Expect(err).NotTo(HaveOccurred())
 
 	return data
+}
+
+// fixturePod reads an input shared with the podpatch goldens.
+func fixturePod(name string) []byte { return readData(podpatchData, name) }
+
+// matchGolden compares a Pod with a golden in internal/operator/testdata; UPDATE_GOLDEN=1 rewrites it.
+func matchGolden(name string, pod []byte) {
+	GinkgoHelper()
+
+	if os.Getenv("UPDATE_GOLDEN") != "" {
+		var out bytes.Buffer
+		Expect(json.Indent(&out, canonical(pod), "", "  ")).To(Succeed())
+		out.WriteByte('\n')
+
+		root, err := os.OpenRoot(operatorData)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(root.Close)
+		Expect(root.WriteFile(name+".json", out.Bytes(), 0o600)).To(Succeed())
+	}
+
+	Expect(canonical(pod)).To(MatchJSON(readData(operatorData, name)))
+}
+
+func initContainerNames(raw []byte) []string {
+	GinkgoHelper()
+
+	pod := &corev1.Pod{}
+	Expect(json.Unmarshal(raw, pod)).To(Succeed())
+	names := make([]string, 0, len(pod.Spec.InitContainers))
+	for _, c := range pod.Spec.InitContainers {
+		names = append(names, c.Name)
+	}
+
+	return names
 }
 
 func clusterJSON(plugins ...apiv1.PluginConfiguration) []byte {
@@ -138,6 +178,43 @@ var _ = Describe("Lifecycle", func() {
 				Expect(canonical(applyPatch(pod, resp.GetJsonPatch()))).To(MatchJSON(wantJSON))
 			})
 
+			It("updates the resources of an injected sidecar on EVALUATE", func(ctx context.Context) {
+				resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
+					clusterJSON(ours(nil)), pod))
+				Expect(err).NotTo(HaveOccurred())
+				injected := applyPatch(pod, resp.GetJsonPatch())
+
+				resources := map[string]string{"sidecarCPU": "100m", "sidecarMemory": "128Mi"}
+				resp, err = srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
+					clusterJSON(ours(resources)), injected))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resp.GetJsonPatch()).NotTo(BeEmpty())
+
+				want := &corev1.Pod{}
+				Expect(json.Unmarshal(injected, want)).To(Succeed())
+				Expect(podpatch.Apply(want, "fixture", mustParams(resources), testImage)).To(Succeed())
+				wantJSON, err := json.Marshal(want)
+				Expect(err).NotTo(HaveOccurred())
+				patchedJSON := applyPatch(injected, resp.GetJsonPatch())
+				Expect(canonical(patchedJSON)).To(MatchJSON(wantJSON))
+
+				patched := &corev1.Pod{}
+				Expect(json.Unmarshal(patchedJSON, patched)).To(Succeed())
+				var sidecar corev1.Container
+				found := false
+				for _, c := range patched.Spec.InitContainers {
+					if c.Name == metadata.SidecarContainerName {
+						sidecar, found = c, true
+					}
+				}
+				Expect(found).To(BeTrue(), "init container %q not found in the patched Pod", metadata.SidecarContainerName)
+				for _, list := range []corev1.ResourceList{sidecar.Resources.Requests, sidecar.Resources.Limits} {
+					cpu, memory := list[corev1.ResourceCPU], list[corev1.ResourceMemory]
+					Expect(cpu.String()).To(Equal("100m"))
+					Expect(memory.String()).To(Equal("128Mi"))
+				}
+			})
+
 			It("changes nothing on CREATE after EVALUATE", func(ctx context.Context) {
 				cluster := clusterJSON(ours(nil))
 				resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, cluster, pod))
@@ -146,42 +223,70 @@ var _ = Describe("Lifecycle", func() {
 
 				resp, err = srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_CREATE, cluster, evaluated))
 				Expect(err).NotTo(HaveOccurred())
-
-				if len(resp.GetJsonPatch()) == 0 {
-					return
-				}
-				Expect(applyPatch(evaluated, resp.GetJsonPatch())).To(Equal(evaluated))
+				Expect(resp.GetJsonPatch()).To(BeEmpty())
 			})
 
-			for name, c := range map[string]struct {
-				images  string
-				cluster func() []byte
-			}{
-				"for a Cluster without the plugin": {testImage, func() []byte {
-					return clusterJSON(apiv1.PluginConfiguration{Name: "other.example.com"})
-				}},
-				"for a Cluster with no plugins": {testImage, func() []byte { return clusterJSON() }},
-				"when the plugin is disabled": {testImage, func() []byte {
-					return clusterJSON(apiv1.PluginConfiguration{Name: metadata.PluginName, Enabled: ptr.To(false)})
-				}},
-				"for an unsupported auth mode": {testImage, func() []byte {
-					return clusterJSON(ours(map[string]string{"auth": "ldap"}))
-				}},
-				"when the store has no image": {"", func() []byte { return clusterJSON(ours(nil)) }},
-			} {
-				It("returns no patch "+name, func(ctx context.Context) {
-					srv := &operator.Lifecycle{Images: fakeImages(c.images)}
-					resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, c.cluster(), pod))
+			It("is idempotent: a second EVALUATE of the same Pod gives the same result, of its own output nothing", func(ctx context.Context) {
+				cluster := clusterJSON(ours(nil))
+				first, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, cluster, pod))
+				Expect(err).NotTo(HaveOccurred())
+				again, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, cluster, pod))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(applyPatch(pod, again.GetJsonPatch())).To(MatchJSON(applyPatch(pod, first.GetJsonPatch())))
+
+				second, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, cluster,
+					applyPatch(pod, first.GetJsonPatch())))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(second.GetJsonPatch()).To(BeEmpty())
+			})
+
+			It("patches when the plugin is explicitly enabled", func(ctx context.Context) {
+				resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
+					clusterJSON(apiv1.PluginConfiguration{Name: metadata.PluginName, Enabled: ptr.To(true)}), pod))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resp.GetJsonPatch()).NotTo(BeEmpty())
+			})
+
+			DescribeTable("returns no patch",
+				func(ctx context.Context, images string, cluster []byte) {
+					srv := &operator.Lifecycle{Images: fakeImages(images)}
+					resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, cluster, pod))
 					Expect(err).NotTo(HaveOccurred())
 					Expect(resp).NotTo(BeNil())
 					Expect(resp.GetJsonPatch()).To(BeEmpty())
-				})
-			}
+				},
+				Entry("for a Cluster without the plugin", testImage,
+					clusterJSON(apiv1.PluginConfiguration{Name: "other.example.com"})),
+				Entry("for a Cluster with no plugins", testImage, clusterJSON()),
+				Entry("when the plugin is disabled", testImage,
+					clusterJSON(apiv1.PluginConfiguration{Name: metadata.PluginName, Enabled: ptr.To(false)})),
+				Entry("for an unsupported auth mode", testImage, clusterJSON(ours(map[string]string{"auth": "ldap"}))),
+				Entry("when the store has no image", "", clusterJSON(ours(nil))),
+			)
 		})
 	}
 
+	It("logs the unknown keys of a Cluster with an invalid auth", func(ctx context.Context) {
+		ctx, all := captureAll(ctx, 2)
+		resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
+			clusterJSON(ours(map[string]string{"auth": "ldap", "atuh": "password"})), fixturePod("pod-main")))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.GetJsonPatch()).To(BeEmpty())
+		Expect(all()).To(ContainElement(SatisfyAll(
+			HaveKeyWithValue("msg", "ignoring unknown plugin parameters"),
+			HaveKeyWithValue("keys", ConsistOf("atuh")),
+		)))
+	})
+
+	It("returns no patch and no error without an image source", func(ctx context.Context) {
+		resp, err := (&operator.Lifecycle{}).LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
+			clusterJSON(ours(nil)), fixturePod("pod-main")))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.GetJsonPatch()).To(BeEmpty())
+	})
+
 	It("falls back to the default for an invalid sidecarMemory and still patches", func(ctx context.Context) {
-		ctx, all := captureAll(ctx)
+		ctx, all := captureAll(ctx, 2)
 		pod := fixturePod("pod-main")
 		resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
 			clusterJSON(ours(map[string]string{"sidecarMemory": "16Mi"})), pod))
@@ -197,7 +302,7 @@ var _ = Describe("Lifecycle", func() {
 			}
 		}
 		mem := sidecar.Resources.Limits[corev1.ResourceMemory]
-		Expect(mem.String()).To(Equal("64Mi"))
+		Expect(mem.String()).To(Equal("96Mi"))
 
 		Expect(all()).To(ContainElement(SatisfyAll(
 			HaveKeyWithValue("msg", "invalid sidecar resource, using the default"),
@@ -211,6 +316,44 @@ var _ = Describe("Lifecycle", func() {
 		)))
 	})
 
+	It("keeps another plugin's sidecar and volume and adds ours after them", func(ctx context.Context) {
+		pod := readData(operatorData, "pod-main.other-plugin")
+		resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
+			clusterJSON(ours(nil)), pod))
+		Expect(err).NotTo(HaveOccurred())
+		patched := applyPatch(pod, resp.GetJsonPatch())
+
+		Expect(initContainerNames(patched)).To(Equal([]string{"bootstrap-controller", "other-plugin", metadata.SidecarContainerName}))
+		Expect(string(patched)).To(ContainSubstring("other-plugin-data"))
+		matchGolden("pod-main.other-plugin.peer.golden", patched)
+	})
+
+	It("adds the sidecar on CREATE without moving the bootstrap init containers", func(ctx context.Context) {
+		pod := readData(operatorData, "pod-main.create")
+		resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_CREATE,
+			clusterJSON(ours(nil)), pod))
+		Expect(err).NotTo(HaveOccurred())
+		patched := applyPatch(pod, resp.GetJsonPatch())
+
+		Expect(initContainerNames(patched)).To(Equal([]string{"bootstrap-controller", "bootstrap-instance", metadata.SidecarContainerName}))
+		matchGolden("pod-main.create.peer.golden", patched)
+	})
+
+	It("warns about an unknown plugin parameter and still patches", func(ctx context.Context) {
+		ctx, all := captureAll(ctx, 2)
+		resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
+			clusterJSON(ours(map[string]string{"sidecarCpu": "1"})), fixturePod("pod-main")))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.GetJsonPatch()).NotTo(BeEmpty())
+
+		Expect(all()).To(ContainElement(SatisfyAll(
+			HaveKeyWithValue("msg", "ignoring unknown plugin parameters"),
+			HaveKeyWithValue("keys", ConsistOf("sidecarCpu")),
+			HaveKeyWithValue("namespace", "fixture"),
+			HaveKeyWithValue("cluster", "fixture"),
+		)))
+	})
+
 	It("returns no patch for a Pod with no scratch volume in peer mode", func(ctx context.Context) {
 		pod := &corev1.Pod{}
 		Expect(json.Unmarshal(fixturePod("pod-main"), pod)).To(Succeed())
@@ -221,6 +364,7 @@ var _ = Describe("Lifecycle", func() {
 		resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
 			clusterJSON(ours(nil)), raw))
 		Expect(err).NotTo(HaveOccurred())
+		Expect(resp).NotTo(BeNil())
 		Expect(resp.GetJsonPatch()).To(BeEmpty())
 	})
 
@@ -250,11 +394,11 @@ var _ = Describe("Lifecycle", func() {
 	})
 })
 
-// captureAll returns a context whose logger keeps every line, and a
+// captureAll returns a context whose logger keeps the lines up to verbosity, and a
 // function returning all lines decoded from JSON.
-func captureAll(ctx context.Context) (context.Context, func() []map[string]any) {
+func captureAll(ctx context.Context, verbosity int) (context.Context, func() []map[string]any) {
 	var lines []string
-	sink := funcr.NewJSON(func(obj string) { lines = append(lines, obj) }, funcr.Options{})
+	sink := funcr.NewJSON(func(obj string) { lines = append(lines, obj) }, funcr.Options{Verbosity: verbosity})
 
 	return logr.NewContext(ctx, sink), func() []map[string]any {
 		GinkgoHelper()
@@ -272,7 +416,7 @@ func captureAll(ctx context.Context) (context.Context, func() []map[string]any) 
 
 // captureLogs is captureAll narrowed to the "lifecycle hook" lines.
 func captureLogs(ctx context.Context) (context.Context, func() []map[string]any) {
-	ctx, all := captureAll(ctx)
+	ctx, all := captureAll(ctx, 2)
 
 	return ctx, func() []map[string]any {
 		var hook []map[string]any
@@ -293,7 +437,7 @@ func hookLine(operation, outcome string) OmegaMatcher {
 		HaveKeyWithValue("cluster", "fixture"),
 		HaveKeyWithValue("pod", "fixture-1"),
 		HaveKeyWithValue("outcome", outcome),
-		HaveKeyWithValue("level", BeEquivalentTo(0)),
+		HaveKeyWithValue("level", BeEquivalentTo(2)),
 		Not(HaveKey("error")),
 	)
 }
@@ -335,15 +479,9 @@ var _ = Describe("Lifecycle logging", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(resp.GetJsonPatch()).To(BeEmpty())
 
-			Expect(hookLines()).To(HaveExactElements(SatisfyAll(
-				HaveKeyWithValue("operation", "EVALUATE"),
-				HaveKeyWithValue("outcome", "skipped"),
-				HaveKeyWithValue("level", BeEquivalentTo(0)),
-			)))
+			Expect(hookLines()).To(HaveExactElements(hookLine("EVALUATE", "skipped")))
 		},
 		Entry("for a Cluster without the plugin", clusterJSON(), func() []byte { return fixturePod("pod-main") }),
-		Entry("for invalid plugin parameters", clusterJSON(ours(map[string]string{"auth": "ldap"})),
-			func() []byte { return fixturePod("pod-main") }),
 		Entry("for an object that is not a Pod", clusterJSON(ours(nil)), func() []byte {
 			job, err := json.Marshal(batchv1.Job{
 				TypeMeta:   metav1.TypeMeta{APIVersion: "batch/v1", Kind: "Job"},
@@ -355,9 +493,19 @@ var _ = Describe("Lifecycle logging", func() {
 		}),
 	)
 
+	It("logs the hook line with outcome error when the sidecar can't be injected", func(ctx context.Context) {
+		ctx, hookLines := captureLogs(ctx)
+		resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
+			clusterJSON(ours(map[string]string{"auth": "ldap"})), fixturePod("pod-main")))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.GetJsonPatch()).To(BeEmpty())
+
+		Expect(hookLines()).To(HaveExactElements(hookLine("EVALUATE", "error")))
+	})
+
 	DescribeTable("logs an error before rejecting an undecodable request",
 		func(ctx context.Context, cluster, object []byte, what string) {
-			ctx, all := captureAll(ctx)
+			ctx, all := captureAll(ctx, 2)
 			_, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, cluster, object))
 			Expect(status.Code(err)).To(Equal(codes.InvalidArgument))
 
@@ -368,8 +516,36 @@ var _ = Describe("Lifecycle logging", func() {
 		},
 		Entry("a malformed Cluster", []byte(`{"spec":`), []byte(`{"kind":"Pod"}`), "decode cluster"),
 		Entry("a malformed object", clusterJSON(ours(nil)), []byte(`{"kind":`), "get object kind"),
+		Entry("an object whose metadata does not decode", clusterJSON(ours(nil)),
+			[]byte(`{"kind":"Pod","metadata":"x"}`), "decode object metadata"),
 		Entry("a Pod that does not decode", clusterJSON(ours(nil)), []byte(`{"kind":"Pod","spec":"x"}`), "decode pod"),
 	)
+
+	It("logs the lifecycle hook line at debug level only", func(ctx context.Context) {
+		hookRequest := func() *lifecycle.OperatorLifecycleRequest {
+			return request(lifecycle.OperatorOperationType_TYPE_EVALUATE, clusterJSON(ours(nil)), fixturePod("pod-main"))
+		}
+		hookEntries := func(all []map[string]any) []map[string]any {
+			var hook []map[string]any
+			for _, entry := range all {
+				if entry["msg"] == "lifecycle hook" {
+					hook = append(hook, entry)
+				}
+			}
+
+			return hook
+		}
+
+		debugCtx, debugLines := captureAll(ctx, 2)
+		_, err := srv.LifecycleHook(debugCtx, hookRequest())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(hookEntries(debugLines())).To(HaveExactElements(hookLine("EVALUATE", "patched")))
+
+		infoCtx, infoLines := captureAll(ctx, 0)
+		_, err = srv.LifecycleHook(infoCtx, hookRequest())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(hookEntries(infoLines())).To(BeEmpty())
+	})
 
 	It("logs no hook line for a request it cannot decode", func(ctx context.Context) {
 		ctx, hookLines := captureLogs(ctx)

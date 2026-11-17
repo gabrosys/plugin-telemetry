@@ -57,7 +57,7 @@ var _ = Describe("RowSamples", func() {
 		Expect(samples[0].Value).To(Equal(1.0))
 		Expect(samples[0].Kind).To(Equal(queries.KindGauge))
 
-		for _, value := range []any{"sideways", int64(1), nil} {
+		for _, value := range []any{"sideways", int64(1), nil, []byte("up")} {
 			samples, dropped = def.RowSamples(columns, []any{value}, nil, 0)
 			Expect(samples).To(BeEmpty())
 			Expect(dropped).To(Equal(map[queries.DropReason]int{queries.DropConversion: 1}))
@@ -76,6 +76,7 @@ var _ = Describe("RowSamples", func() {
 
 		samples, dropped := def.RowSamples([]string{"t"}, []any{[]byte("2s")}, nil, 0)
 		Expect(dropped).To(BeEmpty())
+		Expect(samples).To(HaveLen(1))
 		Expect(samples[0].Value).To(Equal(2000.0))
 	})
 
@@ -129,8 +130,46 @@ var _ = Describe("RowSamples", func() {
 		Expect(samples).To(HaveLen(1))
 		Expect(dropped).To(BeEmpty())
 
-		samples, _ = def.RowSamples([]string{"l", "v"}, []any{long, 1.0}, nil, 0)
+		samples, dropped = def.RowSamples([]string{"l", "v"}, []any{"café", 1.0}, nil, 4)
+		Expect(samples).To(BeEmpty())
+		Expect(dropped).To(Equal(map[queries.DropReason]int{queries.DropLabelTooLong: 1}))
+	})
+
+	It("limits a label to DefaultMaxLabelValueLength when the limit is zero or less", func() {
+		def := rowDef("    - l: {usage: LABEL}\n    - v: {usage: GAUGE}\n")
+		fits := strings.Repeat("x", queries.DefaultMaxLabelValueLength)
+
+		for _, limit := range []int{0, -1} {
+			samples, dropped := def.RowSamples([]string{"l", "v"}, []any{fits, 1.0}, nil, limit)
+			Expect(dropped).To(BeEmpty())
+			Expect(samples).To(HaveLen(1))
+
+			samples, dropped = def.RowSamples([]string{"l", "v"}, []any{fits + "x", 1.0}, nil, limit)
+			Expect(samples).To(BeEmpty())
+			Expect(dropped).To(Equal(map[queries.DropReason]int{queries.DropLabelTooLong: 1}))
+		}
+	})
+
+	It("gives each sample labels an append can't share", func() {
+		def := rowDef("    - a: {usage: LABEL}\n    - b: {usage: LABEL}\n    - c: {usage: LABEL}\n" +
+			"    - v: {usage: GAUGE}\n    - w: {usage: GAUGE}\n")
+		samples, dropped := def.RowSamples([]string{"a", "b", "c", "v", "w"}, []any{"1", "2", "3", 1.0, 2.0}, nil, 0)
+		Expect(dropped).To(BeEmpty())
+		Expect(samples).To(HaveLen(2))
+
+		first := append(samples[0].Labels, queries.Label{Key: "x"})
+		second := append(samples[1].Labels, queries.Label{Key: "y"})
+
+		Expect(first[3].Key).To(Equal("x"))
+		Expect(second[3].Key).To(Equal("y"))
+	})
+
+	It("drops a sample whose value column is not in the result", func() {
+		def := rowDef("    - l: {usage: LABEL}\n    - v: {usage: GAUGE}\n    - w: {usage: GAUGE}\n")
+		samples, dropped := def.RowSamples([]string{"l", "v"}, []any{"a", 1.0}, nil, 0)
 		Expect(samples).To(HaveLen(1))
+		Expect(samples[0].Metric).To(Equal("cnpg_stats_v"))
+		Expect(dropped).To(Equal(map[queries.DropReason]int{queries.DropConversion: 1}))
 	})
 
 	It("emits nothing for LABEL and DISCARD columns", func() {
@@ -207,6 +246,29 @@ var _ = Describe("RowSamples", func() {
 			Expect(samples[0].Histogram.Cumulative).To(Equal([]uint64{3}))
 		})
 
+		It("checks the five histogram columns as the mapping's", func() {
+			d := def()
+			Expect(d.CheckColumns(columns)).To(Succeed())
+		})
+
+		It("keeps an infinite bound as +Inf", func() {
+			d := def()
+			samples, dropped := d.RowSamples(columns, []any{"a", "{1,Infinity}", "{3,5}", 1.0, int64(5)}, nil, 0)
+			Expect(dropped).To(BeEmpty())
+			Expect(samples).To(HaveLen(1))
+			Expect(samples[0].Histogram.Bounds).To(Equal([]float64{1, math.Inf(1)}))
+			Expect(samples[0].Histogram.Cumulative).To(Equal([]uint64{3, 5}))
+		})
+
+		It("keeps the last count of a repeated bound", func() {
+			d := def()
+			samples, dropped := d.RowSamples(columns, []any{"a", "{1,1,2}", "{3,4,5}", 1.0, int64(5)}, nil, 0)
+			Expect(dropped).To(BeEmpty())
+			Expect(samples).To(HaveLen(1))
+			Expect(samples[0].Histogram.Bounds).To(Equal([]float64{1, 2}))
+			Expect(samples[0].Histogram.Cumulative).To(Equal([]uint64{4, 5}))
+		})
+
 		It("takes Sum and Count the way CNPG converts them", func() {
 			d := def()
 			samples, dropped := d.RowSamples(columns, []any{"a", "{1}", "{3}", nil, nil}, nil, 0)
@@ -222,6 +284,8 @@ var _ = Describe("RowSamples", func() {
 				Expect(samples).To(BeEmpty())
 				Expect(dropped).To(Equal(map[queries.DropReason]int{queries.DropConversion: 1}))
 			},
+			Entry("empty bounds", []any{"a", "{}", "{3}", 1.0, int64(1)}),
+			Entry("empty counts", []any{"a", "{1}", "{}", 1.0, int64(1)}),
 			Entry("NULL bounds", []any{"a", nil, "{3}", 1.0, int64(1)}),
 			Entry("NULL counts", []any{"a", "{1}", nil, 1.0, int64(1)}),
 			Entry("malformed bounds", []any{"a", "{1,", "{3}", 1.0, int64(1)}),

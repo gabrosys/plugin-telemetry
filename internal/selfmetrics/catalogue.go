@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 
@@ -32,12 +33,12 @@ const (
 
 // Metric describes one self-metric.
 type Metric struct {
-	Component   Component `yaml:"component"`
-	Name        string    `yaml:"name"`
-	Instrument  string    `yaml:"instrument"`
-	Unit        string    `yaml:"unit"`
-	Description string    `yaml:"description"`
-	Attributes  []string  `yaml:"attributes"`
+	Component   Component  `yaml:"component"`
+	Name        string     `yaml:"name"`
+	Instrument  Instrument `yaml:"instrument"`
+	Unit        string     `yaml:"unit"`
+	Description string     `yaml:"description"`
+	Attributes  []string   `yaml:"attributes"`
 }
 
 //go:embed catalogue.yaml
@@ -74,17 +75,25 @@ func ByComponent(c Component) []Metric {
 	return out
 }
 
-var sections = []struct {
+type section struct {
 	component Component
 	heading   string
 	intro     string
-}{
+}
+
+var sections = []section{
 	{ComponentEngine, "Engine", "Metrics the engine reports about itself."},
 	{ComponentPlugin, "Plugin", "Metrics the plugin process reports about itself. They are exported only when `operator` gets `--metrics-endpoint`."},
 }
 
 // Render writes the Markdown catalogue to w, one section with a table per component.
 func Render(w io.Writer, ms []Metric) error {
+	for _, m := range ms {
+		if !slices.ContainsFunc(sections, func(sec section) bool { return sec.component == m.Component }) {
+			return fmt.Errorf("render catalogue: metric %q has component %q, which has no section", m.Name, m.Component)
+		}
+	}
+
 	var b strings.Builder
 	b.WriteString("# Self-metrics\n")
 	for _, sec := range sections {

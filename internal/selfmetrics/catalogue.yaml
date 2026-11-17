@@ -14,7 +14,7 @@
   name: cnpg_otel_query_last_success_timestamp_seconds
   instrument: gauge
   unit: s
-  description: Unix time of the last run of a query that returned rows (outcome ok).
+  description: Unix time of the last run of a query with outcome ok, zero rows included.
   attributes: [query, database]
 - component: engine
   name: cnpg_otel_query_interval_seconds
@@ -61,7 +61,7 @@
   name: cnpg_otel_check
   instrument: gauge
   unit: ""
-  description: 1 if a live check holds, 0 otherwise, from the last facts round (pg_monitor, read_only, track_io_timing, track_wal_io_timing, track_functions). read_only checks the session of the engine itself, so it is 1 while its startup parameter default_transaction_read_only=on holds.
+  description: 1 if a live check holds, 0 otherwise, from the last facts round (pg_monitor, read_only, track_io_timing, track_wal_io_timing, track_functions, superuser). read_only checks the engine's transactions, so it is 1 while they run read-only (transaction_read_only=on). superuser is 1 while the session role is a superuser; the sidecar then runs no query.
   attributes: [check]
 - component: engine
   name: cnpg_otel_exports_total
@@ -86,11 +86,33 @@
   unit: s
   description: Duration of an export operation after the last retry, in a single bucket. error.type is set only on failure, http.response.status_code only for HTTP.
   attributes: [error.type, http.response.status_code, otel.component.type, otel.component.name, server.address, server.port]
+- component: engine
+  name: cnpg_collector_collections_total
+  instrument: counter
+  unit: ""
+  description: Total number of times PostgreSQL was accessed for metrics.
+- component: engine
+  name: cnpg_collector_collection_errors_total
+  instrument: counter
+  unit: ""
+  description: Total errors occurred accessing PostgreSQL for metrics.
+  attributes: [collector]
+- component: engine
+  name: cnpg_collector_last_collection_error
+  instrument: gauge
+  unit: ""
+  description: 1 if the last collection ended with error, 0 otherwise.
+- component: engine
+  name: cnpg_collector_collection_duration_seconds
+  instrument: gauge
+  unit: ""
+  description: Collection time duration in seconds
+  attributes: [collector]
 - component: plugin
   name: cnpg_otel_plugin_hook_calls_total
   instrument: counter
   unit: "{call}"
-  description: Hook calls by service (lifecycle, reconciler, operator), operation (create, evaluate, pre, post, set_status) and outcome (patched, unchanged, skipped, applied, error, noop, status).
+  description: Hook calls by service (lifecycle, operator), operation (create, evaluate, set_status) and outcome (patched, unchanged, skipped, error, noop, status). Error is a failed call, including a Pod that could not get the sidecar.
   attributes: [service, operation, outcome]
 - component: plugin
   name: cnpg_otel_plugin_hook_duration_seconds
@@ -102,5 +124,5 @@
   name: cnpg_otel_plugin_identity_reconciles_total
   instrument: counter
   unit: "{reconcile}"
-  description: Identity controller reconciles by outcome (ok, error).
-  attributes: [outcome]
+  description: Identity controller reconciles by outcome (ok, error); an error carries the reason, the Kubernetes API status reason (Forbidden, AlreadyExists, ...), Timeout for a deadline, or Unknown.
+  attributes: [outcome, reason]

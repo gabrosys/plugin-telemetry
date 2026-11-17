@@ -13,6 +13,7 @@ import (
 	"github.com/cloudnative-pg/cnpg-i-machinery/pkg/pluginhelper/object"
 	"github.com/cloudnative-pg/cnpg-i/pkg/lifecycle"
 	"github.com/cloudnative-pg/machinery/pkg/log"
+	"gomodules.xyz/jsonpatch/v2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
@@ -73,7 +74,7 @@ func (l *Lifecycle) LifecycleHook(
 	start := time.Now()
 	resp, outcome, err := l.handle(ctx, req)
 	if operation, ok := lifecycleOperations[req.GetOperationType().GetType()]; ok {
-		l.Metrics.Hook(serviceLifecycle, operation, outcome, time.Since(start)) //nolint:contextcheck // Hook takes no context
+		l.Metrics.Hook(ctx, serviceLifecycle, operation, outcome, time.Since(start))
 	}
 
 	return resp, err
@@ -113,7 +114,7 @@ func (l *Lifecycle) handle(
 		return nil, outcomeError, err
 	}
 
-	logger.Info("lifecycle hook",
+	logger.Debug("lifecycle hook",
 		"operation", strings.TrimPrefix(req.GetOperationType().GetType().String(), "TYPE_"),
 		"pod", meta.Name,
 		"outcome", outcome)
@@ -137,7 +138,7 @@ func (l *Lifecycle) hook(
 		return nil, outcomeSkipped, nil
 	}
 
-	pluginConfig, ok := ourPlugin(cluster)
+	pluginConfig, ok := clusterconfig.EnabledPlugin(cluster)
 	if !ok {
 		return nil, outcomeSkipped, nil
 	}
@@ -150,7 +151,8 @@ func (l *Lifecycle) hook(
 	patch, err := l.patch(logger, cluster, pluginConfig, original)
 	if err != nil {
 		logger.Error(err, "sidecar not injected, returning no patch")
-		return nil, outcomeSkipped, nil
+
+		return nil, outcomeError, nil
 	}
 	if len(patch) == 0 {
 		return nil, outcomeUnchanged, nil
@@ -162,20 +164,23 @@ func (l *Lifecycle) hook(
 func (l *Lifecycle) patch(
 	logger log.Logger, cluster *apiv1.Cluster, pluginConfig apiv1.PluginConfiguration, original *corev1.Pod,
 ) ([]byte, error) {
+	if l.Images == nil {
+		return nil, errNoImage
+	}
 	image := l.Images.Image()
 	if image == "" {
 		return nil, errNoImage
 	}
 
 	parsed, err := podpatch.ParseParams(pluginConfig.Parameters)
-	if err != nil {
-		return nil, fmt.Errorf("parse plugin parameters: %w", err)
-	}
 	for _, defaulted := range parsed.Defaulted {
 		logger.Error(defaulted, "invalid sidecar resource, using the default")
 	}
 	if len(parsed.Ignored) > 0 {
 		logger.Warning("ignoring unknown plugin parameters", "keys", parsed.Ignored)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("parse plugin parameters: %w", err)
 	}
 
 	mutated := original.DeepCopy()
@@ -183,7 +188,7 @@ func (l *Lifecycle) patch(
 		return nil, fmt.Errorf("apply sidecar patch: %w", err)
 	}
 
-	patch, err := object.CreatePatch(mutated, original)
+	patch, err := podJSONPatch(original, mutated)
 	if err != nil {
 		return nil, fmt.Errorf("create json patch: %w", err)
 	}
@@ -191,6 +196,32 @@ func (l *Lifecycle) patch(
 	return patch, nil
 }
 
-func ourPlugin(cluster *apiv1.Cluster) (apiv1.PluginConfiguration, bool) {
-	return clusterconfig.EnabledPlugin(cluster)
+// podJSONPatch returns the JSON patch from original to mutated, or nil when
+// both marshal to the same document. It diffs the documents, not the structs,
+// so a changed resource.Quantity is not missed.
+func podJSONPatch(original, mutated *corev1.Pod) ([]byte, error) {
+	originalJSON, err := json.Marshal(original)
+	if err != nil {
+		return nil, fmt.Errorf("marshal original pod: %w", err)
+	}
+
+	mutatedJSON, err := json.Marshal(mutated)
+	if err != nil {
+		return nil, fmt.Errorf("marshal mutated pod: %w", err)
+	}
+
+	operations, err := jsonpatch.CreatePatch(originalJSON, mutatedJSON)
+	if err != nil {
+		return nil, fmt.Errorf("diff pods: %w", err)
+	}
+	if len(operations) == 0 {
+		return nil, nil
+	}
+
+	patch, err := json.Marshal(operations)
+	if err != nil {
+		return nil, fmt.Errorf("marshal patch: %w", err)
+	}
+
+	return patch, nil
 }

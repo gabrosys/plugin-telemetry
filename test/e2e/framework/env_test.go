@@ -32,6 +32,23 @@ var _ = Describe("LoadEnv", func() {
 		Entry("main", "kind-plugin-telemetry", "main", "img"),
 	)
 
+	It("reads CMCTL, empty when unset", func() {
+		get := getenv("kind-x", "main", "img")
+		env, err := framework.LoadEnv(get)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(env.CMCTL).To(BeEmpty())
+
+		env, err = framework.LoadEnv(func(key string) string {
+			if key == "CMCTL" {
+				return "/bin/cmctl"
+			}
+
+			return get(key)
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(env.CMCTL).To(Equal("/bin/cmctl"))
+	})
+
 	DescribeTable("rejects",
 		func(kubeContext, cnpgVersion, image string) {
 			_, err := framework.LoadEnv(getenv(kubeContext, cnpgVersion, image))

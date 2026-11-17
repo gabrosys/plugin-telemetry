@@ -37,23 +37,6 @@ func testdata(name string) string {
 	return abs
 }
 
-var _ = Describe("instance --feature-gates", func() {
-	It("fails on an unknown gate before doing anything else", func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_, err := execute(ctx, "instance", "--feature-gates", "+unknown")
-		Expect(err).To(MatchError(ContainSubstring("unknown")))
-		Expect(ctx.Err()).NotTo(HaveOccurred())
-	})
-
-	It("is accepted by every subcommand", func() {
-		for _, sub := range []string{"validate", "test", "print-config"} {
-			_, err := execute(context.Background(), "instance", sub, "--config", testdata("engine-valid.yaml"), "--feature-gates", "+unknown")
-			Expect(err).To(MatchError(ContainSubstring("unknown feature gate")), sub)
-		}
-	})
-})
-
 var _ = Describe("instance --config", func() {
 	It("applies the memory limit and runs the engine until its context ends", func() {
 		calls := 0
@@ -67,7 +50,7 @@ var _ = Describe("instance --config", func() {
 			_, err := execute(ctx, "instance", "--config", testdata("engine-valid.yaml"))
 			done <- err
 		}()
-		time.Sleep(200 * time.Millisecond)
+		Consistently(done, 200*time.Millisecond).ShouldNot(Receive())
 		cancel()
 		Eventually(done, 20*time.Second).Should(Receive(BeNil()))
 		Expect(calls).To(Equal(1))
@@ -136,46 +119,45 @@ var _ = Describe("instance validate", func() {
 })
 
 var _ = Describe("instance print-config", func() {
-	It("never prints the credentials of an endpoint", func() {
-		raw, err := os.ReadFile(testdata("engine-valid.yaml"))
+	// withEndpoint copies engine-unreachable.yaml with another exporter endpoint.
+	withEndpoint := func(endpoint string) string {
+		raw, err := os.ReadFile(testdata("engine-unreachable.yaml"))
 		Expect(err).NotTo(HaveOccurred())
-		config := strings.Replace(string(raw), "http://127.0.0.1:4318", "http://user:secret@127.0.0.1:4318", 1)
-		Expect(config).To(ContainSubstring("secret"))
+		config := strings.Replace(string(raw), "http://127.0.0.1:4318/v1/metrics", endpoint, 1)
+		Expect(config).To(ContainSubstring(endpoint))
 		path := filepath.Join(GinkgoT().TempDir(), "engine.yaml")
 		Expect(os.WriteFile(path, []byte(config), 0o600)).To(Succeed())
 
-		out, err := execute(context.Background(), "instance", "print-config", "--offline", "--config", path)
-		Expect(err).To(MatchError(ContainSubstring("exporter.endpoint")))
-		Expect(err.Error()).NotTo(ContainSubstring("secret"))
-		Expect(out).NotTo(ContainSubstring("secret"))
+		return path
+	}
+
+	It("prints the endpoint as written", func() {
+		out, err := execute(context.Background(), "instance", "print-config", "--config", withEndpoint("HTTP://127.0.0.1:1/v1/metrics"))
+		Expect(err).To(MatchError(ContainSubstring("connect to PostgreSQL")))
+		Expect(out).To(ContainSubstring("endpoint: HTTP://127.0.0.1:1/v1/metrics"))
+		Expect(out).To(ContainSubstring("# sources"))
 	})
 
-	It("never prints a header value", func() {
-		out, err := execute(context.Background(), "instance", "print-config", "--offline", "--config", testdata("engine-headers.yaml"))
-		Expect(err).NotTo(HaveOccurred())
-		Expect(out).To(ContainSubstring("authorization: <redacted>"))
-		Expect(out).To(ContainSubstring("x-tenant: <redacted>"))
+	It("prints no user info for an endpoint that fails Validate", func() {
+		out, err := execute(context.Background(), "instance", "print-config", "--config", withEndpoint("http://alice:hunter2@127.0.0.1:1/v1/metrics"))
+		Expect(err).To(MatchError(ContainSubstring("exporter.endpoint")))
+		Expect(err.Error()).NotTo(ContainSubstring("alice"))
+		Expect(err.Error()).NotTo(ContainSubstring("hunter2"))
+		Expect(out).NotTo(ContainSubstring("alice"))
+		Expect(out).NotTo(ContainSubstring("hunter2"))
+	})
+
+	It("prints the headers file name and no header", func() {
+		out, err := execute(context.Background(), "instance", "print-config", "--config", testdata("engine-headers.yaml"))
+		Expect(err).To(MatchError(ContainSubstring("connect to PostgreSQL")))
+		Expect(out).To(ContainSubstring("headersFile: "))
+		Expect(out).NotTo(ContainSubstring("# headers"))
+		Expect(out).NotTo(ContainSubstring("authorization"))
 		Expect(out).NotTo(ContainSubstring("s3cr3t-token"))
 		Expect(out).NotTo(ContainSubstring("acme-secret"))
 	})
 
-	It("prints the settings, the sources and the unplanned queries offline", func() {
-		out, err := execute(context.Background(), "instance", "print-config", "--offline", "--config", testdata("engine-valid.yaml"))
-		Expect(err).NotTo(HaveOccurred())
-		Expect(out).To(ContainSubstring("cluster: demo"))
-		Expect(out).To(ContainSubstring("ok builtin"))
-		Expect(out).To(ContainSubstring("unplanned collector group= interval=30s"))
-		Expect(out).To(ContainSubstring("unplanned probe group= interval=30s"))
-	})
-
-	It("lists the whole-query skips offline", func() {
-		out, err := execute(context.Background(), "instance", "print-config", "--offline", "--config", testdata("engine-excluded.yaml"))
-		Expect(err).NotTo(HaveOccurred())
-		Expect(out).To(ContainSubstring("skipped collector: excluded query"))
-		Expect(out).To(ContainSubstring("skipped probe: all metrics excluded"))
-	})
-
-	It("fails when it cannot connect and --offline is not set", func() {
+	It("fails when it cannot connect", func() {
 		_, err := execute(context.Background(), "instance", "print-config", "--config", testdata("engine-unreachable.yaml"))
 		Expect(err).To(HaveOccurred())
 	})

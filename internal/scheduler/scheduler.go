@@ -3,14 +3,15 @@ package scheduler
 
 import (
 	"context"
-	"errors"
 	"math/rand/v2"
 	"sync"
 	"time"
 
+	"github.com/cloudnative-pg/machinery/pkg/log"
 	"k8s.io/utils/clock"
 
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
+	"github.com/gabrosys/plugin-telemetry/internal/safe"
 )
 
 const (
@@ -19,9 +20,6 @@ const (
 	// MaxJitter caps the random delay added to each interval.
 	MaxJitter = time.Second
 )
-
-// ErrAlreadyRunning is returned by Run when it has been called before.
-var ErrAlreadyRunning = errors.New("scheduler already running")
 
 // RunFunc runs one job. ctx is derived from the context passed to Run.
 type RunFunc func(ctx context.Context, job planner.Job)
@@ -47,6 +45,8 @@ type Scheduler struct {
 	run  RunFunc
 	skip SkipFunc
 
+	wg sync.WaitGroup // counts the workers
+
 	mu      sync.Mutex // guards every field below, including rnd
 	rnd     *rand.Rand
 	jobs    map[jobKey]*entry
@@ -54,10 +54,9 @@ type Scheduler struct {
 	ctx     context.Context //nolint:containedctx // set by Run and used to start workers from Update
 	started bool
 	stopped bool
-	wg      sync.WaitGroup
 }
 
-// New returns a Scheduler. rnd is only used while holding the Scheduler's lock.
+// New returns a Scheduler that owns rnd: nothing else may use it, as the Scheduler draws from it under its lock.
 func New(clk clock.Clock, rnd *rand.Rand, run RunFunc, skip SkipFunc) *Scheduler {
 	return &Scheduler{
 		clk:     clk,
@@ -98,7 +97,7 @@ func (s *Scheduler) Update(p planner.Plan) {
 	}
 	s.jobs = next
 
-	if !s.started || s.stopped {
+	if !s.started || s.stopped || s.ctx.Err() != nil {
 		return
 	}
 	for db := range touched {
@@ -111,13 +110,9 @@ func (s *Scheduler) Update(p planner.Plan) {
 }
 
 // Run starts one worker per database in the plan and blocks until ctx is done.
-// It returns after every running job has returned.
+// It returns after every running job has returned. Call it once: a second call starts a second worker per database.
 func (s *Scheduler) Run(ctx context.Context) error {
 	s.mu.Lock()
-	if s.started {
-		s.mu.Unlock()
-		return ErrAlreadyRunning
-	}
 	s.started = true
 	s.ctx = ctx
 	dbs := map[string]struct{}{}
@@ -154,6 +149,7 @@ func (s *Scheduler) spawn(db string) {
 	w := &worker{wake: make(chan struct{}, 1)}
 	s.workers[db] = w
 	s.wg.Add(1)
+	// Not safe.Go: work wraps each run and skip, and a dead worker would stall its database.
 	go s.work(s.ctx, db, w)
 }
 
@@ -182,7 +178,12 @@ func (s *Scheduler) earliest(db string) *entry {
 
 func (s *Scheduler) work(ctx context.Context, db string, w *worker) {
 	defer s.wg.Done()
+	logger := log.FromContext(ctx).GetLogger()
 	for {
+		if ctx.Err() != nil {
+			s.exit(db)
+			return
+		}
 		s.mu.Lock()
 		select {
 		case <-w.wake:
@@ -209,24 +210,20 @@ func (s *Scheduler) work(ctx context.Context, db string, w *worker) {
 			s.mu.Lock()
 			w.timer = nil
 			s.mu.Unlock()
-			if ctx.Err() != nil {
-				s.exit(db)
-				return
-			}
 			continue
 		}
 		j, due := e.job, e.due
 		s.mu.Unlock()
 
 		start := s.clk.Now()
-		s.run(ctx, j)
+		safe.Call(logger, "run of "+j.Query+" on "+j.Database, func() { s.run(ctx, j) })
 		end := s.clk.Now()
 		if ctx.Err() != nil {
 			s.exit(db)
 			return
 		}
 		if missed := s.reschedule(e, due, start, end); missed > 0 {
-			s.skip(j, missed)
+			safe.Call(logger, "skip of "+j.Query+" on "+j.Database, func() { s.skip(j, missed) })
 		}
 	}
 }
@@ -252,9 +249,9 @@ func (s *Scheduler) reschedule(e *entry, due, start, end time.Time) int {
 		next = floor
 	}
 	missed := 0
-	for !next.After(end) {
-		missed++
-		next = next.Add(interval)
+	if !next.After(end) {
+		missed = int(end.Sub(next)/interval) + 1
+		next = next.Add(time.Duration(missed) * interval)
 	}
 	e.due = next
 	return missed

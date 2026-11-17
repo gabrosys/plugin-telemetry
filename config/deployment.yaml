@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: plugin-telemetry
+  namespace: cnpg-system
   labels:
     app.kubernetes.io/name: plugin-telemetry
 spec:
@@ -20,6 +21,9 @@ spec:
         app.kubernetes.io/name: plugin-telemetry
     spec:
       serviceAccountName: plugin-telemetry
+      priorityClassName: plugin-telemetry
+      # Covers the preStop sleep (5 s), the gRPC drain (10 s) and 5 s to exit.
+      terminationGracePeriodSeconds: 20
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -40,7 +44,7 @@ spec:
             - --server-address=:9090
             - --server-cert=/server/tls.crt
             - --server-key=/server/tls.key
-            - --client-cert=/client/tls.crt
+            - --client-cert=/client/ca.crt
             - --sidecar-image-configmap=telemetry-sidecar-image
           env:
             - name: POD_NAMESPACE
@@ -57,6 +61,11 @@ spec:
           readinessProbe:
             tcpSocket:
               port: grpc
+          # Keeps serving while the endpoint removal reaches kube-proxy and CNPG.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
           resources:
             requests:
               cpu: 10m
@@ -83,5 +92,5 @@ spec:
           secret:
             secretName: plugin-telemetry-client-tls
             items:
-              - key: tls.crt
-                path: tls.crt
+              - key: ca.crt
+                path: ca.crt

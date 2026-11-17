@@ -44,7 +44,6 @@ type entry struct {
 	denied  error                      // the last watch error was a 403
 	lastErr string                     // text of the last other watch error, cleared by an event
 	stop    func()
-	gone    bool // removed from the wanted set
 }
 
 // virtualFile splits a virtual file name into the watch it reads and the key within the object.

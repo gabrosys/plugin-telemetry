@@ -85,9 +85,18 @@ var _ = Describe("SpecProblems", func() {
 		Entry("no reject line",
 			clusterWith(nil, []string{hbaLocal4, hbaLocal6}, metricsRole()), password,
 			`pg_hba has no reject line for role "metrics"`),
-		Entry("a reject line before the loopback lines",
-			clusterWith(nil, []string{hbaReject, hbaLocal4, hbaLocal6}, metricsRole()), password,
-			`pg_hba has no reject line for role "metrics"`),
+		Entry("does not judge line order",
+			clusterWith(nil, []string{hbaReject, hbaLocal4, hbaLocal6}, metricsRole()), password),
+		Entry("a user list item is not judged by its form",
+			clusterWith(nil, []string{hbaLocal4, hbaLocal6, "host all all all reject"}, metricsRole()), password),
+		Entry("a CIDR that excludes the loopback address leaves both gaps",
+			clusterWith(nil, []string{"host all metrics 10.0.0.0/8 scram-sha-256", hbaReject}, metricsRole()), password,
+			`pg_hba has no line for role "metrics" from 127.0.0.1/32`,
+			`pg_hba has no line for role "metrics" from ::1/128`),
+		Entry("a local line does not count",
+			clusterWith(nil, []string{"local all metrics scram-sha-256 map=x", hbaReject}, metricsRole()), password,
+			`pg_hba has no line for role "metrics" from 127.0.0.1/32`,
+			`pg_hba has no line for role "metrics" from ::1/128`),
 		Entry("a line for another role does not count",
 			clusterWith(nil, []string{"host all other 127.0.0.1/32 trust", hbaLocal6, hbaReject}, metricsRole()), password,
 			`pg_hba has no line for role "metrics" from 127.0.0.1/32`),
@@ -95,6 +104,17 @@ var _ = Describe("SpecProblems", func() {
 			clusterWith(nil, []string{
 				"hostssl  postgres   metrics\t127.0.0.1/32 scram-sha-256", hbaLocal6, "host all metrics all  reject",
 			}, metricsRole()), password),
+		Entry("user all", clusterWith(nil, []string{"host all all 127.0.0.1/32 scram-sha-256", "host all all ::1/128 scram-sha-256", hbaReject}, metricsRole()), password),
+		Entry("user +group", clusterWith(nil, []string{"host all +pg_monitor 127.0.0.1/32 scram-sha-256", "host all +pg_monitor ::1/128 scram-sha-256", hbaReject}, metricsRole()), password),
+		Entry("user /regex", clusterWith(nil, []string{"host all /^metr 127.0.0.1/32 scram-sha-256", "host all /^metr ::1/128 scram-sha-256", hbaReject}, metricsRole()), password),
+		Entry("user @file", clusterWith(nil, []string{"host all @admins 127.0.0.1/32 scram-sha-256", "host all @admins ::1/128 scram-sha-256", hbaReject}, metricsRole()), password),
+		Entry("a quoted user", clusterWith(nil, []string{`host all "metrics" 127.0.0.1/32 scram-sha-256`, `host all "metrics" ::1/128 scram-sha-256`, hbaReject}, metricsRole()), password),
+		Entry("address samehost", clusterWith(nil, []string{"host all metrics samehost scram-sha-256", hbaReject}, metricsRole()), password),
+		Entry("wider CIDRs", clusterWith(nil, []string{"host all metrics 127.0.0.0/8 scram-sha-256", "host all metrics ::/0 scram-sha-256", hbaReject}, metricsRole()), password),
+		Entry("the IP plus mask form", clusterWith(nil, []string{
+			"host all metrics 127.0.0.1 255.255.255.255 scram-sha-256",
+			"host all metrics ::1 ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff scram-sha-256", hbaReject,
+		}, metricsRole()), password),
 		Entry("the problems come out sorted",
 			clusterWith(nil, nil, metricsRole()), password,
 			`pg_hba has no line for role "metrics" from 127.0.0.1/32`,
@@ -148,6 +168,20 @@ var _ = Describe("Check", func() {
 		p := podpatch.Params{Auth: podpatch.AuthPassword, PasswordSecret: passSecret}
 
 		Expect(clusterconfig.Check(newCluster(), p, newExporter())).To(Succeed())
+	})
+
+	It("rejects an invalid exclude glob, naming its index", func() {
+		e := newExporter()
+		e.Spec.Metrics.Exclude.Queries = []string{"pg_stat_["}
+
+		Expect(clusterconfig.Check(newCluster(), peer, e)).To(MatchError(ContainSubstring("spec.metrics.exclude.queries[0]: invalid pattern")))
+	})
+
+	It("rejects an invalid group glob, naming its index", func() {
+		e := newExporter()
+		e.Spec.Metrics.Groups = []v1alpha1.QueryGroup{{Name: "g", Queries: []string{`a\`}}}
+
+		Expect(clusterconfig.Check(newCluster(), peer, e)).To(MatchError(ContainSubstring("spec.metrics.groups[0].queries[0]")))
 	})
 
 	It("rejects an invalid endpoint", func() {

@@ -2,28 +2,39 @@ package operator_test
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync/atomic"
+	"time"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/gabrosys/plugin-telemetry/api/v1alpha1"
 	"github.com/gabrosys/plugin-telemetry/internal/identity"
+	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
 )
 
 func requestFor(namespace, name string) reconcile.Request {
 	return reconcile.Request{NamespacedName: client.ObjectKey{Namespace: namespace, Name: name}}
 }
+
+var errCreate = errors.New("create refused")
 
 var _ = Describe("IdentityController", func() {
 	var (
@@ -54,7 +65,7 @@ var _ = Describe("IdentityController", func() {
 				return cl.Apply(ctx, obj, opts...)
 			},
 		})
-		ctrl = &operator.IdentityController{Client: c, Identity: &identity.Ensurer{Reader: c, Live: c, Writer: c}}
+		ctrl = &operator.IdentityController{Client: c, Identity: &identity.Ensurer{Reader: c, Writer: c}}
 	}
 
 	reconcileOnce := func(ctx context.Context, namespace, name string) {
@@ -81,7 +92,7 @@ var _ = Describe("IdentityController", func() {
 		reconcileOnce(ctx, "ns", "pg")
 
 		var role rbacv1.Role
-		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}, &role)).To(Succeed())
+		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg.telemetry"}, &role)).To(Succeed())
 		Expect(role.Rules).To(ContainElement(HaveField("ResourceNames", ContainElement("queries"))))
 
 		old := newCluster("ns", "pg", ours(nil))
@@ -110,6 +121,27 @@ var _ = Describe("IdentityController", func() {
 		Expect(mapper(ctx, newExporter("ns", "default"))).To(ConsistOf(requestFor("ns", "by-default")))
 		Expect(mapper(ctx, newExporter("ns", "unused"))).To(BeEmpty())
 		Expect(mapper(ctx, newExporter("other", "shared"))).To(ConsistOf(requestFor("other", "same-name-elsewhere")))
+	})
+
+	It("lists the namespace's Clusters without a deep copy", func(ctx context.Context) {
+		var listed []*client.ListOptions
+		cl := newClient([]client.Object{
+			newCluster("ns", "pg", ours(map[string]string{"exporter": "shared"})),
+			newCluster("ns", "other", ours(map[string]string{"exporter": "elsewhere"})),
+		}, interceptor.Funcs{
+			List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				o := &client.ListOptions{}
+				o.ApplyOptions(opts)
+				listed = append(listed, o)
+
+				return cl.List(ctx, list, opts...)
+			},
+		})
+
+		Expect(operator.ExportersToClusters(cl)(ctx, newExporter("ns", "shared"))).To(ConsistOf(requestFor("ns", "pg")))
+
+		Expect(listed).To(HaveLen(1))
+		Expect(listed[0].UnsafeDisableDeepCopy).To(HaveValue(BeTrue()))
 	})
 
 	It("removes the identity when the plugin entry is disabled or removed", func(ctx context.Context) {
@@ -157,16 +189,16 @@ var _ = Describe("IdentityController", func() {
 		build(newCluster("ns", "pg", ours(nil)))
 		reconcileOnce(ctx, "ns", "pg")
 
-		Expect(c.Delete(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg-telemetry"}})).To(Succeed())
+		Expect(c.Delete(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg.telemetry"}})).To(Succeed())
 		var role rbacv1.Role
-		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}, &role)).To(Succeed())
+		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg.telemetry"}, &role)).To(Succeed())
 		role.Rules = nil
 		Expect(c.Update(ctx, &role)).To(Succeed())
 
 		reconcileOnce(ctx, "ns", "pg")
 
 		Expect(identityExists(ctx, c, "pg")).To(Equal(allFour))
-		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}, &role)).To(Succeed())
+		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg.telemetry"}, &role)).To(Succeed())
 		Expect(role.Rules).NotTo(BeEmpty())
 	})
 
@@ -184,54 +216,68 @@ var _ = Describe("IdentityController", func() {
 		Expect(deletes.Load()).To(BeZero())
 	})
 
-	It("backs off from a Cluster that has the identity's name, then writes nothing", func(ctx context.Context) {
-		build(newCluster("ns", "pg", ours(nil)))
-		reconcileOnce(ctx, "ns", "pg")
-		Expect(identityExists(ctx, c, "pg")).To(Equal(allFour))
-
-		Expect(c.Create(ctx, newCluster("ns", "pg-telemetry"))).To(Succeed())
-		writes.Store(0)
-		reconcileOnce(ctx, "ns", "pg")
-
-		Expect(identityExists(ctx, c, "pg")).To(Equal([4]bool{false, true, true, true}), "only the token Secret is deleted")
-		Expect(writes.Load()).To(BeNumerically(">", 0))
-		for _, obj := range identity.Members("ns", "pg")[1:] {
-			Expect(c.Get(ctx, client.ObjectKeyFromObject(obj), obj)).To(Succeed())
-			Expect(obj.GetOwnerReferences()).To(BeEmpty(), "%T", obj)
-		}
-
-		writes.Store(0)
-		reconcileOnce(ctx, "ns", "pg")
-		Expect(writes.Load()).To(BeZero())
-	})
-
-	It("ensures nothing for a Cluster whose identity name another Cluster has", func(ctx context.Context) {
+	It("ensures the identity whatever other Clusters the namespace holds", func(ctx context.Context) {
 		build(newCluster("ns", "pg", ours(nil)), newCluster("ns", "pg-telemetry"))
 		reconcileOnce(ctx, "ns", "pg")
 
-		Expect(identityExists(ctx, c, "pg")).To(Equal([4]bool{}))
-		Expect(writes.Load()).To(BeZero())
+		Expect(identityExists(ctx, c, "pg")).To(Equal(allFour))
 	})
 
-	It("maps a Cluster with an identity's name to the Cluster that identity belongs to", func(ctx context.Context) {
-		mapper := operator.IdentityNameToCluster
+	It("requeues after 5 s, with no error, while an object is in the way", func(ctx context.Context) {
+		build(newCluster("ns", "pg", ours(nil)), &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg.telemetry"}})
+		ctrl.Identity = &identity.Ensurer{Reader: newClient(nil, interceptor.Funcs{}), Writer: c}
 
-		Expect(mapper(ctx, newCluster("ns", "pg-telemetry"))).To(ConsistOf(requestFor("ns", "pg")))
-		Expect(mapper(ctx, newCluster("ns", "pg-telemetry-telemetry"))).To(ConsistOf(requestFor("ns", "pg-telemetry")))
-		Expect(mapper(ctx, newCluster("ns", "pg"))).To(BeEmpty())
-		Expect(mapper(ctx, newCluster("ns", "-telemetry"))).To(BeEmpty())
-	})
+		res, err := ctrl.Reconcile(ctx, requestFor("ns", "pg"))
 
-	It("applies nothing and returns no error when an identity object isn't the plugin's", func(ctx context.Context) {
-		build(newCluster("ns", "pg", ours(nil)), &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg-telemetry"}})
-		reconcileOnce(ctx, "ns", "pg")
-
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res).To(Equal(reconcile.Result{RequeueAfter: 5 * time.Second}))
 		Expect(identityExists(ctx, c, "pg")).To(Equal([4]bool{false, false, false, true}))
 		Expect(writes.Load()).To(BeZero())
 	})
 
+	It("drops create events of the owned objects and keeps updates, deletes and generic events", func() {
+		sa := &corev1.ServiceAccount{}
+
+		Expect(operator.OwnedObjects.Create(event.CreateEvent{Object: sa})).To(BeFalse())
+		Expect(operator.OwnedObjects.Update(event.UpdateEvent{ObjectOld: sa, ObjectNew: sa})).To(BeTrue())
+		Expect(operator.OwnedObjects.Delete(event.DeleteEvent{Object: sa})).To(BeTrue())
+		Expect(operator.OwnedObjects.Generic(event.GenericEvent{Object: sa})).To(BeTrue())
+	})
+
+	It("logs an object in the way once when it starts and once when it clears", func(ctx context.Context) {
+		var lines []string
+		sink := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{})
+		ctx = logr.NewContext(ctx, sink)
+		blocker := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg.telemetry"}}
+		build(newCluster("ns", "pg", ours(nil)), blocker)
+		ctrl.Identity = &identity.Ensurer{Reader: newClient(nil, interceptor.Funcs{}), Writer: c}
+		count := func(outcome string) int {
+			n := 0
+			for _, l := range lines {
+				if strings.Contains(l, `"outcome"="`+outcome+`"`) {
+					n++
+				}
+			}
+
+			return n
+		}
+
+		for range 3 {
+			res, err := ctrl.Reconcile(ctx, requestFor("ns", "pg"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(Equal(5 * time.Second))
+		}
+		Expect(count("in the way")).To(Equal(1))
+
+		Expect(c.Delete(ctx, blocker)).To(Succeed())
+		ctrl.Identity = &identity.Ensurer{Reader: c, Writer: c}
+		reconcileOnce(ctx, "ns", "pg")
+		reconcileOnce(ctx, "ns", "pg")
+		Expect(count("in the way cleared")).To(Equal(1))
+	})
+
 	It("registers with a manager", func() {
-		mgr, err := operator.NewManager(&rest.Config{Host: discoveryServer().URL})
+		mgr, err := operator.NewManager(&rest.Config{Host: discoveryServer().URL}, "cnpg-system", "telemetry-sidecar-image")
 		Expect(err).NotTo(HaveOccurred())
 		build()
 
@@ -240,14 +286,139 @@ var _ = Describe("IdentityController", func() {
 
 	It("returns the Ensure error so the workqueue backs off", func(ctx context.Context) {
 		failing := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{
-			Apply: func(context.Context, client.WithWatch, runtime.ApplyConfiguration, ...client.ApplyOption) error {
-				return errApply
+			Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+				return errCreate
 			},
 		})
-		ctrl = &operator.IdentityController{Client: failing, Identity: &identity.Ensurer{Reader: failing, Live: failing, Writer: failing}}
+		ctrl = &operator.IdentityController{Client: failing, Identity: &identity.Ensurer{Reader: failing, Writer: failing}}
 
 		res, err := ctrl.Reconcile(ctx, requestFor("ns", "pg"))
-		Expect(err).To(MatchError(ContainSubstring("apply refused")))
+		Expect(err).To(MatchError(errCreate))
 		Expect(res).To(Equal(reconcile.Result{}))
+	})
+
+	It("returns a Forbidden delete", func(ctx context.Context) {
+		forbidden := newClient([]client.Object{
+			newCluster("ns", "pg"),
+			&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: metadata.ServiceAccountName("pg")}},
+		}, interceptor.Funcs{
+			Delete: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.DeleteOption) error {
+				return apierrors.NewForbidden(schema.GroupResource{Resource: "serviceaccounts"}, obj.GetName(), errors.New("denied"))
+			},
+		})
+		ctrl = &operator.IdentityController{Client: forbidden, Identity: &identity.Ensurer{Reader: forbidden, Writer: forbidden}}
+
+		_, err := ctrl.Reconcile(ctx, requestFor("ns", "pg"))
+		Expect(apierrors.IsForbidden(err)).To(BeTrue(), "%v", err)
+	})
+
+	It("returns an exporter read error", func(ctx context.Context) {
+		failing := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*v1alpha1.TelemetryExporter); ok {
+					return errGet
+				}
+
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		})
+		ctrl = &operator.IdentityController{Client: failing, Identity: &identity.Ensurer{Reader: failing, Writer: failing}}
+
+		_, err := ctrl.Reconcile(ctx, requestFor("ns", "pg"))
+		Expect(err).To(MatchError(errGet))
+	})
+
+	It("logs an invalid parameter without repeating the namespace the reconcile logger carries", func(ctx context.Context) {
+		var lines []string
+		sink := funcr.NewJSON(func(obj string) { lines = append(lines, obj) }, funcr.Options{})
+		ctx = logr.NewContext(ctx, sink.WithValues("namespace", "ns", "name", "pg"))
+		build(newCluster("ns", "pg", ours(map[string]string{"auth": "ldap"})))
+
+		reconcileOnce(ctx, "ns", "pg")
+
+		Expect(lines).To(ContainElement(ContainSubstring("invalid plugin parameters")))
+		for _, line := range lines {
+			Expect(strings.Count(line, `"namespace"`)).To(Equal(1), line)
+			Expect(line).NotTo(ContainSubstring(`"cluster"`))
+		}
+	})
+
+	Describe("identity reconcile metrics", func() {
+		var m *operator.PluginMetrics
+
+		BeforeEach(func() { m = operator.NewPluginMetrics() })
+
+		reconcileWith := func(ctx context.Context, cl, reader client.Client) {
+			GinkgoHelper()
+
+			ctrl = &operator.IdentityController{Client: cl, Identity: &identity.Ensurer{Reader: reader, Writer: cl}, Metrics: m}
+			_, _ = ctrl.Reconcile(ctx, requestFor("ns", "pg"))
+		}
+
+		It("counts identity reconcile errors by reason", func(ctx context.Context) {
+			forbidden := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{
+				Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					if _, ok := obj.(*rbacv1.RoleBinding); ok {
+						return apierrors.NewForbidden(schema.GroupResource{Group: rbacv1.GroupName, Resource: "rolebindings"}, obj.GetName(), errors.New("denied"))
+					}
+
+					return cl.Create(ctx, obj, opts...)
+				},
+			})
+			reconcileWith(ctx, forbidden, forbidden)
+
+			unavailable := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{
+				Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+					return apierrors.NewServiceUnavailable("overloaded")
+				},
+			})
+			reconcileWith(ctx, unavailable, unavailable)
+
+			deadline := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{
+				Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+					return context.DeadlineExceeded
+				},
+			})
+			reconcileWith(ctx, deadline, deadline)
+
+			boom := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{
+				Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+					return errors.New("boom")
+				},
+			})
+			reconcileWith(ctx, boom, boom)
+
+			exists := newClient([]client.Object{
+				newCluster("ns", "pg", ours(nil)),
+				&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg.telemetry"}},
+			}, interceptor.Funcs{})
+			reconcileWith(ctx, exists, newClient(nil, interceptor.Funcs{}))
+
+			Expect(counts(m, identityCount)).To(Equal(map[string]int64{
+				"outcome=error,reason=Forbidden":          1,
+				"outcome=error,reason=ServiceUnavailable": 1,
+				"outcome=error,reason=Timeout":            1,
+				"outcome=error,reason=Unknown":            1,
+				"outcome=error,reason=AlreadyExists":      1,
+			}))
+		})
+
+		It("records Unknown for an object in the way with no API error inside", func(ctx context.Context) {
+			token := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: metadata.TokenSecretName("pg")},
+				Type:       corev1.SecretTypeOpaque,
+			}
+			cl := newClient([]client.Object{newCluster("ns", "pg", ours(nil)), token}, interceptor.Funcs{})
+			reconcileWith(ctx, cl, cl)
+
+			Expect(counts(m, identityCount)).To(Equal(map[string]int64{"outcome=error,reason=Unknown": 1}))
+		})
+
+		It("records a clean reconcile as ok with no reason", func(ctx context.Context) {
+			cl := newClient([]client.Object{newCluster("ns", "pg", ours(nil))}, interceptor.Funcs{})
+			reconcileWith(ctx, cl, cl)
+
+			Expect(counts(m, identityCount)).To(Equal(map[string]int64{"outcome=ok": 1}))
+		})
 	})
 })

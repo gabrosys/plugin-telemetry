@@ -52,3 +52,16 @@ var _ = Describe("UnexpectedRules", func() {
 		Expect(framework.UnexpectedRules(rules)).To(HaveExactElements(del, patch))
 	})
 })
+
+var _ = Describe("UnexpectedNonResourceRules", func() {
+	It("drops the get rules and returns the rest", func() {
+		get := authorizationv1.NonResourceRule{Verbs: []string{"get"}, NonResourceURLs: []string{"/healthz"}}
+		post := authorizationv1.NonResourceRule{Verbs: []string{"post"}, NonResourceURLs: []string{"/metrics"}}
+		Expect(framework.UnexpectedNonResourceRules([]authorizationv1.NonResourceRule{get, post})).To(HaveExactElements(post))
+	})
+
+	It("flags a rule that holds get next to another verb", func() {
+		mixed := authorizationv1.NonResourceRule{Verbs: []string{"get", "put"}, NonResourceURLs: []string{"/version"}}
+		Expect(framework.UnexpectedNonResourceRules([]authorizationv1.NonResourceRule{mixed})).To(HaveExactElements(mixed))
+	})
+})

@@ -68,28 +68,31 @@ type Loader struct {
 	previous map[string]queries.UserQueries
 }
 
-// LoaderOption configures a Loader.
-type LoaderOption func(*Loader)
-
-// WithSensitive marks the sources for which isSensitive returns true as holding secret data: a parse
-// error of such a source names the source and the line, and quotes none of its content.
-func WithSensitive(isSensitive func(name string) bool) LoaderOption {
-	return func(l *Loader) { l.sensitive = isSensitive }
+// NewLoader returns a Loader that reads files with read, in order after the builtin query. A parse
+// error of a source for which sensitive returns true names the source and the line, and quotes none of
+// its content; a nil sensitive marks none.
+func NewLoader(read ReadFile, files []string, sensitive func(name string) bool) *Loader {
+	return &Loader{read: read, files: slices.Clone(files), sensitive: sensitive, previous: map[string]queries.UserQueries{}}
 }
 
-// NewLoader returns a Loader that reads files with read, in order after the builtin query.
-func NewLoader(read ReadFile, files []string, opts ...LoaderOption) *Loader {
-	l := &Loader{read: read, files: slices.Clone(files), previous: map[string]queries.UserQueries{}}
-	for _, o := range opts {
-		o(l)
-	}
+// SetFiles makes files the sources, in order after the builtin query. A file that stays listed keeps its
+// last good version; one that is dropped forgets it.
+func (l *Loader) SetFiles(files []string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
-	return l
+	l.files = slices.Clone(files)
+	for file := range l.previous {
+		if !slices.Contains(l.files, file) {
+			delete(l.previous, file)
+		}
+	}
 }
 
 // Load reads the builtin query, then each file in order. A later source overwrites an earlier key.
 // A missing file, or one that has never parsed or been readable, is skipped; one that stops parsing or
-// becomes unreadable keeps its last good version.
+// becomes unreadable keeps its last good version. A file that goes missing keeps its last good version
+// too: it serves again if the file comes back invalid.
 func (l *Loader) Load() Result {
 	l.mu.Lock()
 	defer l.mu.Unlock()

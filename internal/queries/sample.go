@@ -3,11 +3,17 @@ package queries
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"math"
+	"slices"
 	"sort"
 	"unicode/utf8"
 
 	"github.com/Masterminds/semver/v3"
 )
+
+// DefaultMaxLabelValueLength is the label limit RowSamples applies when it is given none.
+const DefaultMaxLabelValueLength = 1024
 
 // Label is one label of a sample.
 type Label struct{ Key, Value string }
@@ -55,7 +61,7 @@ func (d *Definition) CheckColumns(columns []string) error {
 
 // RowSamples converts one row of database/sql-style values. A label failure drops the whole row;
 // a value failure drops only that sample. A nil server runs every column; a maxLabelValueLength
-// of zero or less sets no limit.
+// of zero or less means DefaultMaxLabelValueLength.
 func (d *Definition) RowSamples(
 	columns []string, values []any, server *semver.Version, maxLabelValueLength int,
 ) (samples []Sample, dropped map[DropReason]int) {
@@ -68,6 +74,9 @@ func (d *Definition) RowSamples(
 		}
 	}
 
+	if maxLabelValueLength <= 0 {
+		maxLabelValueLength = DefaultMaxLabelValueLength
+	}
 	labels, reason := d.rowLabels(byName, maxLabelValueLength)
 	if reason != "" {
 		dropped[reason]++
@@ -75,7 +84,7 @@ func (d *Definition) RowSamples(
 		return nil, dropped
 	}
 
-	for _, name := range sortedKeys(d.Columns) {
+	for _, name := range slices.Sorted(maps.Keys(d.Columns)) {
 		column := d.Columns[name]
 		if column.Role != RoleValue {
 			continue
@@ -88,11 +97,11 @@ func (d *Definition) RowSamples(
 			Metric:      column.Metric,
 			Description: column.Description,
 			Kind:        column.Kind,
-			Labels:      labels,
+			Labels:      labels[:len(labels):len(labels)],
 		}
 		if column.Kind == KindHistogram {
-			h, err := histogramFrom(name, byName)
-			if err != nil {
+			h, ok := histogramFrom(name, byName)
+			if !ok {
 				dropped[DropConversion]++
 
 				continue
@@ -127,7 +136,7 @@ func (d *Definition) rowLabels(byName map[string]any, maxLength int) ([]Label, D
 		if !ok || !utf8.ValidString(text) {
 			return nil, DropLabel
 		}
-		if maxLength > 0 && len(text) > maxLength {
+		if len(text) > maxLength {
 			return nil, DropLabelTooLong
 		}
 		labels = append(labels, Label{Key: name, Value: text})
@@ -143,9 +152,11 @@ func columnValue(column Column, raw any) (float64, bool) {
 		return mappedValue(column.Mapping, raw)
 	case UsageDuration:
 		return durationMillis(raw)
-	case UsageCounter, UsageGauge, UsageHistogram, UsageLabel, UsageDiscard:
+	case UsageCounter, UsageGauge:
 		return toFloat(raw)
-	default:
-		return toFloat(raw)
+	case UsageHistogram, UsageLabel, UsageDiscard:
+		return math.NaN(), false // not value columns
 	}
+
+	return math.NaN(), false
 }

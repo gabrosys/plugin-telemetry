@@ -1,7 +1,7 @@
 package export
 
 import (
-	"os"
+	"fmt"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -10,24 +10,39 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
 )
 
+// containerName is the sidecar container, whose name is k8s.container.name.
 const containerName = "otel-metrics"
 
-// Resource builds design 6.6's resource from settings and the downward-API env
-// (POD_NAME, POD_UID, NODE_NAME, NAMESPACE); fixed attributes win over ResourceAttributes.
-func Resource(s settings.Settings, getenv func(string) string) *resource.Resource {
+// Instance names the process instance: POD_NAME, else the host name, else "unknown" with the host name error.
+func Instance(getenv func(string) string, hostname func() (string, error)) (string, error) {
+	if pod := getenv("POD_NAME"); pod != "" {
+		return pod, nil
+	}
+	host, err := hostname()
+	if err != nil {
+		return "unknown", fmt.Errorf("read host name: %w", err)
+	}
+
+	return host, nil
+}
+
+// fixedKeys are the resource attributes Resource sets itself; ResourceAttributes never supplies them.
+var fixedKeys = []attribute.Key{
+	semconv.ServiceNameKey, semconv.ServiceNamespaceKey, semconv.ServiceInstanceIDKey,
+	semconv.K8SNamespaceNameKey, semconv.K8SPodNameKey, semconv.K8SPodUIDKey, semconv.K8SNodeNameKey,
+	semconv.K8SContainerNameKey,
+}
+
+// Resource builds design 6.6's resource from settings, the instance name (see Instance) and the
+// downward-API env (POD_NAME, POD_UID, NODE_NAME, NAMESPACE); ResourceAttributes add to it and never
+// supply a fixed key.
+func Resource(s settings.Settings, getenv func(string) string, instance string) *resource.Resource {
 	values := make(map[attribute.Key]string, len(s.ResourceAttributes)+8)
 	for k, v := range s.ResourceAttributes {
 		values[attribute.Key(k)] = v
 	}
-
-	pod := getenv("POD_NAME")
-	instance := pod
-	if instance == "" {
-		host, err := os.Hostname()
-		if err != nil {
-			host = "unknown"
-		}
-		instance = host
+	for _, k := range fixedKeys {
+		delete(values, k)
 	}
 
 	values[semconv.ServiceNameKey] = s.Cluster
@@ -43,7 +58,7 @@ func Resource(s settings.Settings, getenv func(string) string) *resource.Resourc
 			values[key] = v
 		}
 	}
-	if pod != "" {
+	if getenv("POD_NAME") != "" {
 		values[semconv.K8SContainerNameKey] = containerName
 	}
 

@@ -24,7 +24,7 @@ const DefaultExporter = "default"
 
 const (
 	defaultCPU    = "50m"
-	defaultMemory = "64Mi"
+	defaultMemory = "96Mi"
 	minCPU        = "10m"
 	minMemory     = "32Mi"
 )
@@ -63,8 +63,9 @@ type Result struct {
 // ParseParams reads the Cluster's plugin parameters. Known keys are exporter,
 // auth, passwordSecret, sidecarCPU and sidecarMemory; any other key is returned
 // in Ignored, sorted. An invalid sidecarCPU or sidecarMemory falls back to its
-// default and is reported in Defaulted. It returns an error wrapping
-// ErrInvalidParameters only for an invalid auth.
+// default and is reported in Defaulted. An invalid auth leaves Auth at AuthPeer
+// and is returned, wrapping ErrInvalidParameters, together with every other
+// parsed field.
 func ParseParams(raw map[string]string) (Result, error) {
 	r := Result{Params: Params{
 		Exporter: DefaultExporter,
@@ -87,12 +88,13 @@ func ParseParams(raw map[string]string) (Result, error) {
 	}
 	r.Params.PasswordSecret = raw[keyPasswordSecret]
 
+	var authErr error
 	if v, ok := raw[keyAuth]; ok {
 		switch mode := AuthMode(v); mode {
 		case AuthPeer, AuthPassword:
 			r.Params.Auth = mode
 		default:
-			return Result{}, fmt.Errorf("%w: %s %q must be %q or %q", ErrInvalidParameters, keyAuth, v, AuthPeer, AuthPassword)
+			authErr = fmt.Errorf("%w: %s %q must be %q or %q", ErrInvalidParameters, keyAuth, v, AuthPeer, AuthPassword)
 		}
 	}
 
@@ -114,7 +116,7 @@ func ParseParams(raw map[string]string) (Result, error) {
 		}
 	}
 
-	return r, nil
+	return r, authErr
 }
 
 func parseQuantity(key, value, floor string) (resource.Quantity, error) {

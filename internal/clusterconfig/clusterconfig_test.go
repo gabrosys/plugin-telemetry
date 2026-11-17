@@ -3,6 +3,7 @@ package clusterconfig_test
 import (
 	"errors"
 	"regexp"
+	"strings"
 	"time"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
@@ -107,17 +108,6 @@ var _ = Describe("Build", func() {
 		in.PasswordUsername = "u"
 		_, _, err := clusterconfig.Build(in)
 		Expect(err).To(MatchError(ContainSubstring("passwordSecret")))
-	})
-
-	It("fails without a Cluster or an exporter", func() {
-		in := newInputs()
-		in.Exporter = nil
-		_, _, err := clusterconfig.Build(in)
-		Expect(err).To(HaveOccurred())
-		in = newInputs()
-		in.Cluster = nil
-		_, _, err = clusterconfig.Build(in)
-		Expect(err).To(HaveOccurred())
 	})
 
 	It("takes metrics.defaultInterval, else spec.monitoring.metricsQueriesTTL, else 30s", func() {
@@ -267,7 +257,7 @@ var _ = Describe("Build", func() {
 		Expect(mustBuild(in).ResourceAttributes).To(BeEmpty())
 	})
 
-	It("lets fixed attributes win over resourceAttributes, and resourceAttributes over OTEL_RESOURCE_ATTRIBUTES", func() {
+	It("lets label attributes win over resourceAttributes, and resourceAttributes over OTEL_RESOURCE_ATTRIBUTES", func() {
 		in := withEnv(
 			map[string]string{"OTEL_RESOURCE_ATTRIBUTES": "env=cm,a=cm,cnpg.cluster.label.l=cm"},
 			map[string]string{"OTEL_RESOURCE_ATTRIBUTES": "env=secret,a=secret,s=1"},
@@ -285,7 +275,8 @@ var _ = Describe("Build", func() {
 		s, warnings, err := clusterconfig.Build(in)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(s.ResourceAttributes).To(BeEmpty())
-		Expect(warnings).To(ConsistOf(ContainSubstring("OTEL_RESOURCE_ATTRIBUTES")))
+		Expect(warnings).To(HaveLen(1))
+		Expect(strings.Count(warnings[0], "OTEL_RESOURCE_ATTRIBUTES")).To(Equal(1))
 		Expect(warnings[0]).NotTo(ContainSubstring("secret-value-xyz"))
 	})
 

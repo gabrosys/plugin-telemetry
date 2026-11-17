@@ -103,9 +103,9 @@ var _ = Describe("Desired", func() {
 		objs, err := identity.Desired(newCluster(), refs())
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(objs.Token.Name).To(Equal("pg-telemetry-token"))
+		Expect(objs.Token.Name).To(Equal("pg.telemetry-token"))
 		Expect(objs.Token.Type).To(Equal(corev1.SecretTypeServiceAccountToken))
-		Expect(objs.Token.Annotations).To(Equal(map[string]string{"kubernetes.io/service-account.name": "pg-telemetry"}))
+		Expect(objs.Token.Annotations).To(Equal(map[string]string{"kubernetes.io/service-account.name": "pg.telemetry"}))
 		Expect(objs.Token.Data).To(BeEmpty())
 		Expect(objs.Token.StringData).To(BeEmpty())
 	})
@@ -114,8 +114,8 @@ var _ = Describe("Desired", func() {
 		objs, err := identity.Desired(newCluster(), refs())
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(objs.RoleBinding.RoleRef).To(Equal(rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "Role", Name: "pg-telemetry"}))
-		Expect(objs.RoleBinding.Subjects).To(Equal([]rbacv1.Subject{{Kind: "ServiceAccount", Name: "pg-telemetry", Namespace: "ns"}}))
+		Expect(objs.RoleBinding.RoleRef).To(Equal(rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "Role", Name: "pg.telemetry"}))
+		Expect(objs.RoleBinding.Subjects).To(Equal([]rbacv1.Subject{{Kind: "ServiceAccount", Name: "pg.telemetry", Namespace: "ns"}}))
 	})
 
 	It("fails for a Cluster without a UID", func() {

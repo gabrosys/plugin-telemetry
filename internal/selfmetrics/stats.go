@@ -1,6 +1,7 @@
 package selfmetrics
 
 import (
+	"context"
 	"maps"
 	"strconv"
 	"sync"
@@ -22,6 +23,10 @@ const (
 	OutcomeCapped  Outcome = "capped"
 	OutcomeDenied  Outcome = "denied"
 )
+
+// CollectorUp is the collector attribute of the collection metrics: CloudNativePG's label for the
+// collection that sets cnpg_collector_up (pg_collector.go:430-436 at v1.30.1).
+const CollectorUp = "Collect.up"
 
 // errorTypeRejected is the error.type of data points the backend rejected.
 const errorTypeRejected = "rejected"
@@ -78,6 +83,12 @@ type Stats struct {
 	dups  map[string]int64
 
 	checks map[string]bool
+
+	collections    int64
+	collectionErrs int64
+	lastFailed     bool
+	lastCollection float64
+	collected      bool
 
 	generation uint64
 	hash       string
@@ -158,7 +169,8 @@ func (s *Stats) Series(n int) {
 	s.series, s.seriesSet = n, true
 }
 
-// ConfigLoad records one configuration load, whose outcome is ok, error or denied, and the duplicate queries it found.
+// ConfigLoad records one configuration load of a source, with its outcome (ok, error or denied) and the
+// number of duplicate queries it found.
 func (s *Stats) ConfigLoad(source string, outcome Outcome, duplicates int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -173,6 +185,18 @@ func (s *Stats) SetChecks(checks map[string]bool) {
 	s.checks = maps.Clone(checks)
 }
 
+// Collection records one facts round: it counts the round, and the round as an error when it failed, and
+// keeps whether it failed and how long it took.
+func (s *Stats) Collection(failed bool, d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.collections++
+	if failed {
+		s.collectionErrs++
+	}
+	s.lastFailed, s.lastCollection, s.collected = failed, seconds(d), true
+}
+
 // ConfigGeneration records the active configuration generation and hash.
 func (s *Stats) ConfigGeneration(generation uint64, hash string) {
 	s.mu.Lock()
@@ -182,7 +206,7 @@ func (s *Stats) ConfigGeneration(generation uint64, hash string) {
 
 // Export records one export operation. Skipped exports only count in the export total. The last
 // success time moves only when the backend accepted at least one point.
-func (s *Stats) Export(r ExportRecord) {
+func (s *Stats) Export(ctx context.Context, r ExportRecord) {
 	s.mu.Lock()
 	s.exports[r.Outcome]++
 	if r.Outcome == OutcomeSkipped {
@@ -207,7 +231,7 @@ func (s *Stats) Export(r ExportRecord) {
 	s.mu.Unlock()
 
 	if hist != nil {
-		hist.Record(contextForRecord, seconds(r.Duration), metric.WithAttributes(exportAttributes(r)...))
+		hist.Record(ctx, seconds(r.Duration), metric.WithAttributes(exportAttributes(r)...))
 	}
 }
 
@@ -267,10 +291,8 @@ func exportAttributes(r ExportRecord) []attribute.KeyValue {
 	return attrs
 }
 
-// points returns the current points of the catalogue metric called name.
+// points returns the current points of the catalogue metric called name. The caller holds s.mu.
 func (s *Stats) points(name string) ([]point, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	var out []point
 	qd := func(k queryDB) []attribute.KeyValue {
 		return []attribute.KeyValue{attribute.String("query", k.query), attribute.String("database", k.database)}
@@ -334,6 +356,26 @@ func (s *Stats) points(name string) ([]point, bool) {
 				value = 1
 			}
 			out = append(out, point{value, []attribute.KeyValue{attribute.String("check", k)}})
+		}
+	case "cnpg_collector_collections_total":
+		if s.collected {
+			out = append(out, point{value: float64(s.collections)})
+		}
+	case "cnpg_collector_collection_errors_total":
+		if s.collected {
+			out = append(out, point{float64(s.collectionErrs), []attribute.KeyValue{attribute.String("collector", CollectorUp)}})
+		}
+	case "cnpg_collector_last_collection_error":
+		if s.collected {
+			value := 0.0
+			if s.lastFailed {
+				value = 1
+			}
+			out = append(out, point{value: value})
+		}
+	case "cnpg_collector_collection_duration_seconds":
+		if s.collected {
+			out = append(out, point{s.lastCollection, []attribute.KeyValue{attribute.String("collector", CollectorUp)}})
 		}
 	case "cnpg_otel_exports_total":
 		for k, v := range s.exports {

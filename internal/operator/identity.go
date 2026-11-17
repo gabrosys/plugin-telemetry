@@ -32,11 +32,10 @@ func (Identity) GetPluginMetadata(context.Context, *identity.GetPluginMetadataRe
 	}, nil
 }
 
-// GetPluginCapabilities declares the lifecycle, reconciler hooks and operator services.
+// GetPluginCapabilities declares the lifecycle and operator services.
 func (Identity) GetPluginCapabilities(context.Context, *identity.GetPluginCapabilitiesRequest) (*identity.GetPluginCapabilitiesResponse, error) {
 	types := []identity.PluginCapability_Service_Type{
 		identity.PluginCapability_Service_TYPE_LIFECYCLE_SERVICE,
-		identity.PluginCapability_Service_TYPE_RECONCILER_HOOKS,
 		identity.PluginCapability_Service_TYPE_OPERATOR_SERVICE,
 	}
 	capabilities := make([]*identity.PluginCapability, 0, len(types))

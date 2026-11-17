@@ -20,14 +20,16 @@ type Env struct {
 	KubeContext   string
 	CNPGVersion   string
 	PostgresImage string
+	CMCTL         string // path of the cmctl binary; empty when unset
 }
 
-// LoadEnv reads E2E_KUBE_CONTEXT, which must name a kind context, CNPG_VERSION and POSTGRES_IMAGE.
+// LoadEnv reads E2E_KUBE_CONTEXT, which must name a kind context, CNPG_VERSION, POSTGRES_IMAGE and CMCTL.
 func LoadEnv(getenv func(string) string) (Env, error) {
 	env := Env{
 		KubeContext:   getenv("E2E_KUBE_CONTEXT"),
 		CNPGVersion:   getenv("CNPG_VERSION"),
 		PostgresImage: getenv("POSTGRES_IMAGE"),
+		CMCTL:         getenv("CMCTL"),
 	}
 
 	switch {

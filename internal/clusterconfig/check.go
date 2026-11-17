@@ -2,6 +2,7 @@ package clusterconfig
 
 import (
 	"fmt"
+	"net/netip"
 	"slices"
 	"strings"
 
@@ -31,7 +32,7 @@ func Check(c *apiv1.Cluster, p podpatch.Params, e *v1alpha1.TelemetryExporter) e
 			in.Params.PasswordSecret = placeholderUser
 		}
 	}
-	if e != nil && e.Spec.EnvFrom != nil {
+	if e.Spec.EnvFrom != nil {
 		in.EnvConfigMap = map[string]string{endpointKey: placeholderEndpoint}
 	}
 
@@ -82,15 +83,13 @@ func passwordProblems(c *apiv1.Cluster, p podpatch.Params) []string {
 
 	lines := c.Spec.PostgresConfiguration.PgHBA
 	var problems []string
-	last := -1
 	for _, addr := range []string{loopbackV4, loopbackV6} {
-		i := hbaIndex(lines, role, addr, "", 0)
-		if i < 0 {
+		a := netip.MustParsePrefix(addr).Addr()
+		if !hasHostLine(lines, role, func(f []string) bool { return couldCover(f[3], a) && !isReject(f) }) {
 			problems = append(problems, fmt.Sprintf("pg_hba has no line for role %q from %s", role, addr))
 		}
-		last = max(last, i)
 	}
-	if hbaIndex(lines, role, "all", "reject", last+1) < 0 {
+	if !hasHostLine(lines, role, isReject) {
 		problems = append(problems, fmt.Sprintf("pg_hba has no reject line for role %q", role))
 	}
 
@@ -113,20 +112,41 @@ func monitoringRole(c *apiv1.Cluster, secret string) (string, bool) {
 	return "", false
 }
 
-// hbaIndex returns the index, from start on, of the first host* line for role with the address and, when
-// method is not empty, the method; -1 when there is none.
-func hbaIndex(lines []string, role, addr, method string, start int) int {
-	for i := start; i < len(lines); i++ {
-		f := fields(lines[i])
-		if len(f) < 5 || !strings.HasPrefix(f[0], "host") || !slices.Contains(strings.Split(f[2], ","), role) || f[3] != addr {
-			continue
-		}
-		if method == "" || f[4] == method {
-			return i
+// hasHostLine reports whether a host* line with at least five fields could match role and satisfies ok.
+// It is advisory and only says no when sure: user forms (all, +group, /regex, @file, quoted) and address
+// forms other than a CIDR (all, samehost, samenet, host names, IP plus mask) count as possible matches.
+// Line order and the database field are not judged.
+func hasHostLine(lines []string, role string, ok func(f []string) bool) bool {
+	for _, line := range lines {
+		f := fields(line)
+		if len(f) >= 5 && strings.HasPrefix(f[0], "host") && couldMatchUser(f[2], role) && ok(f) {
+			return true
 		}
 	}
 
-	return -1
+	return false
+}
+
+// isReject reports whether the method of a host* line is reject, after an address or an address and mask.
+func isReject(f []string) bool { return slices.Contains(f[4:], "reject") }
+
+// couldMatchUser reports whether a pg_hba user field could include role.
+func couldMatchUser(field, role string) bool {
+	for item := range strings.SplitSeq(field, ",") {
+		if item == role || item == "all" || strings.HasPrefix(item, "+") || strings.HasPrefix(item, "/") ||
+			strings.HasPrefix(item, "@") || strings.HasPrefix(item, `"`) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// couldCover reports whether a pg_hba address field could include a: false only for a CIDR that does not.
+func couldCover(addr string, a netip.Addr) bool {
+	p, err := netip.ParsePrefix(addr)
+
+	return err != nil || p.Contains(a)
 }
 
 // fields splits a pg_hba or pg_ident line on whitespace, dropping a trailing comment.

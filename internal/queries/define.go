@@ -5,7 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -90,28 +91,27 @@ type Definition struct {
 	Fingerprint     string            // hex sha256 over what shapes samples, not over scheduling or placement
 	Warnings        []string
 	Disabled        string // non-empty: never planned, with this reason
+	// ReadsSettings: the SQL or the predicate names pg_settings or pg_show_all_settings, so the run skips
+	// the per-transaction limits and pg_settings shows the server's values.
+	ReadsSettings bool
 }
 
 // Options tune Define.
 type Options struct {
 	// MaxLabelsPerSeries disables a query with more label columns. Zero turns the check off.
 	MaxLabelsPerSeries int
+	// Sensitive marks a query from a Secret: warnings and Disabled name the query and the column and
+	// quote no value, parse error or relation.
+	Sensitive bool
 }
 
-// Builtin is CNPG's hard-coded "collector" query (pg_collector.go:639-665 at v1.30.1).
-func Builtin() UserQueries {
-	return UserQueries{
-		"collector": UserQuery{
-			Query: "SELECT pg_catalog.current_database() as datname, relpages as lo_pages " +
-				"FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON (n.oid = c.relnamespace) " +
-				"WHERE n.nspname = 'pg_catalog' AND c.relname = 'pg_largeobject';",
-			TargetDatabases: []string{"*"},
-			Metrics: []Mapping{
-				{"datname": ColumnMapping{Usage: UsageLabel, Description: "Name of the database"}},
-				{"lo_pages": ColumnMapping{Usage: UsageGauge, Description: "Estimated number of pages in the pg_largeobject table"}},
-			},
-		},
+// message returns quiet for a sensitive source and verbose otherwise.
+func message(sensitive bool, quiet, verbose string) string {
+	if sensitive {
+		return quiet
 	}
+
+	return verbose
 }
 
 // Define turns a query into its Definition. Problems that leave the query usable become Warnings;
@@ -131,6 +131,7 @@ func Define(key string, q UserQuery, opts Options) Definition {
 		TargetDatabases: append([]string(nil), q.TargetDatabases...),
 		CacheSeconds:    q.CacheSeconds,
 		Columns:         make(map[string]Column),
+		ReadsSettings:   readsSettings(q.Query) || readsSettings(q.PredicateQuery),
 	}
 
 	var disabled []string
@@ -140,13 +141,15 @@ func Define(key string, q UserQuery, opts Options) Definition {
 	if q.RunOnServer != "" {
 		constraint, err := semver.NewConstraint(q.RunOnServer)
 		if err != nil {
-			disabled = append(disabled, fmt.Sprintf("invalid runonserver %q: %v", q.RunOnServer, err))
+			disabled = append(disabled, message(opts.Sensitive,
+				fmt.Sprintf("query %q: invalid runonserver", key),
+				fmt.Sprintf("invalid runonserver %q: %v", q.RunOnServer, err)))
 		} else {
 			def.RunOnServer = constraint
 		}
 	}
 
-	sources := def.addColumns(q)
+	sources := def.addColumns(key, q, opts.Sensitive)
 	def.Labels = def.labelColumns(q)
 
 	for _, column := range def.Columns {
@@ -165,28 +168,25 @@ func Define(key string, q UserQuery, opts Options) Definition {
 
 	if selectsSeveralDatabases(q.TargetDatabases) {
 		if relations := clusterWideRelations(q.Query); len(relations) > 0 {
-			def.Warnings = append(def.Warnings, fmt.Sprintf(
-				"cluster-wide relations (%s) are read in every selected database, so each reports the same rows",
-				strings.Join(relations, ", ")))
+			def.Warnings = append(def.Warnings, message(opts.Sensitive,
+				fmt.Sprintf("query %q: cluster-wide relations are read in every selected database, so each reports the same rows", key),
+				fmt.Sprintf("cluster-wide relations (%s) are read in every selected database, so each reports the same rows",
+					strings.Join(relations, ", "))))
 		}
 	}
 
-	fingerprint, err := def.fingerprint(sources)
-	if err != nil {
-		def.Disabled = fmt.Sprintf("fingerprint: %v", err)
-	}
-	def.Fingerprint = fingerprint
+	def.Fingerprint = def.fingerprint(sources)
 
 	return def
 }
 
 // addColumns fills Columns as CNPG's ToMetricMap does (mappings.go:79-232 at v1.30.1) and returns
 // the pg_version text each column was built with.
-func (d *Definition) addColumns(q UserQuery) map[string]string {
+func (d *Definition) addColumns(key string, q UserQuery, sensitive bool) map[string]string {
 	sources := make(map[string]string)
 
 	for _, item := range q.Metrics {
-		for _, columnName := range sortedKeys(item) {
+		for _, columnName := range slices.Sorted(maps.Keys(item)) {
 			cm := item[columnName]
 
 			var versions *semver.Constraints
@@ -194,7 +194,9 @@ func (d *Definition) addColumns(q UserQuery) map[string]string {
 			if cm.PGVersion != "" {
 				constraint, err := semver.NewConstraint(cm.PGVersion)
 				if err != nil {
-					d.Warnings = append(d.Warnings, fmt.Sprintf("column %q: ignoring invalid pg_version %q: %v", columnName, cm.PGVersion, err))
+					d.Warnings = append(d.Warnings, message(sensitive,
+						fmt.Sprintf("query %q column %q: ignoring invalid pg_version", key, columnName),
+						fmt.Sprintf("column %q: ignoring invalid pg_version %q: %v", columnName, cm.PGVersion, err)))
 				} else {
 					versions, source = constraint, cm.PGVersion
 				}
@@ -231,7 +233,9 @@ func (d *Definition) addColumns(q UserQuery) map[string]string {
 			case UsageDuration:
 				d.setValue(base, source, sources, metricName+"_milliseconds", cm.Description, KindGauge)
 			default:
-				d.Warnings = append(d.Warnings, fmt.Sprintf("column %q: unknown usage %q, the column is not mapped", columnName, cm.Usage))
+				d.Warnings = append(d.Warnings, message(sensitive,
+					fmt.Sprintf("query %q column %q: unknown usage, the column is not mapped", key, columnName),
+					fmt.Sprintf("column %q: unknown usage %q, the column is not mapped", columnName, cm.Usage)))
 			}
 		}
 	}
@@ -267,30 +271,13 @@ func (d *Definition) mapping(columnName string, cm ColumnMapping) map[string]flo
 		}
 	}
 
-	out := make(map[string]float64, len(chosen))
-	for k, v := range chosen {
-		out[k] = v
-	}
-
-	return out
+	return maps.Clone(chosen)
 }
 
 // numberMap converts a decoded YAML mapping whose values are all numbers.
 func numberMap(v any) (map[string]float64, bool) {
-	var raw map[string]any
-	switch m := v.(type) {
-	case map[string]any:
-		raw = m
-	case map[any]any:
-		raw = make(map[string]any, len(m))
-		for k, val := range m {
-			key, ok := k.(string)
-			if !ok {
-				return nil, false
-			}
-			raw[key] = val
-		}
-	default:
+	raw, ok := v.(map[string]any)
+	if !ok {
 		return nil, false
 	}
 
@@ -318,7 +305,7 @@ func (d *Definition) labelColumns(q UserQuery) []string {
 	var labels []string
 	seen := make(map[string]struct{})
 	for _, item := range q.Metrics {
-		for _, columnName := range sortedKeys(item) {
+		for _, columnName := range slices.Sorted(maps.Keys(item)) {
 			if _, done := seen[columnName]; done {
 				continue
 			}
@@ -330,16 +317,6 @@ func (d *Definition) labelColumns(q UserQuery) []string {
 	}
 
 	return labels
-}
-
-func sortedKeys[V any](m map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	return keys
 }
 
 type canonicalColumn struct {
@@ -363,7 +340,7 @@ type canonicalDefinition struct {
 
 // fingerprint hashes what shapes samples: namespace, SQL, predicate, primary-only and the columns. Written from plain values
 // (version constraints by source text, sorted columns, mapping values as text) so it is stable across runs.
-func (d *Definition) fingerprint(versionSources map[string]string) (string, error) {
+func (d *Definition) fingerprint(versionSources map[string]string) string {
 	canonical := canonicalDefinition{
 		Namespace:   d.Namespace,
 		SQL:         d.SQL,
@@ -371,7 +348,7 @@ func (d *Definition) fingerprint(versionSources map[string]string) (string, erro
 		PrimaryOnly: d.PrimaryOnly,
 		Columns:     []canonicalColumn{},
 	}
-	for _, name := range sortedKeys(d.Columns) {
+	for _, name := range slices.Sorted(maps.Keys(d.Columns)) {
 		column := d.Columns[name]
 		mapping := make(map[string]string, len(column.Mapping))
 		for k, v := range column.Mapping {
@@ -389,11 +366,9 @@ func (d *Definition) fingerprint(versionSources map[string]string) (string, erro
 		})
 	}
 
-	encoded, err := json.Marshal(canonical)
-	if err != nil {
-		return "", fmt.Errorf("encode definition: %w", err)
-	}
+	// Strings, a bool and string maps always encode.
+	encoded, _ := json.Marshal(canonical)
 	sum := sha256.Sum256(encoded)
 
-	return hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(sum[:])
 }

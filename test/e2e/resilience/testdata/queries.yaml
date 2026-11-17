@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: resilience-queries
+data:
+  queries: |
+    resilience_primary:
+      query: "SELECT 1 AS one"
+      primary: true
+      metrics:
+        - one:
+            usage: GAUGE
+            description: Always 1, on the primary only

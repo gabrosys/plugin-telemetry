@@ -3,10 +3,11 @@ package identity_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"strings"
 
-	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
+	"github.com/gabrosys/plugin-telemetry/internal/metadata"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -14,9 +15,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -24,446 +25,495 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/identity"
 )
 
-type appliedConfig struct {
-	Kind     string `json:"kind"`
-	Metadata struct {
-		Name string `json:"name"`
-	} `json:"metadata"`
+var (
+	errBoom   = errors.New("boom")
+	errDenied = errors.New("denied")
+)
+
+const (
+	saName     = "ServiceAccount/pg.telemetry"
+	roleName   = "Role/pg.telemetry"
+	bindName   = "RoleBinding/pg.telemetry"
+	secretRef  = "Secret/pg.telemetry-token" //nolint:gosec // an object name, not a credential
+	tokenKey   = "pg.telemetry-token"
+	manager    = "plugin-telemetry"
+	identityNS = "ns"
+)
+
+func kindName(obj client.Object) string {
+	switch obj.(type) {
+	case *corev1.ServiceAccount:
+		return "ServiceAccount/" + obj.GetName()
+	case *rbacv1.Role:
+		return "Role/" + obj.GetName()
+	case *rbacv1.RoleBinding:
+		return "RoleBinding/" + obj.GetName()
+	default:
+		return "Secret/" + obj.GetName()
+	}
+}
+
+func applyKindName(obj runtime.ApplyConfiguration) (string, map[string]any, error) {
+	raw, err := json.Marshal(obj)
+	if err != nil {
+		return "", nil, fmt.Errorf("marshal apply configuration: %w", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", nil, fmt.Errorf("unmarshal apply configuration: %w", err)
+	}
+	meta, _ := out["metadata"].(map[string]any)
+
+	return fmt.Sprintf("%v/%v", out["kind"], meta["name"]), out, nil
 }
 
 var _ = Describe("Ensurer", func() {
 	var (
-		ctx     context.Context
-		c       client.Client
-		ensurer *identity.Ensurer
-		order   []string
-		opts    []client.ApplyOption
-		secret  map[string]any
-		writes  []string
+		ctx       context.Context
+		c         client.Client
+		ensurer   *identity.Ensurer
+		calls     []string
+		creates   map[string]client.Object
+		createFM  map[string]string
+		applies   map[string]map[string]any
+		applyOpts client.ApplyOptions
+		deletes   map[string]*client.DeleteOptions
+		funcs     interceptor.Funcs
 	)
+
+	// cached returns the four desired objects with a uid each, the token with data, as the cache holds them.
+	cached := func(mutate func(*identity.Objects)) []client.Object {
+		GinkgoHelper()
+		want, err := identity.Desired(newCluster(), refs())
+		Expect(err).NotTo(HaveOccurred())
+		want.Token.Data = map[string][]byte{"token": []byte("t")}
+		if mutate != nil {
+			mutate(&want)
+		}
+		objs := []client.Object{want.ServiceAccount, want.Role, want.RoleBinding, want.Token}
+		for _, o := range objs {
+			o.SetUID(types.UID("uid-" + kindName(o)))
+			o.SetResourceVersion("17")
+		}
+
+		return objs
+	}
+
+	build := func(objs ...client.Object) {
+		GinkgoHelper()
+		c = fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).WithObjects(objs...).WithInterceptorFuncs(funcs).Build()
+		ensurer = &identity.Ensurer{Reader: c, Writer: c}
+	}
 
 	BeforeEach(func() {
 		ctx = context.Background()
-		order, opts, secret, writes = nil, nil, nil, nil
+		calls, creates, createFM, applies, deletes = nil, map[string]client.Object{}, map[string]string{}, map[string]map[string]any{}, map[string]*client.DeleteOptions{}
+		applyOpts = client.ApplyOptions{}
+		funcs = interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, o ...client.CreateOption) error {
+				name := kindName(obj)
+				calls = append(calls, "create "+name)
+				creates[name] = obj
+				opts := &client.CreateOptions{}
+				opts.ApplyOptions(o)
+				createFM[name] = opts.FieldManager
 
-		c = fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).WithInterceptorFuncs(interceptor.Funcs{
+				return c.Create(ctx, obj, o...)
+			},
 			Apply: func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, o ...client.ApplyOption) error {
-				raw, err := runtimeJSON(obj)
+				name, payload, err := applyKindName(obj)
 				if err != nil {
 					return err
 				}
-				order = append(order, raw.Kind+"/"+raw.Metadata.Name)
-				if raw.Kind == "Secret" {
-					if secret, err = payload(obj); err != nil {
-						return err
-					}
-				}
-				opts = o
+				calls = append(calls, "apply "+name)
+				applies[name] = payload
+				applyOpts = client.ApplyOptions{}
+				applyOpts.ApplyOptions(o)
 
 				return c.Apply(ctx, obj, o...)
 			},
-			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, p client.Patch, o ...client.PatchOption) error {
-				writes = append(writes, fmt.Sprintf("patch %T %s", obj, obj.GetName()))
-
-				return c.Patch(ctx, obj, p, o...)
+			Patch: func(_ context.Context, _ client.WithWatch, obj client.Object, _ client.Patch, _ ...client.PatchOption) error {
+				return fmt.Errorf("unexpected patch of %s", kindName(obj))
 			},
 			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, o ...client.DeleteOption) error {
-				writes = append(writes, fmt.Sprintf("delete %T %s", obj, obj.GetName()))
+				name := kindName(obj)
+				calls = append(calls, "delete "+name)
+				opts := &client.DeleteOptions{}
+				opts.ApplyOptions(o)
+				deletes[name] = opts
 
 				return c.Delete(ctx, obj, o...)
 			},
-		}).Build()
-		ensurer = &identity.Ensurer{Reader: c, Live: c, Writer: c}
-	})
-
-	setToken := func(data string) {
-		GinkgoHelper()
-		var s corev1.Secret
-		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry-token"}, &s)).To(Succeed())
-		s.Data = map[string][]byte{"token": []byte(data)}
-		Expect(c.Update(ctx, &s)).To(Succeed())
-	}
-
-	// foreign creates objects named like pg's identity that the plugin didn't make.
-	foreign := func(objs ...client.Object) {
-		GinkgoHelper()
-		for _, obj := range objs {
-			obj.SetNamespace("ns")
-			Expect(c.Create(ctx, obj)).To(Succeed())
 		}
-	}
-
-	ours := func(obj client.Object) bool {
-		GinkgoHelper()
-		Expect(c.Get(ctx, client.ObjectKeyFromObject(obj), obj)).To(Succeed())
-		_, labelled := obj.GetLabels()[identity.ManagedByLabel]
-
-		return labelled || len(obj.GetOwnerReferences()) > 0
-	}
-
-	cnpgRules := []rbacv1.PolicyRule{{APIGroups: []string{"postgresql.cnpg.io"}, Resources: []string{"clusters/status"}, Verbs: []string{"get", "patch"}}}
-
-	// ensured applies pg's identity, gives the token data, and gives the Role the rules CloudNativePG patches in.
-	ensured := func() types.UID {
-		GinkgoHelper()
-		_, err := ensurer.Ensure(ctx, newCluster(), refs())
-		Expect(err).NotTo(HaveOccurred())
-		setToken("t")
-
-		var role rbacv1.Role
-		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}, &role)).To(Succeed())
-		role.Rules = cnpgRules
-		Expect(c.Update(ctx, &role)).To(Succeed())
-
-		var sa corev1.ServiceAccount
-		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}, &sa)).To(Succeed())
-		writes = nil
-
-		return sa.UID
-	}
-
-	It("applies all four on first Ensure, ServiceAccount before Secret and Role before RoleBinding", func() {
-		res, err := ensurer.Ensure(ctx, newCluster(), refs())
-		Expect(err).NotTo(HaveOccurred())
-
-		want := []string{"ServiceAccount/pg-telemetry", "Role/pg-telemetry", "RoleBinding/pg-telemetry", "Secret/pg-telemetry-token"}
-		Expect(order).To(Equal(want))
-		Expect(res.Applied).To(Equal(want))
-		Expect(res.Ready).To(BeFalse())
-
-		applyOpts := &client.ApplyOptions{}
-		applyOpts.ApplyOptions(opts)
-		Expect(applyOpts.AsPatchOptions().FieldManager).To(Equal("plugin-telemetry"))
-		Expect(*applyOpts.AsPatchOptions().Force).To(BeTrue())
+		build()
 	})
 
-	It("applies nothing when the cache matches", func() {
-		_, err := ensurer.Ensure(ctx, newCluster(), refs())
-		Expect(err).NotTo(HaveOccurred())
-		order = nil
-
-		res, err := ensurer.Ensure(ctx, newCluster(), refs())
-		Expect(err).NotTo(HaveOccurred())
-		Expect(order).To(BeEmpty())
-		Expect(res.Applied).To(BeEmpty())
-	})
-
-	It("re-applies a Role whose rules drifted, a RoleBinding whose subjects drifted, and a deleted token Secret", func() {
-		_, err := ensurer.Ensure(ctx, newCluster(), refs())
-		Expect(err).NotTo(HaveOccurred())
-		order = nil
-
-		var role rbacv1.Role
-		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}, &role)).To(Succeed())
-		role.Rules[0].ResourceNames = nil
-		Expect(c.Update(ctx, &role)).To(Succeed())
-
-		var binding rbacv1.RoleBinding
-		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}, &binding)).To(Succeed())
-		binding.Subjects = append(binding.Subjects, rbacv1.Subject{Kind: "ServiceAccount", Name: "other", Namespace: "ns"})
-		Expect(c.Update(ctx, &binding)).To(Succeed())
-
-		Expect(c.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg-telemetry-token"}})).To(Succeed())
-
-		res, err := ensurer.Ensure(ctx, newCluster(), refs())
-		Expect(err).NotTo(HaveOccurred())
-		Expect(res.Applied).To(Equal([]string{"Role/pg-telemetry", "RoleBinding/pg-telemetry", "Secret/pg-telemetry-token"}))
-
-		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}, &role)).To(Succeed())
-		Expect(role.Rules[0].ResourceNames).NotTo(BeEmpty())
-	})
-
-	It("reports Ready only once the token Secret has data.token", func() {
-		ready, err := ensurer.Ready(ctx, "ns", "pg")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(ready).To(BeFalse())
-
-		_, err = ensurer.Ensure(ctx, newCluster(), refs())
-		Expect(err).NotTo(HaveOccurred())
-		ready, err = ensurer.Ready(ctx, "ns", "pg")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(ready).To(BeFalse())
-
-		setToken("t")
-		ready, err = ensurer.Ready(ctx, "ns", "pg")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(ready).To(BeTrue())
-
-		res, err := ensurer.Ensure(ctx, newCluster(), refs())
-		Expect(err).NotTo(HaveOccurred())
-		Expect(res.Ready).To(BeTrue())
-	})
-
-	It("reports Present when none, some or all of the four objects are cached", func() {
-		present := func() bool {
-			GinkgoHelper()
-			got, err := ensurer.Present(ctx, "ns", "pg")
-			Expect(err).NotTo(HaveOccurred())
-
-			return got
-		}
-		Expect(present()).To(BeFalse())
-
-		_, err := ensurer.Ensure(ctx, newCluster(), refs())
-		Expect(err).NotTo(HaveOccurred())
-		Expect(present()).To(BeTrue())
-
-		for _, obj := range identity.Members("ns", "pg")[:3] {
-			Expect(c.Delete(ctx, obj)).To(Succeed())
-		}
-		Expect(present()).To(BeTrue())
-
-		Expect(c.Delete(ctx, identity.Members("ns", "pg")[3])).To(Succeed())
-		Expect(present()).To(BeFalse())
-	})
-
-	It("sends the token Secret apply with only type, name annotation, labels and owner reference", func() {
-		_, err := ensurer.Ensure(ctx, newCluster(), refs())
+	It("creates each missing object with a plain create as plugin-telemetry, in order, and applies nothing", func() {
+		wrote, err := ensurer.Ensure(ctx, newCluster(), refs())
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(secret).To(HaveLen(4))
-		Expect(secret).To(HaveKey("apiVersion"))
-		Expect(secret).To(HaveKey("kind"))
-		Expect(secret).To(HaveKeyWithValue("type", "kubernetes.io/service-account-token"))
-		Expect(secret).To(HaveKey("metadata"))
-		meta, ok := secret["metadata"].(map[string]any)
+		want := []string{saName, roleName, bindName, secretRef}
+		Expect(wrote).To(Equal(want))
+		Expect(calls).To(Equal([]string{"create " + saName, "create " + roleName, "create " + bindName, "create " + secretRef}))
+		Expect(createFM).To(Equal(map[string]string{saName: manager, roleName: manager, bindName: manager, secretRef: manager}))
+
+		token, ok := creates[secretRef].(*corev1.Secret)
 		Expect(ok).To(BeTrue())
-		Expect(meta).To(HaveLen(5))
-		Expect(meta).To(HaveKeyWithValue("name", "pg-telemetry-token"))
-		Expect(meta).To(HaveKeyWithValue("namespace", "ns"))
-		Expect(meta).To(HaveKey("labels"))
-		Expect(meta).To(HaveKey("ownerReferences"))
-		Expect(meta).To(HaveKeyWithValue("annotations", map[string]any{"kubernetes.io/service-account.name": "pg-telemetry"}))
+		Expect(token.Type).To(Equal(corev1.SecretTypeServiceAccountToken))
+		Expect(token.Annotations).To(Equal(map[string]string{corev1.ServiceAccountNameKey: "pg.telemetry"}))
+		Expect(token.Data).To(BeEmpty())
+		Expect(token.OwnerReferences).To(HaveLen(1))
+		Expect(token.Labels).To(HaveKeyWithValue(metadata.ManagedByLabel, metadata.ManagedByValue))
 	})
 
-	It("keeps data.token when it re-applies the token Secret", func() {
+	It("writes nothing when the cache holds every object as desired", func() {
+		build(cached(nil)...)
+
+		wrote, err := ensurer.Ensure(ctx, newCluster(), refs())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(wrote).To(BeEmpty())
+		Expect(calls).To(BeEmpty())
+	})
+
+	DescribeTable("re-applies only the drifted object, pinned to its cached uid, with plugin-telemetry and force",
+		func(mutate func(*identity.Objects), drifted string) {
+			build(cached(mutate)...)
+
+			wrote, err := ensurer.Ensure(ctx, newCluster(), refs())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(wrote).To(Equal([]string{drifted}))
+			Expect(calls).To(Equal([]string{"apply " + drifted}))
+
+			meta, ok := applies[drifted]["metadata"].(map[string]any)
+			Expect(ok).To(BeTrue())
+			Expect(meta).To(HaveKeyWithValue("uid", "uid-"+drifted))
+			Expect(meta).To(HaveKeyWithValue("resourceVersion", "17"))
+			Expect(applies[drifted]).NotTo(HaveKey("data"))
+			Expect(applies[drifted]).NotTo(HaveKey("stringData"))
+			Expect(applyOpts.AsPatchOptions().FieldManager).To(Equal(manager))
+			Expect(*applyOpts.AsPatchOptions().Force).To(BeTrue())
+		},
+		Entry("label removed", func(o *identity.Objects) { delete(o.ServiceAccount.Labels, identity.ClusterLabel) }, saName),
+		Entry("owner reference removed", func(o *identity.Objects) { o.Role.OwnerReferences = nil }, roleName),
+		Entry("rule widened", func(o *identity.Objects) { o.Role.Rules[0].ResourceNames = nil }, roleName),
+		Entry("subject added", func(o *identity.Objects) {
+			o.RoleBinding.Subjects = append(o.RoleBinding.Subjects, rbacv1.Subject{Kind: "ServiceAccount", Name: "other", Namespace: identityNS})
+		}, bindName),
+	)
+
+	It("applies nothing when someone adds another, non-controller owner reference", func() {
+		build(cached(func(o *identity.Objects) {
+			o.ServiceAccount.OwnerReferences = append(o.ServiceAccount.OwnerReferences, metav1.OwnerReference{
+				APIVersion: "v1", Kind: "ConfigMap", Name: "other", UID: "other-uid",
+			})
+		})...)
+
+		wrote, err := ensurer.Ensure(ctx, newCluster(), refs())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(wrote).To(BeEmpty())
+		Expect(calls).To(BeEmpty())
+	})
+
+	It("refuses to re-label an object whose label the API server's copy has lost since the cache read", func() {
+		drifted := func(o *identity.Objects) { o.Role.Rules[0].ResourceNames = nil }
+		server := cached(drifted)
+		server[1].SetLabels(nil)
+		server[1].SetResourceVersion("18")
+		build(server...)
+		ensurer.Reader = fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).WithObjects(cached(drifted)...).Build()
+
 		_, err := ensurer.Ensure(ctx, newCluster(), refs())
-		Expect(err).NotTo(HaveOccurred())
-		setToken("t")
+		Expect(err).To(Satisfy(apierrors.IsConflict))
+		Expect(err).To(MatchError(identity.ErrInTheWay))
+		meta, ok := applies[roleName]["metadata"].(map[string]any)
+		Expect(ok).To(BeTrue())
+		Expect(meta).To(HaveKeyWithValue("resourceVersion", "17"))
 
-		var s corev1.Secret
-		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry-token"}, &s)).To(Succeed())
-		delete(s.Labels, "telemetry.gabrosys.github.io/cluster")
-		Expect(c.Update(ctx, &s)).To(Succeed())
-
-		res, err := ensurer.Ensure(ctx, newCluster(), refs())
-		Expect(err).NotTo(HaveOccurred())
-		Expect(res.Applied).To(ContainElement("Secret/pg-telemetry-token"))
-
-		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry-token"}, &s)).To(Succeed())
-		Expect(string(s.Data["token"])).To(Equal("t"))
-		Expect(s.Labels).To(HaveKey("telemetry.gabrosys.github.io/cluster"))
+		var role rbacv1.Role
+		Expect(c.Get(ctx, client.ObjectKey{Namespace: identityNS, Name: "pg.telemetry"}, &role)).To(Succeed())
+		Expect(role.Labels).To(BeEmpty())
 	})
 
-	It("fails Ensure for a Cluster without a UID before applying anything", func() {
+	It("stops the pass with ErrInTheWay when a create finds the object already there", func() {
+		inner := funcs.Create
+		funcs.Create = func(ctx context.Context, c client.WithWatch, obj client.Object, o ...client.CreateOption) error {
+			if _, ok := obj.(*rbacv1.Role); ok {
+				calls = append(calls, "create "+kindName(obj))
+
+				return apierrors.NewAlreadyExists(schema.GroupResource{Group: rbacv1.GroupName, Resource: "roles"}, obj.GetName())
+			}
+
+			return inner(ctx, c, obj, o...)
+		}
+		build()
+
+		wrote, err := ensurer.Ensure(ctx, newCluster(), refs())
+		Expect(err).To(MatchError(identity.ErrInTheWay))
+		Expect(apierrors.IsAlreadyExists(err)).To(BeTrue())
+		Expect(err).To(MatchError(ContainSubstring(roleName)))
+		Expect(wrote).To(Equal([]string{saName}))
+		Expect(calls).To(Equal([]string{"create " + saName, "create " + roleName}))
+	})
+
+	It("writes nothing over a cached token Secret of another type and returns ErrInTheWay", func() {
+		build(cached(func(o *identity.Objects) { o.Token.Type = corev1.SecretTypeOpaque })...)
+
+		wrote, err := ensurer.Ensure(ctx, newCluster(), refs())
+		Expect(err).To(MatchError(identity.ErrInTheWay))
+		Expect(err).To(MatchError(ContainSubstring(secretRef)))
+		Expect(err).To(MatchError(ContainSubstring("Opaque")))
+		Expect(wrote).To(BeEmpty())
+		Expect(calls).To(BeEmpty())
+	})
+
+	It("writes nothing over a cached token Secret with no type and returns ErrInTheWay", func() {
+		build(cached(func(o *identity.Objects) { o.Token.Type = "" })...)
+
+		wrote, err := ensurer.Ensure(ctx, newCluster(), refs())
+		Expect(err).To(MatchError(identity.ErrInTheWay))
+		Expect(err).To(MatchError(ContainSubstring(secretRef)))
+		Expect(wrote).To(BeEmpty())
+		Expect(calls).To(BeEmpty())
+	})
+
+	It("writes nothing over a cached token Secret that names another account and returns ErrInTheWay", func() {
+		build(cached(func(o *identity.Objects) { o.Token.Annotations[corev1.ServiceAccountNameKey] = "default" })...)
+
+		wrote, err := ensurer.Ensure(ctx, newCluster(), refs())
+		Expect(err).To(MatchError(identity.ErrInTheWay))
+		Expect(err).To(MatchError(ContainSubstring(secretRef)))
+		Expect(err).To(MatchError(ContainSubstring(`"default"`)))
+		Expect(wrote).To(BeEmpty())
+		Expect(calls).To(BeEmpty())
+	})
+
+	It("writes nothing over a cached RoleBinding that refers to another role and returns ErrInTheWay", func() {
+		build(cached(func(o *identity.Objects) {
+			o.RoleBinding.RoleRef = rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "view"}
+		})...)
+
+		wrote, err := ensurer.Ensure(ctx, newCluster(), refs())
+		Expect(err).To(MatchError(identity.ErrInTheWay))
+		Expect(err).To(MatchError(ContainSubstring(bindName)))
+		Expect(err).To(MatchError(ContainSubstring("ClusterRole/view")))
+		Expect(wrote).To(BeEmpty())
+		Expect(calls).To(BeEmpty())
+	})
+
+	It("returns a failed create that is not AlreadyExists without ErrInTheWay", func() {
+		funcs.Create = func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error { return errBoom }
+		build()
+
+		_, err := ensurer.Ensure(ctx, newCluster(), refs())
+		Expect(err).To(MatchError(errBoom))
+		Expect(err).NotTo(MatchError(identity.ErrInTheWay))
+		Expect(err).To(MatchError(ContainSubstring(saName)))
+	})
+
+	It("returns a failed apply with the object", func() {
+		funcs.Apply = func(context.Context, client.WithWatch, runtime.ApplyConfiguration, ...client.ApplyOption) error {
+			return errBoom
+		}
+		build(cached(func(o *identity.Objects) { o.Role.OwnerReferences = nil })...)
+
+		_, err := ensurer.Ensure(ctx, newCluster(), refs())
+		Expect(err).To(MatchError(errBoom))
+		Expect(err).To(MatchError(ContainSubstring(roleName)))
+	})
+
+	It("returns a failed cache read with the object", func() {
+		funcs.Get = func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return errBoom
+		}
+		build()
+
+		_, err := ensurer.Ensure(ctx, newCluster(), refs())
+		Expect(err).To(MatchError(errBoom))
+		Expect(err).To(MatchError(ContainSubstring(saName)))
+		Expect(calls).To(BeEmpty())
+	})
+
+	It("fails Ensure for a Cluster without a UID before writing anything", func() {
 		cl := newCluster()
 		cl.UID = ""
+
 		_, err := ensurer.Ensure(ctx, cl, refs())
 		Expect(err).To(MatchError(identity.ErrNoUID))
-		Expect(order).To(BeEmpty())
+		Expect(calls).To(BeEmpty())
 	})
 
-	It("Remove deletes the four and tolerates NotFound", func() {
-		_, err := ensurer.Ensure(ctx, newCluster(), refs())
+	It("two replicas ensuring the same new Cluster end with one object set and no lasting problem line", func() {
+		store := fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).Build()
+		cacheA := fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).Build()
+		cacheB := fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).Build()
+		a := &identity.Ensurer{Reader: cacheA, Writer: store}
+		b := &identity.Ensurer{Reader: cacheB, Writer: store}
+
+		wrote, err := a.Ensure(ctx, newCluster(), refs())
 		Expect(err).NotTo(HaveOccurred())
+		Expect(wrote).To(HaveLen(4))
 
-		Expect(ensurer.Remove(ctx, "ns", "pg")).To(Succeed())
-		key := client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}
-		Expect(c.Get(ctx, key, &corev1.ServiceAccount{})).To(Satisfy(apierrors.IsNotFound))
-		Expect(c.Get(ctx, key, &rbacv1.Role{})).To(Satisfy(apierrors.IsNotFound))
-		Expect(c.Get(ctx, key, &rbacv1.RoleBinding{})).To(Satisfy(apierrors.IsNotFound))
-		key.Name = "pg-telemetry-token"
-		Expect(c.Get(ctx, key, &corev1.Secret{})).To(Satisfy(apierrors.IsNotFound))
+		wrote, err = b.Ensure(ctx, newCluster(), refs())
+		Expect(err).To(MatchError(identity.ErrInTheWay))
+		Expect(apierrors.IsAlreadyExists(err)).To(BeTrue())
+		Expect(wrote).To(BeEmpty())
 
-		Expect(ensurer.Remove(ctx, "ns", "pg")).To(Succeed())
+		var token corev1.Secret
+		Expect(store.Get(ctx, client.ObjectKey{Namespace: identityNS, Name: tokenKey}, &token)).To(Succeed())
+		token.Data = map[string][]byte{"token": []byte("t")}
+		Expect(store.Update(ctx, &token)).To(Succeed())
+		for _, obj := range identity.Members(identityNS, "pg") {
+			Expect(store.Get(ctx, client.ObjectKeyFromObject(obj), obj)).To(Succeed())
+			obj.SetResourceVersion("")
+			Expect(cacheB.Create(ctx, obj)).To(Succeed())
+		}
+
+		wrote, err = b.Ensure(ctx, newCluster(), refs())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(wrote).To(BeEmpty())
+		Expect(b.Pending(ctx, identityNS, "pg")).To(BeEmpty())
+
+		var roles rbacv1.RoleList
+		Expect(store.List(ctx, &roles, client.InNamespace(identityNS))).To(Succeed())
+		Expect(roles.Items).To(HaveLen(1))
 	})
 
-	It("refuses, writing nothing, when an object exists in the API server without the managed-by label", func() {
-		foreign(&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "pg-telemetry"}})
-		empty := fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).Build()
-		ensurer.Reader = empty
+	Describe("Remove", func() {
+		It("deletes what it may, skips a token Secret of another type, and joins the errors", func() {
+			funcs.Delete = func(ctx context.Context, c client.WithWatch, obj client.Object, o ...client.DeleteOption) error {
+				switch obj.(type) {
+				case *rbacv1.Role:
+					return errBoom
+				case *rbacv1.RoleBinding:
+					return errDenied
+				}
+				calls = append(calls, "delete "+kindName(obj))
+				opts := &client.DeleteOptions{}
+				opts.ApplyOptions(o)
+				deletes[kindName(obj)] = opts
 
-		res, err := ensurer.Ensure(ctx, newCluster(), refs())
-		Expect(err).NotTo(HaveOccurred())
-		Expect(res.Refused).To(Equal([]string{"ServiceAccount/pg-telemetry"}))
-		Expect(res.Applied).To(BeEmpty())
-		Expect(res.Ready).To(BeFalse())
-		Expect(order).To(BeEmpty())
-	})
+				return c.Delete(ctx, obj, o...)
+			}
+			build(cached(func(o *identity.Objects) { o.Token.Type = corev1.SecretTypeOpaque })...)
 
-	It("refuses when the cache still holds the plugin's labels but the API server's object lacks them", func() {
-		foreign(&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "pg-telemetry"}})
-		stale := fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).WithObjects(&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
-			Namespace: "ns", Name: "pg-telemetry",
-			Labels: map[string]string{identity.ManagedByLabel: identity.ManagedBy, identity.ClusterLabel: "pg"},
-		}}).Build()
-		ensurer.Reader = stale
-
-		res, err := ensurer.Ensure(ctx, newCluster(), refs())
-		Expect(err).NotTo(HaveOccurred())
-		Expect(res.Refused).To(Equal([]string{"ServiceAccount/pg-telemetry"}))
-		Expect(order).To(BeEmpty())
-	})
-
-	It("refuses, writing nothing, when an object is controlled by something other than the Cluster", func() {
-		foreign(&rbacv1.Role{ObjectMeta: metav1.ObjectMeta{
-			Name:   "pg-telemetry",
-			Labels: map[string]string{identity.ManagedByLabel: identity.ManagedBy},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "postgresql.cnpg.io/v1", Kind: "Pooler", Name: "pg-telemetry", UID: "pooler-uid", Controller: ptr.To(true),
-			}},
-		}})
-
-		res, err := ensurer.Ensure(ctx, newCluster(), refs())
-		Expect(err).NotTo(HaveOccurred())
-		Expect(res.Refused).To(Equal([]string{"Role/pg-telemetry"}))
-		Expect(order).To(BeEmpty())
-	})
-
-	It("re-applies objects an earlier Cluster of the same name owns", func() {
-		earlier := newCluster()
-		earlier.UID = "earlier-uid"
-		_, err := ensurer.Ensure(ctx, earlier, refs())
-		Expect(err).NotTo(HaveOccurred())
-		order = nil
-
-		res, err := ensurer.Ensure(ctx, newCluster(), refs())
-		Expect(err).NotTo(HaveOccurred())
-		Expect(res.Refused).To(BeEmpty())
-		Expect(res.Applied).To(HaveLen(4))
-	})
-
-	It("lists the objects the plugin doesn't manage, kind and name", func() {
-		_, err := ensurer.Ensure(ctx, newCluster(), refs())
-		Expect(err).NotTo(HaveOccurred())
-		Expect(ensurer.Foreign(ctx, newCluster())).To(BeEmpty())
-
-		Expect(ensurer.Remove(ctx, "ns", "pg")).To(Succeed())
-		foreign(&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "pg-telemetry"}},
-			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "pg-telemetry-token"}})
-		Expect(ensurer.Foreign(ctx, newCluster())).To(ConsistOf("ServiceAccount/pg-telemetry", "Secret/pg-telemetry-token"))
-	})
-
-	It("Remove deletes only the objects the plugin manages", func() {
-		_, err := ensurer.Ensure(ctx, newCluster(), refs())
-		Expect(err).NotTo(HaveOccurred())
-		Expect(c.Delete(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pg-telemetry"}})).To(Succeed())
-		foreign(&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "pg-telemetry"}})
-
-		Expect(ensurer.Remove(ctx, "ns", "pg")).To(Succeed())
-		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}, &corev1.ServiceAccount{})).To(Succeed())
-		Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}, &rbacv1.Role{})).To(Satisfy(apierrors.IsNotFound))
-	})
-
-	Describe("BackOff", func() {
-		It("deletes the token and leaves CloudNativePG the ServiceAccount, Role and RoleBinding without the owner reference", func() {
-			uid := ensured()
-
-			changed, err := ensurer.BackOff(ctx, newCluster(), collidingCluster(""))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(changed).To(ConsistOf("Secret/pg-telemetry-token", "ServiceAccount/pg-telemetry", "Role/pg-telemetry", "RoleBinding/pg-telemetry"))
-
-			key := client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}
-			Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry-token"}, &corev1.Secret{})).To(Satisfy(apierrors.IsNotFound))
-
-			var sa corev1.ServiceAccount
-			Expect(c.Get(ctx, key, &sa)).To(Succeed())
-			Expect(sa.UID).To(Equal(uid))
-			Expect(ours(&sa)).To(BeFalse())
-
-			var role rbacv1.Role
-			Expect(c.Get(ctx, key, &role)).To(Succeed())
-			Expect(role.Rules).To(Equal(cnpgRules))
-			Expect(role.OwnerReferences).To(BeEmpty())
-
-			var binding rbacv1.RoleBinding
-			Expect(c.Get(ctx, key, &binding)).To(Succeed())
-			Expect(binding.OwnerReferences).To(BeEmpty())
-			Expect(binding.Subjects).To(ConsistOf(HaveField("Name", "pg-telemetry")))
-
-			writes = nil
-			changed, err = ensurer.BackOff(ctx, newCluster(), collidingCluster(""))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(changed).To(BeEmpty())
-			Expect(writes).To(BeEmpty())
+			n, err := ensurer.Remove(ctx, identityNS, "pg")
+			Expect(err).To(MatchError(errBoom))
+			Expect(err).To(MatchError(errDenied))
+			Expect(n).To(Equal(1))
+			Expect(calls).To(Equal([]string{"delete " + saName}))
+			Expect(c.Get(ctx, client.ObjectKey{Namespace: identityNS, Name: tokenKey}, &corev1.Secret{})).To(Succeed())
 		})
 
-		It("deletes the ServiceAccount and RoleBinding a Cluster with another serviceAccountName doesn't use", func() {
-			ensured()
+		It("skips a token Secret with no type", func() {
+			build(cached(func(o *identity.Objects) { o.Token.Type = "" })...)
 
-			changed, err := ensurer.BackOff(ctx, newCluster(), collidingCluster("shared"))
+			n, err := ensurer.Remove(ctx, identityNS, "pg")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(changed).To(ConsistOf("Secret/pg-telemetry-token", "ServiceAccount/pg-telemetry", "Role/pg-telemetry", "RoleBinding/pg-telemetry"))
-
-			key := client.ObjectKey{Namespace: "ns", Name: "pg-telemetry"}
-			Expect(c.Get(ctx, key, &corev1.ServiceAccount{})).To(Satisfy(apierrors.IsNotFound))
-			Expect(c.Get(ctx, key, &rbacv1.RoleBinding{})).To(Satisfy(apierrors.IsNotFound))
-			var role rbacv1.Role
-			Expect(c.Get(ctx, key, &role)).To(Succeed())
-			Expect(role.OwnerReferences).To(BeEmpty())
-			Expect(role.Rules).To(Equal(cnpgRules))
+			Expect(n).To(Equal(3))
+			Expect(c.Get(ctx, client.ObjectKey{Namespace: identityNS, Name: tokenKey}, &corev1.Secret{})).To(Succeed())
 		})
 
-		It("writes nothing to objects the plugin didn't make", func() {
-			cnpg := []metav1.OwnerReference{{
-				APIVersion: "postgresql.cnpg.io/v1", Kind: "Cluster", Name: "pg-telemetry", UID: "other-uid", Controller: ptr.To(true),
-			}}
-			meta := metav1.ObjectMeta{Name: "pg-telemetry", Labels: map[string]string{identity.ManagedByLabel: "cloudnative-pg"}, OwnerReferences: cnpg}
-			token := metav1.ObjectMeta{Name: "pg-telemetry-token"}
-			foreign(&corev1.ServiceAccount{ObjectMeta: meta}, &rbacv1.Role{ObjectMeta: *meta.DeepCopy()},
-				&rbacv1.RoleBinding{ObjectMeta: *meta.DeepCopy(), RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: "pg-telemetry"}},
-				&corev1.Secret{ObjectMeta: token})
+		It("skips a token Secret that names another account, which the identities policy would deny deleting", func() {
+			build(cached(func(o *identity.Objects) { o.Token.Annotations[corev1.ServiceAccountNameKey] = "default" })...)
 
-			changed, err := ensurer.BackOff(ctx, newCluster(), collidingCluster(""))
+			n, err := ensurer.Remove(ctx, identityNS, "pg")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(changed).To(BeEmpty())
-			Expect(writes).To(BeEmpty())
-			Expect(c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: "pg-telemetry-token"}, &corev1.Secret{})).To(Succeed())
+			Expect(n).To(Equal(3))
+			Expect(calls).NotTo(ContainElement("delete " + secretRef))
+			Expect(c.Get(ctx, client.ObjectKey{Namespace: identityNS, Name: tokenKey}, &corev1.Secret{})).To(Succeed())
+		})
+
+		It("deletes the four with uid and resourceVersion preconditions and counts them", func() {
+			build(cached(nil)...)
+
+			n, err := ensurer.Remove(ctx, identityNS, "pg")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(4))
+			Expect(deletes).To(HaveLen(4))
+			for name, opts := range deletes {
+				Expect(opts.Preconditions).NotTo(BeNil(), name)
+				Expect(opts.Preconditions.UID).To(HaveValue(Equal(types.UID("uid-"+name))), name)
+				Expect(opts.Preconditions.ResourceVersion).To(HaveValue(Not(BeEmpty())), name)
+			}
+		})
+
+		It("counts nothing and fails nothing for objects the cache lacks or that are already gone", func() {
+			n, err := ensurer.Remove(ctx, identityNS, "pg")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(BeZero())
+
+			funcs.Delete = func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+				return apierrors.NewNotFound(schema.GroupResource{Resource: "x"}, "x")
+			}
+			build(cached(nil)...)
+			n, err = ensurer.Remove(ctx, identityNS, "pg")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(BeZero())
+		})
+
+		It("returns a failed cache read", func() {
+			funcs.Get = func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+				return errBoom
+			}
+			build()
+
+			n, err := ensurer.Remove(ctx, identityNS, "pg")
+			Expect(err).To(MatchError(errBoom))
+			Expect(n).To(BeZero())
 		})
 	})
 
-	It("wraps a failed apply with the object", func() {
-		failing := fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).WithInterceptorFuncs(interceptor.Funcs{
-			Apply: func(context.Context, client.WithWatch, runtime.ApplyConfiguration, ...client.ApplyOption) error {
-				return fmt.Errorf("boom")
-			},
-		}).Build()
-		_, err := (&identity.Ensurer{Reader: failing, Live: failing, Writer: failing}).Ensure(ctx, newCluster(), refs())
-		Expect(err).To(MatchError(ContainSubstring("boom")))
-		Expect(strings.ToLower(err.Error())).To(ContainSubstring("serviceaccount"))
+	Describe("Pending", func() {
+		pending := func() []string {
+			GinkgoHelper()
+			lines, err := ensurer.Pending(ctx, identityNS, "pg")
+			Expect(err).NotTo(HaveOccurred())
+
+			return lines
+		}
+
+		It("lists each missing object, a wrong-typed token and a token without data, and nothing once ready", func() {
+			const missing = " is not in the plugin's cache: not created yet, or not the plugin's"
+			Expect(pending()).To(ConsistOf(saName+missing, roleName+missing, bindName+missing, secretRef+missing))
+
+			build(cached(func(o *identity.Objects) { o.Token.Type = corev1.SecretTypeOpaque })...)
+			Expect(pending()).To(ConsistOf(secretRef + " has type Opaque, not kubernetes.io/service-account-token: delete it"))
+
+			build(cached(func(o *identity.Objects) { o.Token.Data = nil })...)
+			Expect(pending()).To(ConsistOf(secretRef + " has no data.token yet"))
+
+			build(cached(nil)...)
+			Expect(pending()).To(BeEmpty())
+		})
+
+		It("lists a token Secret with no type, one that names another account, and a RoleBinding that refers to another role", func() {
+			build(cached(func(o *identity.Objects) { o.Token.Type = "" })...)
+			Expect(pending()).To(ConsistOf(secretRef + ` has type "", not kubernetes.io/service-account-token: delete it`))
+
+			build(cached(func(o *identity.Objects) { o.Token.Annotations[corev1.ServiceAccountNameKey] = "default" })...)
+			Expect(pending()).To(ConsistOf(secretRef + ` names ServiceAccount "default", not "pg.telemetry": delete it`))
+
+			build(cached(func(o *identity.Objects) {
+				o.RoleBinding.RoleRef = rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "view"}
+			})...)
+			Expect(pending()).To(ConsistOf(bindName + ` refers to ClusterRole/view, not Role/pg.telemetry: delete it`))
+		})
+
+		It("lists a missing Role beside the other three being cached", func() {
+			objs := cached(nil)
+			build(objs[0], objs[2], objs[3])
+
+			Expect(pending()).To(ConsistOf(roleName + " is not in the plugin's cache: not created yet, or not the plugin's"))
+		})
+
+		It("returns a failed cache read", func() {
+			funcs.Get = func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+				return errBoom
+			}
+			build()
+
+			_, err := ensurer.Pending(ctx, identityNS, "pg")
+			Expect(err).To(MatchError(errBoom))
+		})
 	})
 })
-
-func runtimeJSON(obj runtime.ApplyConfiguration) (appliedConfig, error) {
-	var out appliedConfig
-	raw, err := json.Marshal(obj)
-	if err != nil {
-		return out, fmt.Errorf("marshal apply configuration: %w", err)
-	}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return out, fmt.Errorf("unmarshal apply configuration: %w", err)
-	}
-
-	return out, nil
-}
-
-// collidingCluster is a Cluster named like pg's identity, using serviceAccount when it is not empty.
-func collidingCluster(serviceAccount string) *apiv1.Cluster {
-	c := &apiv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "pg-telemetry", Namespace: "ns", UID: "other-uid"}}
-	c.Spec.ServiceAccountName = serviceAccount
-
-	return c
-}
-
-func payload(obj runtime.ApplyConfiguration) (map[string]any, error) {
-	raw, err := json.Marshal(obj)
-	if err != nil {
-		return nil, fmt.Errorf("marshal apply configuration: %w", err)
-	}
-	var out map[string]any
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("unmarshal apply configuration: %w", err)
-	}
-
-	return out, nil
-}

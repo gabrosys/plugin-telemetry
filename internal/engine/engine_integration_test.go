@@ -4,29 +4,28 @@ package engine_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"maps"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
-	"slices"
-	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
-	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"go.yaml.in/yaml/v4"
 	"k8s.io/utils/clock"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/gabrosys/plugin-telemetry/internal/engine"
 	"github.com/gabrosys/plugin-telemetry/internal/export"
-	"github.com/gabrosys/plugin-telemetry/internal/export/otlptest"
-	"github.com/gabrosys/plugin-telemetry/internal/featuregate"
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
+	"github.com/gabrosys/plugin-telemetry/internal/planner"
+	"github.com/gabrosys/plugin-telemetry/internal/settings"
+	"github.com/gabrosys/plugin-telemetry/test/otlptest"
 	"github.com/gabrosys/plugin-telemetry/test/pgtest"
 )
 
@@ -93,6 +92,7 @@ type fixture struct {
 	valid         string // a valid configuration for the receiver
 	srv           *otlptest.Server
 	done          chan error
+	gather        func(context.Context, settings.Settings) (planner.Facts, error) // nil reads the facts from PostgreSQL
 }
 
 func newFixture(planInterval time.Duration) *fixture {
@@ -129,109 +129,26 @@ exporter:
 // run starts the engine and stops it at cleanup.
 func (f *fixture) run() {
 	GinkgoHelper()
+	f.runConfig(engine.FileConfig(f.config))
+}
+
+// runConfig starts the engine on cfg and stops it at cleanup.
+func (f *fixture) runConfig(cfg engine.Config) {
+	GinkgoHelper()
 	ctx, cancel := context.WithCancel(ctrllog.IntoContext(context.Background(), GinkgoLogr))
 	f.done = make(chan error, 1)
 	go func() {
-		f.done <- engine.Run(ctx, engine.Options{
-			Config: engine.FileConfig(f.config),
-			Gates:  featuregate.NewRegistry(),
+		f.done <- engine.RunWith(ctx, engine.Options{
+			Config: cfg,
 			Clock:  clock.RealClock{},
 			Rand:   rand.New(rand.NewPCG(1, 2)), //nolint:gosec // seeded jitter for the test
 			Getenv: func(string) string { return "" },
-		})
+		}, f.gather)
 	}()
 	DeferCleanup(func() {
 		cancel()
 		Eventually(f.done).WithTimeout(20 * time.Second).Should(Receive(BeNil()))
 	})
-}
-
-// point is one exported data point.
-type point struct {
-	attrs map[string]string
-	value float64
-	at    time.Time
-}
-
-func attrMap(kvs []*commonpb.KeyValue) map[string]string {
-	out := make(map[string]string, len(kvs))
-	for _, kv := range kvs {
-		switch v := kv.GetValue().GetValue().(type) {
-		case *commonpb.AnyValue_StringValue:
-			out[kv.GetKey()] = v.StringValue
-		case *commonpb.AnyValue_IntValue:
-			out[kv.GetKey()] = strconv.FormatInt(v.IntValue, 10)
-		default:
-			out[kv.GetKey()] = kv.GetValue().String()
-		}
-	}
-	return out
-}
-
-func numberValue(p *metricpb.NumberDataPoint) float64 {
-	if v, ok := p.GetValue().(*metricpb.NumberDataPoint_AsInt); ok {
-		return float64(v.AsInt)
-	}
-	return p.GetAsDouble()
-}
-
-// points returns the data points of the metric called name in the requests received at or after since, in order.
-func points(srv *otlptest.Server, name string, since time.Time) []point {
-	var out []point
-	for _, req := range srv.Requests() {
-		if req.Received.Before(since) {
-			continue
-		}
-		for _, rm := range req.Metrics.GetResourceMetrics() {
-			for _, sm := range rm.GetScopeMetrics() {
-				for _, m := range sm.GetMetrics() {
-					if m.GetName() != name {
-						continue
-					}
-					dps := append(m.GetGauge().GetDataPoints(), m.GetSum().GetDataPoints()...)
-					for _, dp := range dps {
-						out = append(out, point{attrs: attrMap(dp.GetAttributes()), value: numberValue(dp), at: req.Received})
-					}
-				}
-			}
-		}
-	}
-	return out
-}
-
-// last returns the last value of the series of name whose attributes include want.
-func last(srv *otlptest.Server, name string, want map[string]string) (float64, bool) {
-	value, found := 0.0, false
-	for _, p := range points(srv, name, time.Time{}) {
-		if matches(p.attrs, want) {
-			value, found = p.value, true
-		}
-	}
-	return value, found
-}
-
-// metricNames lists the names of the metrics received, sorted.
-func metricNames(srv *otlptest.Server) []string {
-	seen := map[string]bool{}
-	for _, req := range srv.Requests() {
-		for _, rm := range req.Metrics.GetResourceMetrics() {
-			for _, sm := range rm.GetScopeMetrics() {
-				for _, m := range sm.GetMetrics() {
-					seen[m.GetName()] = true
-				}
-			}
-		}
-	}
-	return slices.Sorted(maps.Keys(seen))
-}
-
-func matches(attrs, want map[string]string) bool {
-	for k, v := range want {
-		if attrs[k] != v {
-			return false
-		}
-	}
-	return true
 }
 
 func expectUp(srv *otlptest.Server, want float64) func(Gomega) {
@@ -294,8 +211,31 @@ var _ = Describe("Run", Ordered, func() {
 		}).WithTimeout(30 * time.Second).WithPolling(250 * time.Millisecond).Should(Succeed())
 	})
 
+	It("exports every built-in a file configuration has, which has no Cluster", func() {
+		Eventually(func(g Gomega) {
+			reqs := f.srv.Requests()
+			g.Expect(reqs).NotTo(BeEmpty())
+			req := reqs[len(reqs)-1]
+			g.Expect(attrValues(requestPoints(req, "cnpg_collector_pg_wal"), "value")).To(
+				ConsistOf("count", "size", "min", "max", "keep", "slots_max"))
+			g.Expect(attrValues(requestPoints(req, "cnpg_collector_pg_wal_archive_status"), "value")).To(ConsistOf("ready", "done"))
+			for _, name := range []string{
+				"cnpg_collector_wal_records", "cnpg_collector_wal_fpi", "cnpg_collector_wal_bytes", "cnpg_collector_wal_buffers_full",
+			} {
+				g.Expect(requestPoints(req, name)).To(HaveLen(1), name)
+			}
+			g.Expect(attrValues(requestPoints(req, "cnpg_collector_sync_replicas"), "value")).To(ConsistOf("observed"))
+			version := requestPoints(req, "cnpg_collector_postgres_version")
+			g.Expect(version).To(HaveLen(1))
+			g.Expect(version[0].attrs).To(Equal(map[string]string{"full": "18.7", "cluster": "it"}))
+			g.Expect(version[0].value).To(Equal(18.7))
+			g.Expect(requestPoints(req, "cnpg_collector_collections_total")).To(HaveLen(1))
+			g.Expect(requestPoints(req, "cnpg_collector_fencing_on")).To(BeEmpty())
+		}).WithTimeout(30 * time.Second).WithPolling(250 * time.Millisecond).Should(Succeed())
+	})
+
 	It("exports a query appended to a source file within debounce + interval + export interval", func() {
-		bound := engine.WatchDebounce + queryInterval + exportInterval + slack
+		bound := engine.Debounce + queryInterval + exportInterval + slack
 		start := time.Now()
 		writeFile(f.extra, extraQuery)
 
@@ -322,6 +262,106 @@ var _ = Describe("Run", Ordered, func() {
 		info := points(f.srv, "cnpg_otel_config_info", since)
 		Expect(info[len(info)-1].attrs).To(HaveKeyWithValue("generation", "2"))
 	})
+})
+
+// backends counts the backends that match cond, other than the probe's own.
+func backends(ctx context.Context, cond string, args ...any) (n int, err error) {
+	cc, err := pg.ConnConfig(server.MonitorConfig(GinkgoT().TempDir()), "postgres")
+	if err != nil {
+		return 0, err
+	}
+	conn, err := pgx.ConnectConfig(ctx, cc)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { err = errors.Join(err, conn.Close(context.WithoutCancel(ctx))) }()
+	err = conn.QueryRow(ctx, "SELECT count(*) FROM pg_stat_activity WHERE ("+cond+") AND pid <> pg_backend_pid()", args...).Scan(&n)
+	return n, err
+}
+
+// sessions counts the backends of user in state, other than the probe's own; an empty state counts every one.
+func sessions(ctx context.Context, user, state string) (int, error) {
+	return backends(ctx, "usename = $1 AND ($2 = '' OR state = $2)", user, state)
+}
+
+// holdQuery keeps a connection of the pool busy for 5 s.
+const holdQuery = `hold_probe:
+  query: SELECT 1 AS value FROM pg_sleep(5)
+  metrics:
+    - value:
+        usage: GAUGE
+        description: Holds a connection.
+`
+
+var _ = Describe("Run on a change of the postgres user", func() {
+	It("closes the old pool's connections at once on a postgres settings change", func(ctx SpecContext) {
+		const other, otherPassword = "other_monitor", "other-password"
+		Expect(server.Exec(ctx, "CREATE ROLE "+other+" LOGIN PASSWORD '"+otherPassword+"'")).To(Succeed())
+		Expect(server.Exec(ctx, "GRANT pg_monitor TO "+other)).To(Succeed())
+		DeferCleanup(func(ctx SpecContext) { Expect(server.Exec(ctx, "DROP ROLE "+other)).To(Succeed()) })
+
+		f := newFixture(time.Second)
+		writeFile(f.extra, holdQuery)
+		writeFile(f.config, f.valid)
+		f.run()
+		Eventually(expectUp(f.srv, 1)).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+		// A run of hold_probe is in flight while other runs leave idle connections in the pool.
+		Eventually(func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "active") }).
+			WithTimeout(15 * time.Second).WithPolling(50 * time.Millisecond).Should(BeNumerically(">", 0))
+		Eventually(func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "idle") }).
+			WithTimeout(5 * time.Second).WithPolling(50 * time.Millisecond).Should(BeNumerically(">", 0))
+
+		dir := filepath.Dir(f.config)
+		writeFile(filepath.Join(dir, "other.pw"), otherPassword+"\n")
+		changed := strings.Replace(f.valid, "user: "+pgtest.MonitorUser+"\n", "user: "+other+"\n", 1)
+		changed = strings.Replace(changed, server.MonitorConfig(dir).PasswordFile, filepath.Join(dir, "other.pw"), 1)
+		Expect(changed).NotTo(Equal(f.valid))
+		writeFile(f.config, changed)
+
+		Eventually(func() (int, error) { return sessions(ctx, other, "") }).
+			WithTimeout(10 * time.Second).WithPolling(50 * time.Millisecond).Should(BeNumerically(">", 0))
+		Eventually(func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "idle") }).
+			WithTimeout(2 * time.Second).WithPolling(50 * time.Millisecond).Should(BeZero())
+		// hold_probe's busy connection closes when its run releases it.
+		Eventually(func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "") }).
+			WithTimeout(8 * time.Second).WithPolling(100 * time.Millisecond).Should(BeZero())
+	}, SpecTimeout(time.Minute))
+})
+
+// switchable is a Config that has nothing to run while off is set.
+type switchable struct {
+	engine.Config
+	off atomic.Bool
+}
+
+func (c *switchable) Settings() (settings.Settings, []byte, error) {
+	if c.off.Load() {
+		return settings.Settings{}, nil, fmt.Errorf("%w: switched off", engine.ErrNoConfiguration)
+	}
+	return c.Config.Settings()
+}
+
+var _ = Describe("Run on ErrNoConfiguration", func() {
+	It("closes the pool's connections and resumes on the next settings", func(ctx SpecContext) {
+		f := newFixture(time.Second)
+		writeFile(f.config, f.valid)
+		cfg := &switchable{Config: engine.FileConfig(f.config)}
+		f.runConfig(cfg)
+		Eventually(expectUp(f.srv, 1)).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+		Eventually(func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "") }).
+			WithTimeout(5 * time.Second).Should(BeNumerically(">", 0))
+
+		cfg.off.Store(true)
+		writeFile(f.config, f.valid+"# touched\n")
+		Eventually(func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "") }).
+			WithTimeout(10 * time.Second).WithPolling(100 * time.Millisecond).Should(BeZero())
+
+		cfg.off.Store(false)
+		since := time.Now()
+		writeFile(f.config, f.valid)
+		Eventually(func() []point { return points(f.srv, "cnpg_backends_total", since) }).
+			WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).ShouldNot(BeEmpty())
+	}, SpecTimeout(time.Minute))
 })
 
 // resourceHas reports whether a request received at or after since has a resource attribute key=value.
@@ -404,11 +444,47 @@ var _ = Describe("Run when the exporter files change", func() {
 		Eventually(header("one")).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(BeTrue())
 
 		writeFile(headers, "x-probe=two")
-		Eventually(header("two")).WithTimeout(engine.WatchDebounce + exportInterval + slack + time.Second).
+		Eventually(header("two")).WithTimeout(engine.Debounce + exportInterval + slack + time.Second).
 			WithPolling(50 * time.Millisecond).Should(BeTrue())
 		info := points(f.srv, "cnpg_otel_config_info", time.Time{})
 		Expect(info[len(info)-1].attrs).To(HaveKeyWithValue("generation", "1"))
 	})
+})
+
+var _ = Describe("Run on a source change", func() {
+	It("keeps the snapshot entries of unchanged queries across a replan", func(SpecContext) {
+		f := newFixture(time.Second)
+		writeFile(filepath.Join(filepath.Dir(f.config), "default-queries.yaml"), "")
+		writeFile(f.extra, alphaBeta)
+		// An hour between runs: after the first run of each query only the snapshot entry keeps exporting it.
+		valid := strings.Replace(f.valid, fmt.Sprintf("defaultInterval: %s\n", queryInterval), "defaultInterval: 1h\n", 1)
+		Expect(valid).NotTo(Equal(f.valid))
+		writeFile(f.config, valid)
+		f.run()
+		Eventually(func(g Gomega) {
+			g.Expect(points(f.srv, "cnpg_alpha_value", time.Time{})).NotTo(BeEmpty())
+			g.Expect(points(f.srv, "cnpg_beta_value", time.Time{})).NotTo(BeEmpty())
+		}).WithTimeout(20 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+
+		writeFile(f.extra, strings.Replace(alphaBeta, "SELECT 2", "SELECT 20", 1))
+		var replanned time.Time
+		Eventually(func() bool {
+			for _, p := range points(f.srv, "cnpg_otel_config_info", time.Time{}) {
+				if p.attrs["generation"] == "2" {
+					replanned = p.at
+					return true
+				}
+			}
+			return false
+		}).WithTimeout(10 * time.Second).WithPolling(50 * time.Millisecond).Should(BeTrue())
+		Eventually(func() []float64 { return values(points(f.srv, "cnpg_beta_value", replanned.Add(time.Nanosecond))) }).
+			WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(ContainElement(20.0))
+
+		after, withAlpha := requestsSince(f.srv, replanned.Add(time.Nanosecond), "cnpg_alpha_value")
+		Expect(after).To(BeNumerically(">", 0))
+		Expect(withAlpha).To(Equal(after), "alpha's entry stays although alpha does not run again")
+		Expect(values(points(f.srv, "cnpg_beta_value", replanned.Add(time.Nanosecond)))).To(HaveEach(20.0), "beta's old entry is dropped")
+	}, SpecTimeout(time.Minute))
 })
 
 const slowQuery = `slow_probe:
@@ -504,8 +580,9 @@ var _ = Describe("Run while PostgreSQL is not up yet", func() {
 var _ = Describe("Run when PostgreSQL stops", func() {
 	It("gathers facts right after a run loses its connection", func(ctx SpecContext) {
 		// The planning cycle is far longer than the spec: after a successful round only an early round, asked
-		// for by a run that lost its connection, can bring cnpg_collector_up to 0. The way back to 1 comes from
-		// the facts backoff or further early rounds, bounded by the pool's reconnect backoff.
+		// for by a run that lost its connection, can bring cnpg_collector_up to 0. The way back to 1 is not
+		// asserted: a failed early round leaves the planning timer alone, so it comes with the next planning
+		// cycle (see "comes back after an outage") or with a run that loses its connection after the restart.
 		f := newFixture(time.Hour)
 		writeFile(f.config, f.valid)
 		f.run()
@@ -514,9 +591,21 @@ var _ = Describe("Run when PostgreSQL stops", func() {
 		Expect(server.StopServer(ctx)).To(Succeed())
 		DeferCleanup(func(ctx SpecContext) { Expect(server.StartServer(ctx)).To(Succeed()) })
 		Eventually(expectUp(f.srv, 0)).WithTimeout(10 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+	}, SpecTimeout(2*time.Minute))
+})
 
-		Expect(server.StartServer(ctx)).To(Succeed())
-		Eventually(expectUp(f.srv, 1)).WithTimeout(45 * time.Second).WithPolling(250 * time.Millisecond).Should(Succeed())
+var _ = Describe("Run on a smart shutdown of PostgreSQL", func() {
+	It("lets the postmaster exit within 10 s (the shutdown probe) plus a run although jobs keep running", func(ctx SpecContext) {
+		f := newFixture(time.Hour)
+		writeFile(f.config, f.valid)
+		f.run()
+		Eventually(expectUp(f.srv, 1)).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+
+		DeferCleanup(server.StartServer)
+		Expect(server.Exec(ctx, "CHECKPOINT")).To(Succeed())
+		Expect(server.StopServerSmart(ctx)).To(Succeed())
+		Eventually(func() bool { return server.Running(ctx) }).
+			WithTimeout(15 * time.Second).WithPolling(250 * time.Millisecond).Should(BeFalse())
 	}, SpecTimeout(2*time.Minute))
 })
 
@@ -541,5 +630,203 @@ var _ = Describe("Run when PostgreSQL comes back after an outage", func() {
 		Eventually(expectUp(f.srv, 1)).WithTimeout(planInterval + exportInterval + 2*slack).
 			WithPolling(100 * time.Millisecond).Should(Succeed())
 		GinkgoWriter.Printf("cnpg_collector_up was 1 again %s after the restart\n", time.Since(back))
+	}, SpecTimeout(2*time.Minute))
+})
+
+const failingCounter = `start_probe:
+  query: SELECT n FROM start_probe_table
+  metrics:
+    - n:
+        usage: COUNTER
+        description: A counter whose table goes away.
+`
+
+var _ = Describe("Run when a counter's query fails", func() {
+	It("keeps a counter's start time across a failed run of its query", func(ctx SpecContext) {
+		Expect(server.Exec(ctx, "CREATE TABLE start_probe_table AS SELECT 10 AS n")).To(Succeed())
+		DeferCleanup(func(ctx SpecContext) {
+			Expect(server.Exec(ctx, "DROP TABLE IF EXISTS start_probe_table")).To(Succeed())
+		})
+		Expect(server.Exec(ctx, "GRANT SELECT ON start_probe_table TO "+pgtest.MonitorUser)).To(Succeed())
+
+		f := newFixture(time.Hour)
+		writeFile(filepath.Join(filepath.Dir(f.config), "default-queries.yaml"), "")
+		writeFile(f.extra, failingCounter)
+		writeFile(f.config, f.valid)
+		f.run()
+
+		var first []point
+		Eventually(func() []point {
+			first = points(f.srv, "cnpg_start_probe_n", time.Time{})
+			return first
+		}).WithTimeout(20 * time.Second).WithPolling(100 * time.Millisecond).ShouldNot(BeEmpty())
+		start := first[0].start
+		Expect(start).NotTo(BeZero())
+
+		Expect(server.Exec(ctx, "DROP TABLE start_probe_table")).To(Succeed())
+		failed := map[string]string{"query": "start_probe", "outcome": "error"}
+		Eventually(func(g Gomega) {
+			n, ok := last(f.srv, "cnpg_otel_query_runs_total", failed)
+			g.Expect(ok).To(BeTrue())
+			g.Expect(n).To(BeNumerically(">=", 1))
+		}).WithTimeout(20 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+
+		Expect(server.Exec(ctx, "CREATE TABLE start_probe_table AS SELECT 15 AS n")).To(Succeed())
+		Expect(server.Exec(ctx, "GRANT SELECT ON start_probe_table TO "+pgtest.MonitorUser)).To(Succeed())
+		Eventually(func() []float64 { return values(points(f.srv, "cnpg_start_probe_n", time.Time{})) }).
+			WithTimeout(20 * time.Second).WithPolling(100 * time.Millisecond).Should(ContainElement(15.0))
+
+		for _, p := range points(f.srv, "cnpg_start_probe_n", time.Time{}) {
+			Expect(p.start).To(Equal(start), "value %v", p.value)
+		}
+	}, SpecTimeout(2*time.Minute))
+})
+
+// primaryOnlyProbe is a query that runs on a primary only.
+const primaryOnlyProbe = `primary_probe:
+  primary: true
+  query: SELECT 7 AS value
+  metrics:
+    - value:
+        usage: GAUGE
+        description: A probe that runs on a primary only.
+`
+
+// realFacts reads the facts from PostgreSQL the way the engine does, on a connection of its own.
+func realFacts(ctx context.Context, dir string) (planner.Facts, error) {
+	cfg := server.MonitorConfig(dir)
+	cc, err := pg.ConnConfig(cfg, "postgres")
+	if err != nil {
+		return planner.Facts{}, fmt.Errorf("connection config: %w", err)
+	}
+	conn, err := pgx.ConnectConfig(ctx, cc)
+	if err != nil {
+		return planner.Facts{}, fmt.Errorf("connect: %w", err)
+	}
+	facts, err := planner.GatherFacts(ctx, conn, pg.GuardSQL(cfg))
+	if cerr := conn.Close(context.WithoutCancel(ctx)); cerr != nil {
+		err = errors.Join(err, fmt.Errorf("close: %w", cerr))
+	}
+	return facts, err
+}
+
+var _ = Describe("Run when the server's role changes", func() {
+	It("drops a primary-only query at the first facts round that reports recovery, and plans it again after promotion", func(_ SpecContext) {
+		var inRecovery atomic.Bool
+		dir := GinkgoT().TempDir()
+		f := newFixture(time.Second)
+		f.gather = func(ctx context.Context, _ settings.Settings) (planner.Facts, error) {
+			facts, err := realFacts(ctx, dir)
+			facts.InRecovery = inRecovery.Load()
+			return facts, err
+		}
+		writeFile(f.extra, primaryOnlyProbe)
+		writeFile(f.config, f.valid)
+		f.run()
+		Eventually(func() []point { return points(f.srv, "cnpg_primary_probe_value", time.Time{}) }).
+			WithTimeout(20 * time.Second).WithPolling(100 * time.Millisecond).ShouldNot(BeEmpty())
+
+		inRecovery.Store(true)
+		var dropped time.Time
+		Eventually(func() []point {
+			dropped = time.Now()
+			return points(f.srv, "cnpg_primary_probe_value", dropped.Add(-2*exportInterval))
+		}).WithTimeout(time.Second + exportInterval + slack + 2*exportInterval).WithPolling(100 * time.Millisecond).Should(BeEmpty())
+		Consistently(func() []point { return points(f.srv, "cnpg_primary_probe_value", dropped) }).
+			WithTimeout(3 * exportInterval).WithPolling(100 * time.Millisecond).Should(BeEmpty())
+
+		inRecovery.Store(false)
+		since := time.Now()
+		Eventually(func() []point { return points(f.srv, "cnpg_primary_probe_value", since) }).
+			WithTimeout(time.Second + queryInterval + exportInterval + 2*slack).WithPolling(100 * time.Millisecond).ShouldNot(BeEmpty())
+	}, SpecTimeout(2*time.Minute))
+})
+
+var _ = Describe("Run on a superuser session role", func() {
+	It("refuses a superuser session, closes its connections, and resumes after NOSUPERUSER", func(ctx SpecContext) {
+		const role = "cnpg_super_test"
+		planInterval := 5 * time.Second
+		DeferCleanup(func(ctx SpecContext) { Expect(server.Exec(ctx, "DROP ROLE IF EXISTS "+role)).To(Succeed()) })
+		Expect(server.Exec(ctx, "CREATE ROLE "+role+" LOGIN SUPERUSER PASSWORD '"+pgtest.MonitorPassword+"'")).To(Succeed())
+
+		f := newFixture(planInterval)
+		superuser := strings.Replace(f.valid, "user: "+pgtest.MonitorUser+"\n", "user: "+role+"\n", 1)
+		Expect(superuser).NotTo(Equal(f.valid))
+		writeFile(f.config, superuser)
+		f.run()
+
+		check := map[string]string{"check": "superuser"}
+		Eventually(func(g Gomega) {
+			got, ok := last(f.srv, "cnpg_otel_check", check)
+			g.Expect(ok).To(BeTrue())
+			g.Expect(got).To(Equal(1.0))
+		}).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+		Expect(points(f.srv, "cnpg_collector_up", time.Time{})).To(BeEmpty())
+		Eventually(func() (int, error) { return backends(ctx, "application_name = 'cnpg_otel_engine'") }).
+			WithTimeout(planInterval).WithPolling(250 * time.Millisecond).Should(BeZero())
+
+		Expect(server.Exec(ctx, "ALTER ROLE "+role+" NOSUPERUSER")).To(Succeed())
+		Eventually(expectUp(f.srv, 1)).WithTimeout(2*planInterval + slack).WithPolling(100 * time.Millisecond).Should(Succeed())
+		Eventually(func(g Gomega) {
+			got, ok := last(f.srv, "cnpg_otel_check", check)
+			g.Expect(ok).To(BeTrue())
+			g.Expect(got).To(Equal(0.0))
+		}).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+	}, SpecTimeout(2*time.Minute))
+
+	// The timed facts round is a minute away, so only a run's own role check can reach the refusal in time.
+	It("refuses at the next run, not at the next planInterval, when the role becomes a superuser", func(ctx SpecContext) {
+		role := pgtest.MonitorUser
+		planInterval := time.Minute
+		DeferCleanup(func(ctx SpecContext) { Expect(server.Exec(ctx, "ALTER ROLE "+role+" NOSUPERUSER")).To(Succeed()) })
+
+		f := newFixture(planInterval)
+		writeFile(f.config, f.valid)
+		f.run()
+		Eventually(expectUp(f.srv, 1)).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+		Eventually(func() []point { return points(f.srv, "cnpg_backends_total", time.Time{}) }).
+			WithTimeout(10 * time.Second).WithPolling(100 * time.Millisecond).ShouldNot(BeEmpty())
+
+		Expect(server.Exec(ctx, "ALTER ROLE "+role+" SUPERUSER")).To(Succeed())
+		check := map[string]string{"check": "superuser"}
+		Eventually(func(g Gomega) {
+			got, ok := last(f.srv, "cnpg_otel_check", check)
+			g.Expect(ok).To(BeTrue())
+			g.Expect(got).To(Equal(1.0))
+		}).WithTimeout(planInterval / 3).WithPolling(100 * time.Millisecond).Should(Succeed())
+		Eventually(func() (int, error) { return backends(ctx, "application_name = 'cnpg_otel_engine'") }).
+			WithTimeout(5 * time.Second).WithPolling(250 * time.Millisecond).Should(BeZero())
+		// The series stop well before the next timed round.
+		Eventually(func() []point {
+			return points(f.srv, "cnpg_backends_total", time.Now().Add(-2*exportInterval))
+		}).WithTimeout(planInterval / 3).WithPolling(100 * time.Millisecond).Should(BeEmpty())
+	}, SpecTimeout(2*time.Minute))
+
+	It("closes its connections and runs no query once the role becomes a superuser, and resumes after NOSUPERUSER", func(ctx SpecContext) {
+		role := pgtest.MonitorUser
+		planInterval := 5 * time.Second
+		DeferCleanup(func(ctx SpecContext) { Expect(server.Exec(ctx, "ALTER ROLE "+role+" NOSUPERUSER")).To(Succeed()) })
+
+		f := newFixture(planInterval)
+		writeFile(f.config, f.valid)
+		f.run()
+		Eventually(expectUp(f.srv, 1)).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+		engineBackends := func() (int, error) { return backends(ctx, "application_name = 'cnpg_otel_engine'") }
+		Eventually(engineBackends).WithTimeout(5 * time.Second).WithPolling(100 * time.Millisecond).Should(BeNumerically(">", 0))
+
+		Expect(server.Exec(ctx, "ALTER ROLE "+role+" SUPERUSER")).To(Succeed())
+		check := map[string]string{"check": "superuser"}
+		Eventually(func(g Gomega) {
+			got, ok := last(f.srv, "cnpg_otel_check", check)
+			g.Expect(ok).To(BeTrue())
+			g.Expect(got).To(Equal(1.0))
+		}).WithTimeout(2*planInterval + slack).WithPolling(100 * time.Millisecond).Should(Succeed())
+		Eventually(engineBackends).WithTimeout(planInterval).WithPolling(250 * time.Millisecond).Should(BeZero())
+
+		Expect(server.Exec(ctx, "ALTER ROLE "+role+" NOSUPERUSER")).To(Succeed())
+		since := time.Now()
+		Eventually(func() []point { return points(f.srv, "cnpg_backends_total", since) }).
+			WithTimeout(2*planInterval + slack).WithPolling(100 * time.Millisecond).ShouldNot(BeEmpty())
+		Eventually(expectUp(f.srv, 1)).WithTimeout(2*planInterval + slack).WithPolling(100 * time.Millisecond).Should(Succeed())
 	}, SpecTimeout(2*time.Minute))
 })

@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -18,17 +20,17 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/kubesource"
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
-	"github.com/gabrosys/plugin-telemetry/internal/sources"
 )
 
 // fakeKube is a Kubernetes source over the settings of a testdata file, with virtual file names.
 type fakeKube struct {
-	base    engine.Config
-	mutate  func(*settings.Settings)
-	files   map[string][]byte
-	mu      sync.Mutex
-	started int
-	reads   []string
+	base       engine.Config
+	mutate     func(*settings.Settings)
+	files      map[string][]byte
+	mu         sync.Mutex
+	started    int
+	panicStart bool // Start panics
+	reads      []string
 }
 
 func newFakeKube(config string, files map[string][]byte, mutate func(*settings.Settings)) *fakeKube {
@@ -48,6 +50,10 @@ type sensitiveKube struct {
 func (s *sensitiveKube) Sensitive(name string) bool { return strings.HasPrefix(name, s.prefix) }
 
 func (f *fakeKube) Name() string { return "kubernetes" }
+
+func (*fakeKube) Sensitive(string) bool { return false }
+
+func (*fakeKube) Cluster() (*apiv1.Cluster, bool) { return nil, false }
 
 func (f *fakeKube) Settings() (settings.Settings, []byte, error) {
 	s, raw, err := f.base.Settings()
@@ -70,7 +76,7 @@ func (f *fakeKube) ReadFile(name string) ([]byte, error) {
 	return nil, &fs.PathError{Op: "read", Path: name, Err: fs.ErrNotExist}
 }
 
-func (f *fakeKube) Watch(ctx context.Context, _ []string, _ func(), _ ...sources.WatchOption) error {
+func (f *fakeKube) Watch(ctx context.Context, _ func() []string, _ func()) error {
 	<-ctx.Done()
 	return nil
 }
@@ -79,6 +85,9 @@ func (f *fakeKube) Start(ctx context.Context) error {
 	f.mu.Lock()
 	f.started++
 	f.mu.Unlock()
+	if f.panicStart {
+		panic("source broke")
+	}
 	<-ctx.Done()
 	return nil
 }
@@ -109,11 +118,11 @@ var _ = Describe("instance in Kubernetes mode", func() {
 
 	useRun := func(src *fakeKube) {
 		DeferCleanup(cli.SetKubeSources(
-			func(o kubesource.Options) (cli.KubeSource, error) {
+			func(o kubesource.Options) cli.KubeSource {
 				gotOptions = append(gotOptions, o)
-				return src, nil
+				return src
 			},
-			func(context.Context, kubesource.Options) (engine.Config, error) {
+			func(context.Context, kubesource.Options, time.Duration) (engine.Config, error) {
 				return nil, errors.New("unexpected snapshot")
 			}))
 	}
@@ -151,7 +160,32 @@ var _ = Describe("instance in Kubernetes mode", func() {
 		Expect(src.started).To(Equal(1))
 	})
 
-	DescribeTable("logs the variable and idles instead of exiting when the environment is incomplete",
+	It("idles instead of exiting when the Kubernetes source panics", func() {
+		setKubeEnv()
+		src := newFakeKube("engine-valid.yaml", nil, nil)
+		src.panicStart = true
+		useRun(src)
+		DeferCleanup(cli.SetMemlimit(func(func(string) ([]byte, error), func(string) string) (int64, error) { return 0, nil }))
+
+		logFile := filepath.Join(GinkgoT().TempDir(), "log.json")
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			_, err := execute(ctx, "--log-destination", logFile, "instance")
+			done <- err
+		}()
+		Eventually(func(g Gomega) {
+			raw, err := os.ReadFile(logFile) //nolint:gosec // a file the spec created
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(string(raw)).To(ContainSubstring("recovered from a panic"))
+			g.Expect(string(raw)).To(ContainSubstring("the metrics engine stopped"))
+		}).WithTimeout(10 * time.Second).Should(Succeed())
+		Consistently(done, 300*time.Millisecond).ShouldNot(Receive())
+		cancel()
+		Eventually(done, 20*time.Second).Should(Receive(BeNil()))
+	})
+
+	DescribeTable("logs the variable at error level and idles when the environment is incomplete",
 		func(unset string) {
 			setKubeEnv()
 			GinkgoT().Setenv(unset, "")
@@ -167,7 +201,11 @@ var _ = Describe("instance in Kubernetes mode", func() {
 			Eventually(func(g Gomega) {
 				raw, err := os.ReadFile(logFile) //nolint:gosec // a file the spec created
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(string(raw)).To(ContainSubstring(unset))
+				g.Expect(string(raw)).To(And(
+					ContainSubstring(unset),
+					ContainSubstring(`"level":"error"`),
+					ContainSubstring("outside the Pod pass --config"),
+				))
 			}).WithTimeout(5 * time.Second).Should(Succeed())
 			Consistently(done, 300*time.Millisecond).ShouldNot(Receive())
 			cancel()
@@ -222,8 +260,11 @@ var _ = Describe("instance tools in Kubernetes mode", func() {
 			src = fk
 		}
 		DeferCleanup(cli.SetKubeSources(
-			func(kubesource.Options) (cli.KubeSource, error) { return nil, errors.New("unexpected run") },
-			func(_ context.Context, o kubesource.Options) (engine.Config, error) {
+			func(kubesource.Options) cli.KubeSource {
+				Fail("unexpected run")
+				return nil
+			},
+			func(_ context.Context, o kubesource.Options, _ time.Duration) (engine.Config, error) {
 				gotOptions = append(gotOptions, o)
 				return s, nil
 			}))
@@ -247,13 +288,15 @@ var _ = Describe("instance tools in Kubernetes mode", func() {
 	})
 
 	It("print-config reads a snapshot, shows the virtual names and never a Secret value", func() {
-		useSnapshot(newFakeKube("engine-valid.yaml", virtualFiles(), virtual))
-		out, err := execute(context.Background(), "instance", "print-config", "--offline")
-		Expect(err).NotTo(HaveOccurred())
+		useSnapshot(newFakeKube("engine-unreachable.yaml", virtualFiles(), virtual))
+		out, err := execute(context.Background(), "instance", "print-config")
+		Expect(err).To(MatchError(ContainSubstring("connect to PostgreSQL")))
 		Expect(out).To(ContainSubstring("ok configmap/queries/probe.yaml"))
 		Expect(out).To(ContainSubstring("ok metricqueryset/extra"))
-		Expect(out).To(ContainSubstring("authorization: <redacted>"))
-		Expect(out).To(ContainSubstring("x-tenant: <redacted>"))
+		Expect(out).To(ContainSubstring("headersFile: secret/otlp/headers"))
+		Expect(out).NotTo(ContainSubstring("# headers"))
+		Expect(out).NotTo(ContainSubstring("authorization"))
+		Expect(out).NotTo(ContainSubstring("x-tenant"))
 		Expect(out).NotTo(ContainSubstring("s3cr3t-token"))
 		Expect(out).NotTo(ContainSubstring("acme-secret"))
 
@@ -261,21 +304,6 @@ var _ = Describe("instance tools in Kubernetes mode", func() {
 		Expect(gotOptions[0]).To(Equal(kubesource.Options{
 			Namespace: "app", Cluster: "demo", APIServer: "https://10.0.0.1:443", TokenDir: metadata.SidecarTokenDir,
 		}))
-	})
-
-	It("print-config shows only the parse error of a headers Secret in HTTP syntax", func() {
-		const value = "Authorization: Basic dXNlcjpwYXNzd29yZA=="
-		files := virtualFiles()
-		files["secret/otlp/headers"] = []byte(value)
-		useSnapshot(newFakeKube("engine-valid.yaml", files, virtual))
-
-		out, err := execute(context.Background(), "instance", "print-config", "--offline")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(out).To(ContainSubstring("# headers\nunreadable: "))
-		Expect(out).To(ContainSubstring("entry 1:"))
-		for _, part := range append(strings.Fields(value), "dXNlcjpwYXNzd29yZA") {
-			Expect(out).NotTo(ContainSubstring(part))
-		}
 	})
 
 	It("validate reads a snapshot", func() {
@@ -301,15 +329,35 @@ var _ = Describe("instance tools in Kubernetes mode", func() {
 		useSnapshot(newFakeKube("engine-valid.yaml", nil, nil))
 		for _, sub := range []string{"validate", "test", "print-config"} {
 			_, err := execute(context.Background(), "instance", sub)
-			Expect(err).To(MatchError(ContainSubstring("CLUSTER_NAME")), sub)
+			Expect(err).To(MatchError(And(ContainSubstring("CLUSTER_NAME"), HaveSuffix("; outside the Pod pass --config"))), sub)
 		}
 		Expect(gotOptions).To(BeEmpty())
+	})
+
+	It("names a snapshot failure once and gives the snapshot the wait cap", func() {
+		var gotWait time.Duration
+		DeferCleanup(cli.SetKubeSources(
+			func(kubesource.Options) cli.KubeSource {
+				Fail("unexpected run")
+				return nil
+			},
+			func(_ context.Context, _ kubesource.Options, wait time.Duration) (engine.Config, error) {
+				gotWait = wait
+				return nil, errors.New("sidecar token /t/token did not appear: context deadline exceeded")
+			}))
+		for _, sub := range []string{"validate", "test", "print-config"} {
+			gotWait = 0
+			out, err := execute(context.Background(), "instance", sub)
+			Expect(err).To(HaveOccurred(), sub)
+			Expect(strings.Count(out+err.Error(), "kubernetes snapshot:")).To(Equal(1), sub)
+			Expect(gotWait).To(Equal(cli.SnapshotTimeout), sub)
+		}
 	})
 
 	It("never prints the content of a malformed Secret-backed source", func() {
 		files := virtualFiles()
 		files["secret/queries/q.yaml"] = []byte("a:\n  query: SELECT 1\nb: SENTINELVALUE-do-not-leak\n")
-		useSnapshot(newFakeKube("engine-valid.yaml", files, func(s *settings.Settings) {
+		useSnapshot(newFakeKube("engine-unreachable.yaml", files, func(s *settings.Settings) {
 			virtual(s)
 			s.Sources = append(s.Sources, "secret/queries/q.yaml")
 		}).sensitive("secret/"))
@@ -319,8 +367,8 @@ var _ = Describe("instance tools in Kubernetes mode", func() {
 		Expect(out).To(ContainSubstring("error secret/queries/q.yaml -: "))
 		Expect(out + err.Error()).NotTo(ContainSubstring("SENTINE"))
 
-		out, err = execute(context.Background(), "instance", "print-config", "--offline")
-		Expect(err).NotTo(HaveOccurred())
+		out, err = execute(context.Background(), "instance", "print-config")
+		Expect(err).To(HaveOccurred())
 		Expect(out).To(ContainSubstring("invalid secret/queries/q.yaml: "))
 		Expect(out).NotTo(ContainSubstring("SENTINE"))
 	})

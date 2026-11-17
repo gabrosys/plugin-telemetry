@@ -1,6 +1,7 @@
 package otlp_test
 
 import (
+	"strconv"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -49,6 +50,29 @@ var _ = Describe("Lines", func() {
 	})
 })
 
+var _ = Describe("Decode", func() {
+	It("decodes the complete lines and reports the bytes up to the last newline", func() {
+		lines, consumed, err := otlp.Decode([]byte(counterLine + gaugeLine + counterLine[:10]))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lines).To(HaveLen(2))
+		Expect(lines[0].Time).To(Equal(time.Unix(2, 0)))
+		Expect(lines[1].Time).To(Equal(time.Unix(3, 0)))
+		Expect(consumed).To(Equal(len(counterLine + gaugeLine)))
+	})
+
+	It("decodes nothing from a chunk without a newline", func() {
+		lines, consumed, err := otlp.Decode([]byte(counterLine[:10]))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(lines).To(BeEmpty())
+		Expect(consumed).To(BeZero())
+	})
+
+	It("names the byte offset of a line that is not OTLP JSON", func() {
+		_, _, err := otlp.Decode([]byte("not json\n"))
+		Expect(err).To(MatchError(ContainSubstring("decode the line at byte 0")))
+	})
+})
+
 var _ = Describe("readers", func() {
 	var lines []otlp.Line
 
@@ -63,23 +87,14 @@ var _ = Describe("readers", func() {
 	})
 
 	It("returns the points, the last matching point and the lines since a time", func() {
-		Expect(otlp.Points(lines, "calls_total")).To(HaveLen(1))
+		Expect(otlp.Points(lines, "calls_total")).To(HaveExactElements(HaveField("Monotonic", true)))
+		Expect(otlp.Points(lines, "up")).To(HaveExactElements(HaveField("Monotonic", false)))
 		p, ok := otlp.Last(lines, "calls_total", map[string]string{"hook": "EVALUATE"})
 		Expect(ok).To(BeTrue())
 		Expect(p.Value).To(Equal(3.0))
 		_, ok = otlp.Last(lines, "calls_total", map[string]string{"hook": "other"})
 		Expect(ok).To(BeFalse())
 		Expect(otlp.Since(lines, time.Unix(3, 0))).To(HaveLen(1))
-	})
-
-	It("returns the points of a metric with the resource they came in", func() {
-		Expect(otlp.ResourcePoints(lines, "calls_total")).To(Equal([]otlp.ResourcePoint{{
-			Resource: map[string]string{"service.name": "plugin-telemetry"},
-			Point: otlp.Point{
-				Time: time.Unix(2, 0), Attrs: map[string]string{"hook": "EVALUATE"}, Value: 3,
-			},
-		}}))
-		Expect(otlp.ResourcePoints(lines, "missing")).To(BeEmpty())
 	})
 
 	It("returns one export per resource with its series, named by metric and attributes", func() {
@@ -133,5 +148,50 @@ var _ = Describe("readers", func() {
 		Expect(shapes).To(Equal([]otlp.Shape{{
 			Name: "calls_total", Type: otlp.TypeSum, Monotonic: &monotonic, Attributes: []string{"hook"},
 		}}))
+	})
+
+	It("fails on a metric with no data", func() {
+		var l otlp.Lines
+		Expect(l.Update([]byte(`{"resourceMetrics":[{"resource":{"attributes":[]},"scopeMetrics":[{"scope":{"name":"scope-a"},` +
+			`"metrics":[{"name":"up"}]}]}]}` + "\n"))).To(Succeed())
+
+		_, err := otlp.Shapes(l.All(), "scope-a")
+		Expect(err).To(MatchError(ContainSubstring("metric up")))
+	})
+})
+
+var _ = Describe("ExportAt", func() {
+	// exportLines returns, for each time in seconds, a line with the config info point and a line with an up point.
+	exportLines := func(seconds ...int) []otlp.Line {
+		var raw string
+		for _, s := range seconds {
+			ns := strconv.Itoa(s) + "000000000"
+			raw += `{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"` + otlp.ConfigInfo + `","gauge":{"dataPoints":[{"timeUnixNano":"` + ns + `","asInt":"1"}]}}]}]}]}` + "\n"
+			raw += `{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"up","gauge":{"dataPoints":[{"timeUnixNano":"` + ns + `","asInt":"1"}]}}]}]}]}` + "\n"
+		}
+		lines, _, err := otlp.Decode([]byte(raw))
+		Expect(err).NotTo(HaveOccurred())
+		return lines
+	}
+	at := func(s int) time.Time { return time.Unix(int64(s), 0) }
+
+	It("lists the export times sorted and without duplicates", func() {
+		lines := exportLines(20, 10, 30)
+		Expect(otlp.ExportTimes(append(lines, lines...))).To(Equal([]time.Time{at(10), at(20), at(30)}))
+	})
+
+	It("returns exactly the lines of one export", func() {
+		lines := exportLines(10, 20, 30)
+		Expect(otlp.ExportAt(lines, at(10))).To(Equal(lines[0:2]))
+		Expect(otlp.ExportAt(lines, at(20))).To(Equal(lines[2:4]))
+	})
+
+	It("runs the last export to the end of the slice", func() {
+		lines := exportLines(10, 20, 30)
+		Expect(otlp.ExportAt(lines, at(30))).To(Equal(lines[4:]))
+	})
+
+	It("returns no lines for a time past every export", func() {
+		Expect(otlp.ExportAt(exportLines(10, 20), at(21))).To(BeEmpty())
 	})
 })

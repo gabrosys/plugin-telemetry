@@ -40,7 +40,13 @@ type MetricQuerySetSpec struct {
 // Query is one query and the metrics its result columns produce. Field names and meanings are those
 // of a CloudNativePG custom query.
 type Query struct {
-	// Query is the SQL to run.
+	// Query is the SQL to run. It runs in a read-only transaction that sets the sidecar's limits
+	// (statement_timeout, lock_timeout, idle_in_transaction_session_timeout, jit,
+	// max_parallel_workers_per_gather), unless Query or PredicateQuery names pg_settings or
+	// pg_show_all_settings, bare or as pg_catalog.pg_settings or pg_catalog.pg_show_all_settings,
+	// outside comments and string constants. Such a query reports the server's values and is bounded
+	// by the run deadline instead. A query that reaches pg_settings only through a view or a function
+	// reports the sidecar's limits.
 	Query string `json:"query"`
 
 	// PredicateQuery is SQL that must return a row for Query to run.

@@ -1,8 +1,10 @@
-# want: set exporter.endpoint or envFrom
+# want: set at least one of configMap or secret
 apiVersion: telemetry.gabrosys.github.io/v1alpha1
 kind: TelemetryExporter
 metadata:
   name: default
   namespace: app
 spec:
+  exporter:
+    endpoint: http://collector:4318
   envFrom: {}

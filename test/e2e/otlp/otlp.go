@@ -45,27 +45,40 @@ type Lines struct {
 	lines []Line
 }
 
+// Decode decodes the complete lines of chunk and returns them with the bytes consumed, through the last
+// newline. A trailing line without a newline is left for the caller to present again.
+func Decode(chunk []byte) (lines []Line, consumed int, err error) {
+	for {
+		i := bytes.IndexByte(chunk[consumed:], '\n')
+		if i < 0 {
+			return lines, consumed, nil
+		}
+		raw := chunk[consumed : consumed+i]
+		if len(bytes.TrimSpace(raw)) > 0 {
+			req := &colmetricpb.ExportMetricsServiceRequest{}
+			if err := unmarshal.Unmarshal(raw, req); err != nil {
+				return nil, 0, fmt.Errorf("decode the line at byte %d: %w", consumed, err)
+			}
+			lines = append(lines, Line{Time: latest(req), Request: req})
+		}
+		consumed += i + 1
+	}
+}
+
 // Update decodes the complete lines of file past those decoded before; file is the whole file.
 // A trailing line without a newline is left for the next call.
 func (l *Lines) Update(file []byte) error {
 	if len(file) < l.read {
 		return fmt.Errorf("%w: %d bytes decoded, %d now", ErrShrank, l.read, len(file))
 	}
-	for {
-		i := bytes.IndexByte(file[l.read:], '\n')
-		if i < 0 {
-			return nil
-		}
-		raw := file[l.read : l.read+i]
-		if len(bytes.TrimSpace(raw)) > 0 {
-			req := &colmetricpb.ExportMetricsServiceRequest{}
-			if err := unmarshal.Unmarshal(raw, req); err != nil {
-				return fmt.Errorf("decode the line at byte %d: %w", l.read, err)
-			}
-			l.lines = append(l.lines, Line{Time: latest(req), Request: req})
-		}
-		l.read += i + 1
+	lines, consumed, err := Decode(file[l.read:])
+	if err != nil {
+		return fmt.Errorf("decode the file past byte %d: %w", l.read, err)
 	}
+	l.lines = append(l.lines, lines...)
+	l.read += consumed
+
+	return nil
 }
 
 // All returns the lines decoded so far, in file order.
@@ -84,11 +97,43 @@ func Since(lines []Line, t time.Time) []Line {
 	return out
 }
 
+// ConfigInfo is the metric every export carries once, which marks the export's collection time.
+const ConfigInfo = "cnpg_otel_config_info"
+
+// ExportTimes returns the collection times of the exports in lines, sorted, from the one ConfigInfo point each carries.
+func ExportTimes(lines []Line) []time.Time {
+	var out []time.Time
+	for _, p := range Points(lines, ConfigInfo) {
+		out = append(out, p.Time)
+	}
+	slices.SortFunc(out, func(a, b time.Time) int { return a.Compare(b) })
+	return slices.Compact(out)
+}
+
+// ExportAt returns the lines from t up to the next export time in lines; the last export runs to the end.
+func ExportAt(lines []Line, t time.Time) []Line {
+	end := time.Time{}
+	for _, next := range ExportTimes(lines) {
+		if next.After(t) {
+			end = next
+			break
+		}
+	}
+	var out []Line
+	for _, l := range Since(lines, t) {
+		if end.IsZero() || l.Time.Before(end) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
 // Point is one number data point of a gauge or a sum.
 type Point struct {
-	Time  time.Time
-	Attrs map[string]string
-	Value float64
+	Time      time.Time
+	Attrs     map[string]string
+	Value     float64
+	Monotonic bool // a point of a monotonic sum
 }
 
 // Points returns the number data points of the metric called name, in file order.
@@ -98,42 +143,14 @@ func Points(lines []Line, name string) []Point {
 		if m.GetName() != name {
 			return
 		}
+		monotonic := m.GetSum().GetIsMonotonic()
 		dps := append(slices.Clone(m.GetGauge().GetDataPoints()), m.GetSum().GetDataPoints()...)
 		for _, dp := range dps {
-			out = append(out, Point{Time: unixNano(dp.GetTimeUnixNano()), Attrs: Attributes(dp.GetAttributes()), Value: value(dp)})
+			out = append(out, Point{
+				Time: unixNano(dp.GetTimeUnixNano()), Attrs: Attributes(dp.GetAttributes()), Value: value(dp), Monotonic: monotonic,
+			})
 		}
 	})
-	return out
-}
-
-// ResourcePoint is a Point and the attributes of the resource that reported it.
-type ResourcePoint struct {
-	Resource map[string]string
-	Point
-}
-
-// ResourcePoints returns the number data points of the metric called name with their resource, in file order.
-func ResourcePoints(lines []Line, name string) []ResourcePoint {
-	var out []ResourcePoint
-	for _, l := range lines {
-		for _, rm := range l.Request.GetResourceMetrics() {
-			resource := Attributes(rm.GetResource().GetAttributes())
-			for _, sm := range rm.GetScopeMetrics() {
-				for _, m := range sm.GetMetrics() {
-					if m.GetName() != name {
-						continue
-					}
-					dps := append(slices.Clone(m.GetGauge().GetDataPoints()), m.GetSum().GetDataPoints()...)
-					for _, dp := range dps {
-						out = append(out, ResourcePoint{
-							Resource: resource,
-							Point:    Point{Time: unixNano(dp.GetTimeUnixNano()), Attrs: Attributes(dp.GetAttributes()), Value: value(dp)},
-						})
-					}
-				}
-			}
-		}
-	}
 	return out
 }
 
@@ -299,7 +316,11 @@ func Shapes(lines []Line, scope string) ([]Shape, error) {
 		if s.GetName() != scope {
 			return
 		}
-		shape, keys := shapeOf(m)
+		shape, keys, err := shapeOf(m)
+		if err != nil {
+			errs = append(errs, err)
+			return
+		}
 		a, ok := seen[m.GetName()]
 		if !ok {
 			seen[m.GetName()] = &acc{shape: shape, keys: keys}
@@ -316,13 +337,14 @@ func Shapes(lines []Line, scope string) ([]Shape, error) {
 	out := make([]Shape, 0, len(seen))
 	for _, name := range slices.Sorted(maps.Keys(seen)) {
 		a := seen[name]
+		// empty, not nil, so the golden JSON reads []
 		a.shape.Attributes = append([]string{}, slices.Sorted(maps.Keys(a.keys))...)
 		out = append(out, a.shape)
 	}
 	return out, nil
 }
 
-func shapeOf(m *metricpb.Metric) (Shape, map[string]bool) {
+func shapeOf(m *metricpb.Metric) (Shape, map[string]bool, error) {
 	s := Shape{Name: m.GetName()}
 	var attrs [][]*commonpb.KeyValue
 	switch d := m.GetData().(type) {
@@ -353,6 +375,8 @@ func shapeOf(m *metricpb.Metric) (Shape, map[string]bool) {
 		for _, dp := range d.Summary.GetDataPoints() {
 			attrs = append(attrs, dp.GetAttributes())
 		}
+	default:
+		return Shape{}, nil, fmt.Errorf("metric %s: no data", m.GetName())
 	}
 	keys := map[string]bool{}
 	for _, kvs := range attrs {
@@ -360,7 +384,7 @@ func shapeOf(m *metricpb.Metric) (Shape, map[string]bool) {
 			keys[kv.GetKey()] = true
 		}
 	}
-	return s, keys
+	return s, keys, nil
 }
 
 func describe(s Shape) string {

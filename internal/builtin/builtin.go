@@ -43,9 +43,10 @@ func Samples(c *apiv1.Cluster, pod, cluster string, f *Facts) []queries.Sample {
 		out = clusterSamples(c, pod, f)
 	}
 	if f != nil {
-		full := fmt.Sprintf("%d.%d", f.Version.Major(), f.Version.Patch())
-		// Both parts are integers, so the parse cannot fail.
-		v, _ := strconv.ParseFloat(full, 64)
+		major, patch := f.Version.Major(), f.Version.Patch()
+		full := fmt.Sprintf("%d.%d", major, patch)
+		scale := math.Pow10(len(strconv.FormatUint(patch, 10)))
+		v := (float64(major)*scale + float64(patch)) / scale
 		out = append(out, gauge("postgres_version", "Postgres version", v, label("full", full), label("cluster", cluster)))
 	}
 

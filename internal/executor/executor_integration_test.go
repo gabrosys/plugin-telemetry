@@ -29,6 +29,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 	"github.com/gabrosys/plugin-telemetry/test/pgtest"
 )
 
@@ -132,9 +133,7 @@ var _ = Describe("Executor", func() {
 		var cm struct {
 			Data map[string]string `yaml:"data"`
 		}
-		raw, err := os.ReadFile("../queries/testdata/default-monitoring-v1.30.1.yaml")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(yaml.Unmarshal(raw, &cm)).To(Succeed())
+		Expect(yaml.Unmarshal(fixture.Read(GinkgoTB(), "../queries/testdata", "default-monitoring-v1.30.1.yaml"), &cm)).To(Succeed())
 		parsed, err := queries.Parse([]byte(cm.Data["queries"]))
 		Expect(err).NotTo(HaveOccurred())
 		for k, q := range queries.Builtin() {
@@ -229,9 +228,7 @@ var _ = Describe("Executor", func() {
 		var cm struct {
 			Data map[string]string `yaml:"data"`
 		}
-		raw, err := os.ReadFile("../queries/testdata/default-monitoring-main.yaml")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(yaml.Unmarshal(raw, &cm)).To(Succeed())
+		Expect(yaml.Unmarshal(fixture.Read(GinkgoTB(), "../queries/testdata", "default-monitoring-main.yaml"), &cm)).To(Succeed())
 		parsed, err := queries.Parse([]byte(cm.Data["queries"]))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(parsed).To(HaveKey("pg_settings"))

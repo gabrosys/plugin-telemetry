@@ -20,6 +20,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 // cnpgSyncNames is CNPG's synchronousStandbyNamesRegex (pg_collector.go:47 at v1.30.1).
@@ -316,8 +317,7 @@ var _ = Describe("SQL built-ins", func() {
 			if os.Getenv("UPDATE_GOLDEN") != "" {
 				Expect(os.WriteFile("testdata/builtin-pg18.golden.json", encoded, 0o600)).To(Succeed())
 			}
-			want18, err := os.ReadFile("testdata/builtin-pg18.golden.json")
-			Expect(err).NotTo(HaveOccurred())
+			want18 := fixture.Read(GinkgoTB(), "testdata", "builtin-pg18.golden.json")
 			Expect(strings.TrimSpace(string(encoded))).To(Equal(strings.TrimSpace(string(want18))))
 		}, SpecTimeout(time.Minute))
 

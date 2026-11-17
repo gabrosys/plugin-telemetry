@@ -48,7 +48,7 @@ type Pool struct {
 	failed map[string]*backoff
 	closed bool
 	// draining is set while PostgreSQL refuses new sessions (57P03): release closes connections instead of
-	// keeping them. A successful dial clears it.
+	// keeping them. A successful dial that began while it was set clears it.
 	draining bool
 	// changed is closed and replaced whenever a slot or an idle connection becomes available.
 	changed chan struct{}
@@ -130,6 +130,7 @@ func (p *Pool) acquire(ctx context.Context, database string, withBackoff bool, m
 		}
 
 		var evicted *idleConn
+		draining := p.draining
 		switch {
 		case p.total < p.maxConns:
 			p.total++
@@ -157,7 +158,7 @@ func (p *Pool) acquire(ctx context.Context, database string, withBackoff bool, m
 		if evicted != nil {
 			p.closeConn(ctx, evicted.conn, evicted.database)
 		}
-		return p.dial(ctx, database)
+		return p.dial(ctx, database, draining)
 	}
 }
 
@@ -179,7 +180,8 @@ func (p *Pool) takeIdleLocked(database string) *pgx.Conn {
 	return nil
 }
 
-func (p *Pool) dial(ctx context.Context, database string) (*pgx.Conn, func(bool), error) {
+// dial opens a connection. A success ends the drain only when draining was already set as the dial began.
+func (p *Pool) dial(ctx context.Context, database string, draining bool) (*pgx.Conn, func(bool), error) {
 	conn, err := p.connect(ctx, database)
 	if err != nil {
 		// ConnectError.Config holds the password; keep only the cause.
@@ -207,7 +209,9 @@ func (p *Pool) dial(ctx context.Context, database string) (*pgx.Conn, func(bool)
 		return nil, nil, fmt.Errorf("connect to database %s as %s: %w", database, p.cfg.User, err)
 	}
 	delete(p.failed, database)
-	p.draining = false
+	if draining {
+		p.draining = false
+	}
 	closed := p.closed
 	if closed {
 		p.total--

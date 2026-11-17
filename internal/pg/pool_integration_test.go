@@ -5,6 +5,8 @@ package pg_test
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"os"
 	"strconv"
 	"sync"
@@ -58,6 +60,71 @@ func plainConn(ctx context.Context) *pgx.Conn {
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(conn.Close, context.WithoutCancel(ctx))
 	return conn
+}
+
+// gatedProxy forwards to the test server. The server's answers to the first connection wait for gate, so
+// that dial stays in flight with its backend already started; started is closed when it arrives.
+func gatedProxy(ctx context.Context, gate <-chan struct{}, started chan<- struct{}) uint16 {
+	GinkgoHelper()
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
+	Expect(err).NotTo(HaveOccurred())
+	_, portText, err := net.SplitHostPort(ln.Addr().String())
+	Expect(err).NotTo(HaveOccurred())
+	port, err := strconv.ParseUint(portText, 10, 16)
+	Expect(err).NotTo(HaveOccurred())
+
+	var mu sync.Mutex
+	var conns []net.Conn
+	DeferCleanup(func() {
+		Expect(ln.Close()).To(Succeed())
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				GinkgoWriter.Println("close proxied connection:", err)
+			}
+		}
+	})
+	target := net.JoinHostPort(server.Host, strconv.Itoa(int(server.Port)))
+	dialCtx := context.WithoutCancel(ctx)
+	go func() {
+		var d net.Dialer
+		for first := true; ; first = false {
+			client, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			upstream, err := d.DialContext(dialCtx, "tcp", target)
+			if err != nil {
+				GinkgoWriter.Println("dial the server:", err)
+				return
+			}
+			mu.Lock()
+			conns = append(conns, client, upstream)
+			mu.Unlock()
+			if first {
+				close(started)
+			}
+			go forward(upstream, client, nil)
+			if first {
+				go forward(client, upstream, gate)
+			} else {
+				go forward(client, upstream, nil)
+			}
+		}
+	}()
+	return uint16(port)
+}
+
+// forward copies src to dst until either side closes, after wait is closed when it is not nil.
+func forward(dst, src net.Conn, wait <-chan struct{}) {
+	if wait != nil {
+		<-wait
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		GinkgoWriter.Println("forward:", err)
+	}
 }
 
 func backendPID(ctx context.Context, conn *pgx.Conn) uint32 {
@@ -661,6 +728,36 @@ var _ = Describe("Pool", func() {
 			defer release(false)
 			Expect(conn.IsClosed()).To(BeFalse())
 		})
+
+		It("keeps draining when a dial that began before the drain succeeds", func(ctx SpecContext) {
+			DeferCleanup(server.StartServer)
+			gate := make(chan struct{})
+			started := make(chan struct{})
+			cfg.Host, cfg.Port = "127.0.0.1", gatedProxy(ctx, gate, started)
+			newPool(2, time.Hour)
+			holder := plainConn(ctx)
+			Expect(backendPID(ctx, holder)).NotTo(BeZero(), "this session keeps the postmaster up")
+
+			var conn *pgx.Conn
+			var release func(bool)
+			var acquireErr error
+			done := make(chan struct{})
+			go func() {
+				defer GinkgoRecover()
+				defer close(done)
+				conn, release, acquireErr = pool.AcquireWithin(ctx, "app", 0)
+			}()
+			Eventually(started).Should(BeClosed())
+			Expect(server.Exec(ctx, "CHECKPOINT")).To(Succeed())
+			Expect(server.StopServerSmart(ctx)).To(Succeed())
+			pool.Probe(ctx, "app")
+			close(gate)
+			Eventually(done).Should(BeClosed())
+			Expect(acquireErr).NotTo(HaveOccurred())
+
+			release(false)
+			Expect(conn.IsClosed()).To(BeTrue(), "the drain outlived the dial that began before it")
+		}, SpecTimeout(2*time.Minute))
 
 		It("keeps a released session again once a dial succeeds after the drain", func(ctx SpecContext) {
 			DeferCleanup(server.StartServer)

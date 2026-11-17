@@ -13,8 +13,9 @@ import (
 var typeMaps = sync.Pool{New: func() any { return pgtype.NewMap() }}
 
 // histogramFrom builds a histogram as CNPG's histogram.NewFromRawData does (pkg/management/postgres/metrics/histogram/histogram.go:50-110
-// at v1.30.1). The arrays arrive as text and are parsed with pgtype. It reports false when a part is
-// missing, empty, malformed, NaN or multi-dimensional.
+// at v1.30.1). The arrays arrive as text and are parsed with pgtype. It reports false when the bounds or
+// the _bucket column is missing, when either array is empty, malformed or multi-dimensional, when a
+// bound is NaN, or when a present _sum or _count does not convert.
 func histogramFrom(name string, byName map[string]any) (*Histogram, bool) {
 	rawBounds, ok := byName[name]
 	if !ok {

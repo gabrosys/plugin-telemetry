@@ -1,5 +1,6 @@
-// Package engine runs the metrics engine from a configuration file: it watches the files, plans the
-// queries from live facts, runs them and exports the results.
+// Package engine runs the metrics engine on a Config, a settings file (FileConfig) or the Kubernetes
+// source: it watches the settings and the query files, plans the queries from live facts, runs them and
+// exports the results.
 package engine
 
 import (

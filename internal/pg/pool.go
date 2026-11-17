@@ -250,7 +250,7 @@ func BackoffDelay(failures int, maxBackoff time.Duration) time.Duration {
 }
 
 // releaser returns the function that hands conn back; only its first call has an effect. ctx is
-// accepted for contextcheck; closing conn uses WithoutCancel(ctx) and the 2 s closeTimeout.
+// accepted for contextcheck and reaches closeConn.
 func (p *Pool) releaser(ctx context.Context, conn *pgx.Conn, database string) func(bool) {
 	var once sync.Once
 	return func(broken bool) {
@@ -288,7 +288,7 @@ func (p *Pool) IdleTimeout() time.Duration {
 }
 
 // CloseIdle closes the idle connections that have been unused for the idle timeout. ctx is accepted
-// for contextcheck; each close uses WithoutCancel(ctx) and the 2 s closeTimeout.
+// for contextcheck and reaches closeConn.
 func (p *Pool) CloseIdle(ctx context.Context) {
 	p.mu.Lock()
 	now := p.clk.Now()
@@ -317,7 +317,7 @@ func (p *Pool) CloseIdle(ctx context.Context) {
 // while it shuts down, starts up or recovers: it accepts no new session, and the pool's sessions only hold
 // it, so the pool closes its idle connections and release closes every connection until a dial succeeds.
 // Any other error, such as 53300 while the server is out of slots, leaves the sessions alone. ctx is
-// accepted for contextcheck; each close uses WithoutCancel(ctx) and the 2 s closeTimeout.
+// accepted for contextcheck and reaches closeConn.
 func (p *Pool) Probe(ctx context.Context, database string) {
 	conn, err := p.connect(ctx, database)
 	var pgErr *pgconn.PgError
@@ -347,8 +347,8 @@ func (p *Pool) takeAllIdleLocked() []*idleConn {
 }
 
 // Close closes the idle connections and makes AcquireWithin fail. Connections still in use are
-// closed when they are released. ctx is accepted for contextcheck;
-// each close uses WithoutCancel(ctx) and the 2 s closeTimeout.
+// closed when they are released. ctx is accepted for contextcheck
+// and reaches closeConn.
 func (p *Pool) Close(ctx context.Context) {
 	p.mu.Lock()
 	p.closed = true
@@ -365,8 +365,8 @@ func (p *Pool) notifyLocked() {
 	p.changed = make(chan struct{})
 }
 
-// closeConn ends the session; the socket is closed even when the goodbye fails, so the error is only logged.
-// A cancelled ctx must not cut the goodbye short, so it is detached with WithoutCancel.
+// closeConn ends the session within closeTimeout on WithoutCancel(ctx), so a cancelled ctx does not cut
+// the goodbye short; the socket is closed even when the goodbye fails, so the error is only logged.
 func (p *Pool) closeConn(ctx context.Context, conn *pgx.Conn, database string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
 	defer cancel()

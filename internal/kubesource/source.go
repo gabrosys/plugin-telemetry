@@ -166,7 +166,7 @@ func (s *Source) notReady(pending []string, cause error) error {
 // client waits for the token and returns the dynamic client; nil when ctx ended first.
 func (s *Source) client(ctx context.Context) (dynamic.Interface, error) {
 	if !s.waitForToken(ctx) {
-		return nil, nil //nolint:nilnil // the context ended while waiting, which is not an error
+		return nil, nil // the context ended while waiting, which is not an error
 	}
 	cfg := &rest.Config{
 		Host:            s.o.APIServer,
@@ -289,7 +289,7 @@ func (s *Source) forget(k key, e *entry) {
 	}
 }
 
-// logger returns the logger set by run or snapshot.
+// logger returns the logger of run's ctx, or the global logger until run starts.
 func (s *Source) logger() logr.Logger {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -389,8 +389,9 @@ func (s *Source) objectLocked(k key) (*unstructured.Unstructured, error) {
 }
 
 // handler returns what a watch on k reports to; reports from a watch that was stopped are dropped.
-// Watch errors are only logged: the informer lists again and reports what it finds. A panic in a
-// report is logged and the next report is handled.
+// A 403 marks the watch denied and wakes the subscribers; other watch errors are only logged: the
+// informer lists again and reports what it finds. A panic in a report is logged and the next report is
+// handled.
 func (s *Source) handler(ctx context.Context, k key, e *entry) handler {
 	watchOn := string(k.kind) + " " + k.name
 	return handler{

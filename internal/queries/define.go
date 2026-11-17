@@ -70,7 +70,7 @@ type Column struct {
 	Name        string // result column
 	Role        Role
 	Usage       Usage
-	Metric      string // "cnpg_<ns>_<column or name>", "_milliseconds" for DURATION; empty unless RoleValue
+	Metric      string // Namespace + "_" + (the column's name or the column), "_milliseconds" appended for DURATION; empty unless RoleValue
 	Kind        Kind
 	Description string
 	Mapping     map[string]float64  // MAPPEDMETRIC
@@ -100,8 +100,8 @@ type Definition struct {
 type Options struct {
 	// MaxLabelsPerSeries disables a query with more label columns. Zero turns the check off.
 	MaxLabelsPerSeries int
-	// Sensitive marks a query from a Secret: warnings and Disabled name the query and the column and
-	// quote no value, parse error or relation.
+	// Sensitive marks a query from a Secret: no warning or Disabled reason quotes a value, a parse error
+	// or a relation.
 	Sensitive bool
 }
 

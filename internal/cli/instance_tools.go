@@ -142,7 +142,6 @@ func validate(ctx context.Context, w io.Writer, open func(context.Context) (engi
 	return nil
 }
 
-// openConfig opens the configuration and loads it.
 func openConfig(ctx context.Context, open func(context.Context) (engine.Config, error)) (*config, error) {
 	cfg, err := open(ctx)
 	if err != nil {

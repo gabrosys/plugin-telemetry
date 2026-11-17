@@ -21,8 +21,9 @@ import (
 // ScopeName is the instrumentation scope of the exported metrics.
 const ScopeName = "github.com/gabrosys/plugin-telemetry"
 
-// Producer is an sdkmetric.Producer over the snapshot. It never returns an error: an
-// error from a Producer drops the whole collection (sdk/metric v1.47.0 periodic_reader.go:265-277).
+// Producer is an sdkmetric.Producer over the snapshot. It never returns an error: ManualReader.Collect
+// joins a Producer error into its own (sdk/metric v1.47.0 manual_reader.go:158-164), and Loop.tick
+// exports nothing from a failed Collect.
 type Producer struct {
 	store   *snapshot.Store
 	clk     clock.PassiveClock
@@ -34,7 +35,7 @@ type Producer struct {
 // per Key and reason once per Produce when there are any: duplicate for a repeated series or a kind
 // that conflicts with the metric's first, conversion for a histogram without data or an unknown kind.
 // extra, when not nil, is called once per Produce; its samples join the snapshot's points of the same name.
-// A panic in extra drops only its samples (safe.Call): a Producer error drops the whole collection.
+// A panic in extra drops only its samples (safe.Call); Produce itself never fails.
 // An extra sample wins over a snapshot series of its name and labels, or of its name and another kind;
 // the snapshot's series counts as a duplicate. Of repeated extra samples the first is kept.
 func NewProducer(
@@ -175,7 +176,6 @@ func (b *metricBuilder) build() (metricdata.Metrics, bool) {
 	return m, len(b.scalars)+len(b.histograms) > 0
 }
 
-// labelSet turns labels into an attribute set.
 func labelSet(labels []queries.Label) attribute.Set {
 	kvs := make([]attribute.KeyValue, len(labels))
 	for i, l := range labels {

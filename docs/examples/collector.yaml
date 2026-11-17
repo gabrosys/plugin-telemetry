@@ -1,4 +1,4 @@
-# A minimal OpenTelemetry Collector that receives OTLP and logs a summary of what it gets.
+# A minimal OpenTelemetry Collector that receives OTLP and logs every metric it gets.
 # Use it to try the plugin. Replace the debug exporter with your backend for real use.
 apiVersion: v1
 kind: Namespace
@@ -27,7 +27,7 @@ data:
 
     exporters:
       debug:
-        verbosity: basic
+        verbosity: detailed
 
     service:
       pipelines:

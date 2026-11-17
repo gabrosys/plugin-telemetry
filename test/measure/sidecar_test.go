@@ -48,8 +48,8 @@ var _ = Describe("the sidecar with CNPG's default queries", Ordered, func() {
 		ns, err := framework.CreateNamespace(ctx, c, "measure-sidecar")
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func(ctx SpecContext) {
-			Expect(client.IgnoreNotFound(c.Delete(ctx, ns))).To(Succeed())
-		})
+			Expect(framework.DeleteNamespace(ctx, c, ns.Name, statePoll)).To(Succeed())
+		}, NodeTimeout(4*time.Minute))
 
 		Expect(c.Create(ctx, measuredExporter(ns.Name))).To(Succeed())
 		key := client.ObjectKey{Namespace: ns.Name, Name: "sidecar"}

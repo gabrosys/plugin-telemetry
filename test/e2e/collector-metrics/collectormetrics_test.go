@@ -18,7 +18,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
@@ -339,10 +338,10 @@ var _ = Describe("collector-metrics", Ordered, func() {
 
 		namespace, err := framework.CreateNamespace(ctx, c, "cm")
 		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func(ctx SpecContext) {
-			Expect(client.IgnoreNotFound(c.Delete(ctx, namespace))).To(Succeed())
-		})
 		ns = namespace.Name
+		DeferCleanup(func(ctx SpecContext) {
+			Expect(framework.DeleteNamespace(ctx, c, ns, statePoll)).To(Succeed())
+		}, NodeTimeout(4*time.Minute))
 
 		exporter := framework.ExporterFor(ns, exporterName)
 		exporter.Spec.Metrics.Interval = &metav1.Duration{Duration: exportInterval}
@@ -353,13 +352,6 @@ var _ = Describe("collector-metrics", Ordered, func() {
 
 		create := func(cl *apiv1.Cluster) {
 			Expect(c.Create(ctx, cl)).To(Succeed())
-			// Runs before the namespace's cleanup: a namespace deleted around a live Cluster stays Terminating.
-			DeferCleanup(func(ctx SpecContext) {
-				Expect(client.IgnoreNotFound(c.Delete(ctx, cl))).To(Succeed())
-				Eventually(func(ctx SpecContext) bool {
-					return apierrors.IsNotFound(c.Get(ctx, client.ObjectKeyFromObject(cl), &apiv1.Cluster{}))
-				}).WithContext(ctx).WithTimeout(3 * time.Minute).WithPolling(statePoll).Should(BeTrue())
-			}, NodeTimeout(4*time.Minute))
 		}
 
 		primary := framework.WithExporter(framework.PeerCluster(ns, mainName, env.PostgresImage), exporterName)

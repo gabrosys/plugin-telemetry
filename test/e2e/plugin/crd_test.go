@@ -65,10 +65,10 @@ var _ = Describe("AC1: the CRDs", Ordered, func() {
 
 		namespace, err := framework.CreateNamespace(ctx, c, "plugin-crd")
 		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func(ctx SpecContext) {
-			Expect(client.IgnoreNotFound(c.Delete(ctx, namespace))).To(Succeed())
-		})
 		ns = namespace.Name
+		DeferCleanup(func(ctx SpecContext) {
+			Expect(framework.DeleteNamespace(ctx, c, ns, time.Second)).To(Succeed())
+		}, NodeTimeout(2*time.Minute))
 	})
 
 	DescribeTable("the API server accepts every valid fixture",

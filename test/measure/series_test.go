@@ -88,8 +88,8 @@ var _ = Describe("the telemetry container at maxSeriesTotal 50000", Ordered, fun
 		ns, err := framework.CreateNamespace(ctx, c, "measure-series")
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func(ctx SpecContext) {
-			Expect(client.IgnoreNotFound(c.Delete(ctx, ns))).To(Succeed())
-		})
+			Expect(framework.DeleteNamespace(ctx, c, ns.Name, statePoll)).To(Succeed())
+		}, NodeTimeout(4*time.Minute))
 
 		Expect(c.Create(ctx, syntheticSet(ns.Name))).To(Succeed())
 		exporter := measuredExporter(ns.Name)

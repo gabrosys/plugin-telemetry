@@ -16,7 +16,6 @@ import (
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -128,11 +127,7 @@ var _ = Describe("the API requests of the exporters' watches", Ordered, func() {
 		ns, err := framework.CreateNamespace(ctx, c, "measure-watches")
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func(ctx SpecContext) {
-			Expect(client.IgnoreNotFound(c.Delete(ctx, ns))).To(Succeed())
-			Eventually(func(ctx SpecContext) error {
-				return c.Get(ctx, client.ObjectKeyFromObject(ns), &corev1.Namespace{})
-			}).WithContext(ctx).WithTimeout(10 * time.Minute).WithPolling(5 * time.Second).
-				Should(MatchError(apierrors.IsNotFound, "namespace gone"))
+			Expect(framework.DeleteNamespace(ctx, c, ns.Name, 5*time.Second)).To(Succeed())
 		}, NodeTimeout(15*time.Minute))
 
 		Expect(c.Create(ctx, &corev1.Secret{

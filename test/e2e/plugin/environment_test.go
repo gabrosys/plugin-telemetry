@@ -11,7 +11,6 @@ import (
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -62,22 +61,15 @@ var _ = Describe("the plugin environment", Ordered, Serial, ContinueOnFailure, f
 
 		namespace, err := framework.CreateNamespace(ctx, c, "plugin")
 		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func(ctx SpecContext) {
-			Expect(client.IgnoreNotFound(c.Delete(ctx, namespace))).To(Succeed())
-		})
 		ns = namespace.Name
+		DeferCleanup(func(ctx SpecContext) {
+			Expect(framework.DeleteNamespace(ctx, c, ns, environmentPollInterval)).To(Succeed())
+		}, NodeTimeout(4*time.Minute))
 
 		start = time.Now()
 		Expect(c.Create(ctx, framework.ExporterFor(ns, podpatch.DefaultExporter))).To(Succeed())
 		cluster := framework.PeerCluster(ns, clusterName, env.PostgresImage)
 		Expect(c.Create(ctx, cluster)).To(Succeed())
-		// Runs before the namespace's cleanup: a namespace deleted around a live Cluster stays Terminating.
-		DeferCleanup(func(ctx SpecContext) {
-			Expect(client.IgnoreNotFound(c.Delete(ctx, cluster))).To(Succeed())
-			Eventually(func(ctx SpecContext) bool {
-				return apierrors.IsNotFound(c.Get(ctx, client.ObjectKeyFromObject(cluster), &apiv1.Cluster{}))
-			}).WithContext(ctx).WithTimeout(3 * time.Minute).WithPolling(environmentPollInterval).Should(BeTrue())
-		}, NodeTimeout(4*time.Minute))
 	})
 
 	It("runs against the requested CNPG version", func(ctx SpecContext) {

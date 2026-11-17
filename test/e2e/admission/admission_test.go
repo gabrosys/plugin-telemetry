@@ -226,10 +226,10 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 
 		namespace, err := framework.CreateNamespace(ctx, c, "admission")
 		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func(ctx SpecContext) {
-			Expect(client.IgnoreNotFound(c.Delete(ctx, namespace))).To(Succeed())
-		})
 		ns = namespace.Name
+		DeferCleanup(func(ctx SpecContext) {
+			Expect(framework.DeleteNamespace(ctx, c, ns, time.Second)).To(Succeed())
+		}, NodeTimeout(4*time.Minute))
 
 		Expect(c.Create(ctx, framework.NewCluster(ns, clusterName, env.PostgresImage))).To(Succeed())
 

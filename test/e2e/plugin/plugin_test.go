@@ -533,10 +533,10 @@ func describeMode(m mode) {
 
 			namespace, err := framework.CreateNamespace(ctx, c, "plugin-"+m.name)
 			Expect(err).NotTo(HaveOccurred())
-			DeferCleanup(func(ctx SpecContext) {
-				Expect(client.IgnoreNotFound(c.Delete(ctx, namespace))).To(Succeed())
-			})
 			ns = namespace.Name
+			DeferCleanup(func(ctx SpecContext) {
+				Expect(framework.DeleteNamespace(ctx, c, ns, specPoll)).To(Succeed())
+			}, NodeTimeout(4*time.Minute))
 
 			headerSentinel := "sentinel-" + rand.Text()
 			sentinels = []string{headerSentinel}
@@ -572,13 +572,6 @@ func describeMode(m mode) {
 			}
 			clusterCreated = time.Now()
 			Expect(c.Create(ctx, cluster)).To(Succeed())
-			// Runs before the namespace's cleanup: a namespace deleted around a live Cluster stays Terminating.
-			DeferCleanup(func(ctx SpecContext) {
-				Expect(client.IgnoreNotFound(c.Delete(ctx, cluster))).To(Succeed())
-				Eventually(func(ctx SpecContext) bool {
-					return apierrors.IsNotFound(c.Get(ctx, key(cname), &apiv1.Cluster{}))
-				}).WithContext(ctx).WithTimeout(3 * time.Minute).WithPolling(specPoll).Should(BeTrue())
-			}, NodeTimeout(4*time.Minute))
 
 			Eventually(func(ctx context.Context) (bool, error) {
 				return framework.ClusterReady(ctx, c, key(cname))

@@ -8,7 +8,6 @@ import (
 	"os"
 	"time"
 
-	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -41,20 +40,15 @@ var _ = Describe("smart shutdown", func() {
 
 		namespace, err := framework.CreateNamespace(ctx, c, "smart-shutdown")
 		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func(ctx SpecContext) { Expect(client.IgnoreNotFound(c.Delete(ctx, namespace))).To(Succeed()) })
+		DeferCleanup(func(ctx SpecContext) {
+			Expect(framework.DeleteNamespace(ctx, c, namespace.Name, statePoll)).To(Succeed())
+		}, NodeTimeout(3*time.Minute))
 		Expect(c.Create(ctx, framework.ExporterFor(namespace.Name, podpatch.DefaultExporter))).To(Succeed())
 
 		cluster := framework.PeerCluster(namespace.Name, shutdownCluster, env.PostgresImage)
 		cluster.Spec.Instances = 1
 		Expect(c.Create(ctx, cluster)).To(Succeed())
-		// Runs before the namespace's cleanup: a namespace deleted around a live Cluster stays Terminating.
 		key := client.ObjectKeyFromObject(cluster)
-		DeferCleanup(func(ctx SpecContext) {
-			Expect(client.IgnoreNotFound(c.Delete(ctx, cluster))).To(Succeed())
-			Eventually(func(ctx SpecContext) bool {
-				return apierrors.IsNotFound(c.Get(ctx, key, &apiv1.Cluster{}))
-			}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(statePoll).Should(BeTrue())
-		}, NodeTimeout(3*time.Minute))
 
 		Eventually(func(ctx context.Context) (bool, error) { return framework.ClusterReady(ctx, c, key) }).
 			WithContext(ctx).WithTimeout(clusterTimeout).WithPolling(statePoll).Should(BeTrue(), "cluster ready")

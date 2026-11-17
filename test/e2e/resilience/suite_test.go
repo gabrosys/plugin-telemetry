@@ -15,7 +15,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -57,10 +56,10 @@ func (s *suite) setUp(ctx SpecContext) {
 
 	namespace, err := framework.CreateNamespace(ctx, s.c, "resilience")
 	Expect(err).NotTo(HaveOccurred())
-	DeferCleanup(func(ctx SpecContext) {
-		Expect(client.IgnoreNotFound(s.c.Delete(ctx, namespace))).To(Succeed())
-	})
 	s.ns = namespace.Name
+	DeferCleanup(func(ctx SpecContext) {
+		Expect(framework.DeleteNamespace(ctx, s.c, s.ns, statePoll)).To(Succeed())
+	}, NodeTimeout(3*time.Minute))
 	s.cluster = client.ObjectKey{Namespace: s.ns, Name: clusterName}
 
 	var queries corev1.ConfigMap
@@ -81,13 +80,6 @@ func (s *suite) setUp(ctx SpecContext) {
 		}},
 	}
 	Expect(s.c.Create(ctx, cluster)).To(Succeed())
-	// Runs before the namespace's cleanup: a namespace deleted around a live Cluster stays Terminating.
-	DeferCleanup(func(ctx SpecContext) {
-		Expect(client.IgnoreNotFound(s.c.Delete(ctx, cluster))).To(Succeed())
-		Eventually(func(ctx SpecContext) bool {
-			return apierrors.IsNotFound(s.c.Get(ctx, s.cluster, &apiv1.Cluster{}))
-		}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(statePoll).Should(BeTrue())
-	}, NodeTimeout(3*time.Minute))
 
 	Eventually(func(ctx SpecContext) (bool, error) {
 		return framework.ClusterReady(ctx, s.c, s.cluster)

@@ -12,6 +12,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/gabrosys/plugin-telemetry/internal/builtin"
+	"github.com/gabrosys/plugin-telemetry/internal/planner"
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
 )
 
@@ -94,6 +95,21 @@ var _ = Describe("Samples", func() {
 			Value:       18.7,
 		}))
 	})
+
+	DescribeTable("postgres_version is major.patch",
+		func(serverVersionNum, full string, want float64) {
+			version, err := planner.ParseVersionNum(serverVersionNum)
+			Expect(err).NotTo(HaveOccurred())
+			samples := builtin.Samples(nil, podName, clusterName, &builtin.Facts{Version: version})
+
+			Expect(value(samples, "postgres_version", "cluster", clusterName, "full", full)).To(Equal(want))
+		},
+		Entry("18.0.7", "180007", "18.7", 18.7),
+		Entry("17.0.10", "170010", "17.10", 17.1),
+		Entry("9.6.24", "90624", "9.24", 9.24),
+		Entry("16.0.0", "160000", "16.0", 16.0),
+		Entry("18.0.99", "180099", "18.99", 18.99),
+	)
 
 	It("returns nothing without a Cluster and without facts", func() {
 		Expect(builtin.Samples(nil, podName, clusterName, nil)).To(BeEmpty())

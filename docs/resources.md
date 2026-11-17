@@ -1,6 +1,6 @@
 # Resource use
 
-Measured on kind (Kubernetes 1.37, PostgreSQL 18.7) with the commands below; each writes its numbers to `bin/measure/<name>-<cnpg>.json`.
+Measured on kind (Kubernetes 1.37, PostgreSQL 18.7) with the commands below; each writes its numbers to `bin/measure/<name>-<cnpg>.json`. Every result was taken at commit 33fdac5 unless a section names an earlier run.
 
 ## Verdicts
 
@@ -8,13 +8,13 @@ Each row gives the measured value; the sections below hold the method and the fu
 
 | Quantity | Target | Measured | Verdict |
 |---|---|---|---|
-| Sidecar, CNPG's default queries, one database, every 30 s (CNPG v1.30.1): working set | max <= 40 MiB (41943040 B) | max 19202048 B (18.3 MiB) | met |
-| The same: CPU | mean <= 10m | mean 626924 nanocores (0.6m) | met |
-| Sidecar at `maxSeriesTotal` 50000: working set, restarts | max < the sidecar's memory limit, no OOM kill, no restart, no export error | At the 96Mi default (100663296 B): 48417 series, max reading 77631488 B (74.0 MiB, 22.0 MiB under the limit), 0 restarts, no OOM kill, 0 export errors. The default was raised from 64Mi to 96Mi after two OOM kills at 64Mi (both with 48417 series; max readings 60993536 B and 54104064 B before the kill) | met at 96Mi |
-| Plugin replica with 1000 Clusters cached: settled working set | <= 64 MiB (67108864 B) | max 60252160 B (57.5 MiB) over both replicas | met |
-| A replacement replica with 1000 Clusters | no OOM kill under its 128Mi limit, settles <= 64 MiB | Ready in 12.1 s, 0 restarts, no termination reason, max 58773504 B (56.1 MiB) | met |
+| Sidecar, CNPG's default queries, one database, every 30 s (CNPG v1.30.1): working set | max <= 40 MiB (41943040 B) | max 18862080 B (18.0 MiB) | met |
+| The same: CPU | mean <= 10m | mean 637709 nanocores (0.6m) | met |
+| Sidecar at `maxSeriesTotal` 50000: working set, restarts | max < the sidecar's memory limit, no OOM kill, no restart, no export error | At the 96Mi default (100663296 B): 48417 series, max reading 78082048 B (74.5 MiB, 21.5 MiB under the limit), 0 restarts, no OOM kill, 0 export errors. The default was raised from 64Mi to 96Mi after two OOM kills at 64Mi (both with 48417 series; max readings 60993536 B and 54104064 B before the kill) | met at 96Mi |
+| Plugin replica with 1000 Clusters cached: settled working set | <= 64 MiB (67108864 B) | max 58527744 B (55.8 MiB) over both replicas | met |
+| A replacement replica with 1000 Clusters | no OOM kill under its 128Mi limit, settles <= 64 MiB | Ready in 2.0 s, 0 restarts, no termination reason, max 56889344 B (54.3 MiB) | met |
 | Open watches added by 10 sidecars | 60 +/- 5 (6 per sidecar: its 5 informers and the kubelet's watch on the token Secret volume) | 60 | met |
-| Per-row conversion cost | measured, no target | 296 to 4540 B and 0.4 to 5.1 us per row; the histogram row was 5464 B and 5.6 us before the change | see "Per-row conversion and batching" |
+| Per-row conversion cost | measured, no target | 296 to 4756 B and 0.4 to 5.3 us per row; the histogram row was 5464 B and 5.6 us before the change | see "Per-row conversion and batching" |
 | Pipelined batches | needed only if `skippedRuns` > 0 | `skippedRuns` 0 | not needed |
 
 ## How the numbers are taken
@@ -31,17 +31,17 @@ The Go runtime's garbage collector makes the sidecar's working set move between 
 
 ## Sidecar with CNPG's default queries
 
-`make measure CNPG_VERSION=v1.30.1 E2E_FOCUS=sidecar` writes `bin/measure/sidecar-v1.30.1.json`.
+`make measure CNPG_VERSION=v1.30.1 E2E_FOCUS='default queries'` writes `bin/measure/sidecar-v1.30.1.json`.
 
 Setup: one `TelemetryExporter` with `spec.metrics.interval: 30s` and nothing else; one peer Cluster with one instance and the default sidecar resources, so CNPG's default monitoring ConfigMap applies. The spec waits 5 minutes after the sidecar's first successful export, then reads usage every 15 s for 10 minutes (41 readings).
 
 | Quantity | Min | Median | Max | Target | Met |
 |---|---|---|---|---|---|
-| Working set | 17510400 B (16.7 MiB) | 18190336 B (17.3 MiB) | 19202048 B (18.3 MiB) | <= 41943040 B | yes |
-| `rssBytes` | 16859136 B | 17539072 B | 18182144 B | | |
-| Mean CPU | | 626924 nanocores (0.6m) | | <= 10000000 | yes |
+| Working set | 16343040 B (15.6 MiB) | 18649088 B (17.8 MiB) | 18862080 B (18.0 MiB) | <= 41943040 B | yes |
+| `rssBytes` | 15712256 B | 17989632 B | 18202624 B | | |
+| Mean CPU | | 637709 nanocores (0.6m) | | <= 10000000 | yes |
 
-The sidecar exported 417 series, skipped no query run (`cnpg_otel_query_runs_total{outcome="skipped"}` delta 0) and did not restart. Min to max span 1.7 MB.
+The sidecar exported 417 series, skipped no query run (`cnpg_otel_query_runs_total{outcome="skipped"}` delta 0) and did not restart. Min to max span 2.5 MB.
 
 ## Sidecar at maxSeriesTotal 50000
 
@@ -68,18 +68,18 @@ The sidecar sets `GOMEMLIMIT` to 80% of its limit (`internal/memlimit/memlimit.g
 
 ### Result at 96Mi: met
 
-After the two kills the default `sidecarMemory` was raised from 64Mi to 96Mi (100663296 B) instead of lowering the default `maxSeriesTotal`. `GOMEMLIMIT` is then 80530636 B (80.5 MB). Run: `bin/measure/series-v1.30.1.json`, 778 s, with the plugin image carrying the new default (the sidecar's init container showed a 96Mi limit).
+After the two kills the default `sidecarMemory` was raised from 64Mi to 96Mi (100663296 B) instead of lowering the default `maxSeriesTotal`. `GOMEMLIMIT` is then 80530636 B (80.5 MB). Run: `bin/measure/series-v1.30.1.json`, 829 s, with the plugin image carrying the new default. A first 96Mi run at ccc4235, where the default changed, read a highest 77631488 B (74.0 MiB).
 
 | Quantity | Measured | Target |
 |---|---|---|
-| Working set, min / median / max (41 readings) | 59637760 B (56.9 MiB) / 70942720 B (67.7 MiB) / 77631488 B (74.0 MiB) | max < 100663296 B (22.0 MiB, 23031808 B, under the limit) |
-| `rssBytes` min / median / max | 58871808 / 70144000 / 76861440 B | |
-| Mean CPU | 11554838 nanocores (11.6m) | |
+| Working set, min / median / max (41 readings) | 67407872 B (64.3 MiB) / 73388032 B (70.0 MiB) / 78082048 B (74.5 MiB) | max < 100663296 B (21.5 MiB, 22581248 B, under the limit) |
+| `rssBytes` min / median / max | 66707456 / 72482816 / 77008896 B | |
+| Mean CPU | 11084114 nanocores (11.1m) | |
 | Series at the start and the end | 48417 and 48417 | 48000 to 50000 |
 | Restarts, last termination reason | 0 before, 0 after, none | no restart, no `OOMKilled` |
 | Export errors | 0 | 0 |
 
-At 96Mi the working set is higher than at 64Mi (median 70.9 MB against 50.0 MB) because the collector runs later under the 80.5 MB soft limit; CPU is lower (11.6m against 31m) for the same reason. The highest reading is 74.0 MiB, so the 50000 default stays inside 96Mi with 22.0 MiB above the highest reading.
+At 96Mi the working set is higher than at 64Mi (median 73.4 MB against 50.0 MB) because the collector runs later under the 80.5 MB soft limit; CPU is lower (11.1m against 31m) for the same reason. The highest reading is 74.5 MiB, so the 50000 default stays inside 96Mi with 21.5 MiB above the highest reading.
 
 ## Plugin replica with 1000 Clusters
 
@@ -91,23 +91,23 @@ Why it stands for a real replica: the replica is the deployed one, with the same
 
 The measurement was taken with the single Cluster List of `exportersToClusters` using `client.UnsafeDisableDeepCopy`.
 
-Objects: 100 namespaces, 1000 unreconciled Clusters (plus `measure-ref`), 1000 token Secrets with a token, no Pod in the 100 namespaces. The mean JSON size of one Cluster is 9504 B (`clusterBytes`). Creating the objects took 38 s; the 1000 token Secrets were ready 149 s after the first create.
+Objects: 100 namespaces, 1000 unreconciled Clusters (plus `measure-ref`), 1000 token Secrets with a token, no Pod in the 100 namespaces. The mean JSON size of one Cluster is 9482 B (`clusterBytes`). Creating the objects took 38 s; the 1000 token Secrets were ready 201 s after the first create (149 s in an earlier run on a less loaded host).
 
 Idle replicas, 5 minutes after the identities were ready, then 41 readings over 10 minutes:
 
 | Replica | Working set min | median | max | `rssBytes` max | Target | Met |
 |---|---|---|---|---|---|---|
-| first | 51855360 B (49.5 MiB) | 56115200 B (53.5 MiB) | 58347520 B (55.6 MiB) | 57192448 B | <= 67108864 B | yes |
-| second | 53018624 B (50.6 MiB) | 56360960 B (53.7 MiB) | 60252160 B (57.5 MiB) | 59113472 B | <= 67108864 B | yes |
+| first | 55783424 B (53.2 MiB) | 56537088 B (53.9 MiB) | 57552896 B (54.9 MiB) | 56414208 B | <= 67108864 B | yes |
+| second | 54247424 B (51.7 MiB) | 55001088 B (52.5 MiB) | 58527744 B (55.8 MiB) | 57380864 B | <= 67108864 B | yes |
 
-Replacement replica: one replica deleted with the 1000 Clusters cached. The new Pod was Ready 12.1 s after the delete, with 0 restarts and no last termination reason (no OOM kill under the 128Mi limit). Readings from 2 minutes after Ready, every 15 s for 5 minutes (21 readings):
+Replacement replica: one replica deleted with the 1000 Clusters cached. The new Pod was Ready 2.0 s after the delete, with 0 restarts and no last termination reason (no OOM kill under the 128Mi limit). Readings from 2 minutes after Ready, every 15 s for 5 minutes (21 readings):
 
 | Quantity | Min | Median | Max | Target | Met |
 |---|---|---|---|---|---|
-| Working set | 44109824 B (42.1 MiB) | 47292416 B (45.1 MiB) | 58773504 B (56.1 MiB) | <= 67108864 B | yes |
-| `rssBytes` | 43020288 B | 46202880 B | 57683968 B | | |
+| Working set | 43474944 B (41.5 MiB) | 47800320 B (45.6 MiB) | 56889344 B (54.3 MiB) | <= 67108864 B | yes |
+| `rssBytes` | 42348544 B | 46673920 B | 55762944 B | | |
 
-Both targets are met with the change in place. The headroom to 64 MiB is 6.5 MiB (6856704 B) on the highest idle reading.
+Both targets are met with the change in place. The headroom to 64 MiB is 8.2 MiB (8581120 B) on the highest idle reading.
 
 ## API load of the sidecars' watches
 
@@ -121,21 +121,21 @@ Result: the open-watch increase was 60 (6 per sidecar), as expected (60 +/- 5).
 
 | Quantity | Baseline window | Plugin window | Sidecar load |
 |---|---|---|---|
-| Open WATCH (start of window) | 287 | 347 | +60 (expected 60 +/- 5) |
-| LIST requests | 11 | 10 | -1 (noise) |
-| WATCH requests | 1075 | 1264 | +189 (expected renewals 180 to 360) |
+| Open WATCH (start of window) | 285 | 345 | +60 (expected 60 +/- 5) |
+| LIST requests | 10 | 10 | 0 |
+| WATCH requests | 1072 | 1274 | +202 (expected renewals 180 to 360) |
 
-Per sidecar per hour: about 38 WATCH requests (189 x 2 / 10) and no measurable LIST requests; the initial syncs are WATCH requests. The measured 189 sits inside the expected 180 to 360 renewals. These figures, and the extrapolation below, cover all 60 added watches, including the kubelet's token-Secret watch: up to 1 in 6 of the requests is the kubelet's.
+Per sidecar per hour: about 40 WATCH requests (202 x 2 / 10) and no measurable LIST requests; the initial syncs are WATCH requests. The measured 202 sits inside the expected 180 to 360 renewals. These figures, and the extrapolation below, cover all 60 added watches, including the kubelet's token-Secret watch: up to 1 in 6 of the requests is the kubelet's.
 
 Linear extrapolation (every watch is its own informer):
 
 | Instances | WATCH per hour | LIST per hour |
 |---|---|---|
-| 10 | 378 | none measurable |
-| 100 | 3780 | none measurable |
-| 1000 | 37800 | none measurable |
+| 10 | 404 | none measurable |
+| 100 | 4040 | none measurable |
+| 1000 | 40400 | none measurable |
 
-That is about 10.5 WATCH requests per second at 1000 instances.
+That is about 11.2 WATCH requests per second at 1000 instances.
 
 The sixth watch per sidecar is the kubelet's. A single-Cluster check (the same setup, one Cluster, the plugin removed and added again) read `apiserver_longrunning_requests{verb="WATCH"}` per resource: `clusters` +1, `telemetryexporters` +1, `metricquerysets` +1, `configmaps` +1 (`cnpg-default-monitoring`) and `secrets` +2. The sidecar opens one Secret watch (the queries Secret; `internal/kubesource/store.go:31`). The other is the kubelet's watch on the Pod's token Secret volume (`internal/podpatch/podpatch.go:23`): the kubelet's `configMapAndSecretChangeDetectionStrategy` defaults to `Watch` (Kubernetes v1.37.0 `pkg/kubelet/apis/config/v1beta1/defaults.go:268-269`). It is not an informer of the sidecar, but it is part of the measured load and goes away with the Pod.
 
@@ -150,7 +150,20 @@ The sixth watch per sidecar is the kubelet's. A single-Cluster check (the same s
 | `synthetic` | 698.5 | 664 | 14 | 2 | 332 |
 | `histogram` | 5629 | 5464 | 118 | 1 | 5464 |
 
-Decision 1, allocation: the sidecar's memory target at 64Mi was missed, so the case with the largest B/op per sample picks the site. That is `histogram` (5464 B), where every array scan built a `pgtype.Map` (`pgtype.NewMap()`). `scanArray` now takes the map from a `sync.Pool` (`internal/queries/histogram.go`). After the change the histogram case is 5124 ns/op, 4540 B/op and 102 allocs/op (`bin/measure/bench-after.txt`). Nothing else changed. The other cases allocate about 300 B per sample, which is the sample and its labels; `dropped` and the sorted column names were not touched. The change cannot lower the 50000-series working set (see above); it lowers the garbage of histogram queries only.
+Decision 1, allocation: the sidecar's memory target at 64Mi was missed, so the case with the largest B/op per sample picks the site. That is `histogram` (5464 B), where every array scan built a `pgtype.Map` (`pgtype.NewMap()`). `scanArray` now takes the map from a `sync.Pool` (`internal/queries/histogram.go`). After the change the histogram case is 5124 ns/op, 4540 B/op and 102 allocs/op (`bin/measure/bench-after.txt`). Nothing else changed.
+
+At commit 33fdac5 (median of 5 runs):
+
+| Case | ns/op | B/op | allocs/op | samples/op | B per sample |
+|---|---|---|---|---|---|
+| `pg_settings` | 399.6 | 296 | 9 | 1 | 296 |
+| `pg_stat_database` | 2599 | 4528 | 19 | 15 | 302 |
+| `synthetic` | 697.5 | 664 | 14 | 2 | 332 |
+| `histogram` | 5349 | 4756 | 109 | 1 | 4756 |
+
+Later changes to the histogram conversion added 216 B and 7 allocations per histogram row against the figure after the change; there is no target on it.
+
+The other cases allocate about 300 B per sample, which is the sample and its labels; `dropped` and the sorted column names were not touched. The change cannot lower the 50000-series working set (see above); it lowers the garbage of histogram queries only.
 
 Decision 2, batching: pipelined batches are not needed. `skippedRuns` is 0 in `sidecar-v1.30.1.json` (`cnpg_otel_query_runs_total{outcome="skipped"}` delta over the 10 minute window), and the sidecar's mean CPU is 0.6m against the 10m target. At 0.7 us per synthetic row, converting the 24200 rows of a 48417-series collection takes about 17 ms.
 
@@ -172,7 +185,7 @@ Cost of the probe:
 - The probe is 8,640 connections a day (86,400 s / 10 s). With `log_connections` and `log_disconnections` on, each one logs up to four lines on PostgreSQL 18 (connection received, authenticated and authorized, then the disconnection), so up to 34,560 lines a day per instance. The authenticated line appears only for authentication methods that log it, and PostgreSQL 17 and earlier log fewer lines per connection. Both settings are off by default and CloudNativePG v1.30.1 does not set them.
 - While the role's connection limit is reached, PostgreSQL logs one FATAL line every 10 s.
 
-The spec `test/e2e/resilience/shutdown_test.go` deletes the Pod of a one-instance Cluster with the plugin and asserts that the `postgres` container stops within 60 s of the delete. Measured with the probe at ca518db, five runs: 9.54 s, 12.81 s and 3.02 s on CNPG v1.30.1, 11.60 s and 10.03 s on `main`. In every run the PostgreSQL log shows the smart shutdown request, then only refused new sessions, then the postmaster exit, with no "terminating connection due to administrator command" line, so the fast shutdown never had to end a sidecar session. The earlier design, which closed connections by age, measured 24.84 s and 25.15 s at the M4.6 gate.
+The spec `test/e2e/resilience/shutdown_test.go` deletes the Pod of a one-instance Cluster with the plugin and asserts that the `postgres` container stops within 60 s of the delete. Measured with the probe at 3978c08, five runs: 9.54 s, 12.81 s and 3.02 s on CNPG v1.30.1, 11.60 s and 10.03 s on `main`. In every run the PostgreSQL log shows the smart shutdown request, then only refused new sessions, then the postmaster exit, with no "terminating connection due to administrator command" line, so the fast shutdown never had to end a sidecar session. The earlier design, which closed connections by age, measured 24.84 s and 25.15 s at the M4.6 gate.
 
 ## Environment
 
@@ -184,7 +197,7 @@ The spec `test/e2e/resilience/shutdown_test.go` deletes the Pod of a one-instanc
 | Docker server (`docker version --format '{{.Server.Version}}'`) | 29.2.1 |
 | kind node image | `kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5` (Kubernetes 1.37.0), kind v0.33.0 |
 | CloudNativePG, PostgreSQL | v1.30.1, 18.7 |
-| Commit | a1ee3f7 for the 96Mi run. The earlier runs used earlier commits of this branch; the product changes since the first run are fb3579b (the plugin lists Clusters without deep copies, in place for the plugin run), 9add9b1 (the per-row change, in place for the 64Mi rerun) and a1ee3f7 (the 96Mi default). The watches JSON's expectation fields (50 open watches, 200 renewals) predate the correction to 60 and 240; its measured values are unaffected |
+| Commit, image | 33fdac5, image `v0.4.0-212-g33fdac5`, for every result. Earlier runs, kept as history: the two 64Mi runs (before and after bd37222, the per-row change), the first 96Mi run at ccc4235 (the 96Mi default) and the per-row "before" and "after the change" figures at bd37222 |
 
 ## Reproducing
 
@@ -192,9 +205,9 @@ Each command needs the kind cluster of its CNPG version (`KIND_CLUSTER=plugin-te
 
 | Measurement | Command | Duration |
 |---|---|---|
-| Sidecar with defaults | `make measure CNPG_VERSION=v1.30.1 E2E_FOCUS=sidecar` | 925 s |
-| Sidecar at 50000 series | `make measure CNPG_VERSION=v1.30.1 E2E_FOCUS=maxSeriesTotal` | 643 s (64Mi first run), 775 s (64Mi rerun), 778 s (96Mi) |
-| Plugin with 1000 Clusters | `make measure CNPG_VERSION=v1.30.1 E2E_FOCUS=plugin` | 1734 s |
-| Watches | `make measure CNPG_VERSION=v1.30.1 E2E_FOCUS=watches` | 4150 s |
+| Sidecar with defaults | `make measure CNPG_VERSION=v1.30.1 E2E_FOCUS='default queries'` | 1088 s |
+| Sidecar at 50000 series | `make measure CNPG_VERSION=v1.30.1 E2E_FOCUS=maxSeriesTotal` | 829 s (96Mi); earlier: 643 s and 775 s (64Mi), 778 s (96Mi at ccc4235) |
+| Plugin with 1000 Clusters | `make measure CNPG_VERSION=v1.30.1 E2E_FOCUS=plugin` | 1653 s |
+| Watches | `make measure CNPG_VERSION=v1.30.1 E2E_FOCUS=watches` | 3984 s |
 | Per-row cost | `go test -run '^$' -bench '^BenchmarkRowSamples$' -benchmem -count 5 ./internal/queries/` | 24 s |
 | Pod shutdown | `make e2e-resilience CNPG_VERSION=v1.30.1 E2E_FOCUS='smart shutdown'` | 67 to 111 s |

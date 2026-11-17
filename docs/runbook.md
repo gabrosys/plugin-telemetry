@@ -24,7 +24,7 @@ The plugin runs in `cnpg-system`, and the example collector in `otel`. Those two
 - cert-manager. It is tested with v1.21.3. The plugin's gRPC server uses mutual TLS with certificates from it.
 - Docker, to build the plugin image, and `make`.
 - `kubectl`. `make dev-up` also downloads one to `bin/kubectl-v1.37.2`.
-- An OTLP collector that the instance Pods can reach, over HTTP (4318) or gRPC (4317). HTTP is the default. With gRPC, each sidecar stays on one collector Pod, so set `max_connection_age` on the collector gateway to spread them.
+- An OTLP collector that the instance Pods can reach, over HTTP (4318) or gRPC (4317). HTTP is the default. With gRPC, each sidecar stays on one collector Pod, so set `max_connection_age` on the collector gateway to spread them: in the `otlp` receiver, under `grpc`, `keepalive.server_parameters.max_connection_age`.
 
 For a local try, `make dev-up` creates a kind cluster with cert-manager and CloudNativePG. The cluster is named `plugin-telemetry-v1-30-1`, and `make dev-up KIND_CLUSTER=<name>` changes the name. Point kubectl at it afterwards.
 
@@ -188,7 +188,7 @@ EOF
 
 ### Password mode
 
-Use it on any platform, and on OpenShift, where Pods run with random UIDs and peer authentication fails. You declare a monitoring role with `pg_monitor`, a Secret with its password, and `pg_hba` lines that let the role in only from the loopback addresses and reject it everywhere else. The Secret must be of type `kubernetes.io/basic-auth` with the role's name as `username`, and you label it `cnpg.io/reload` so that password changes apply at once. The role's `connectionLimit` must be at least `maxConnections` + 1. `maxConnections` is `spec.metrics.limits.maxConnections` of the TelemetryExporter, and its default is 4. The sidecar opens one more short connection every 10 s outside that cap, to see whether PostgreSQL is shutting down. `instance test` ([section 5](#5-check-that-it-works)) opens its own pool of up to `maxConnections` beside the running sidecar, so the worst case is 2 x `maxConnections` + 1 = 9 connections. The example uses 10. If you raise `maxConnections`, raise the limit to 2 x `maxConnections` + 1 or more.
+Use it on any platform, and on OpenShift, where Pods run with random UIDs and peer authentication fails. You declare a monitoring role with `pg_monitor`, a Secret with its password, and `pg_hba` lines that let the role in only from the loopback addresses and reject it everywhere else. The Secret must be of type `kubernetes.io/basic-auth` with the role's name as `username`, and you label it `cnpg.io/reload` so that password changes apply at once. The sidecar alone needs a role `connectionLimit` of at least `maxConnections` + 1. `maxConnections` is `spec.metrics.limits.maxConnections` of the TelemetryExporter, and its default is 4. The sidecar opens one more short connection every 10 s outside that cap, to see whether PostgreSQL is shutting down. `instance test` ([section 5](#5-check-that-it-works)) opens its own pool of up to `maxConnections` beside the running sidecar, so a limit of 2 x `maxConnections` + 1 = 9 also leaves room for it. The example uses 10. If you raise `maxConnections`, raise the limit the same way.
 
 ```bash
 ROLE=otel_monitor
@@ -280,7 +280,7 @@ grep '^cnpg_collector_pg_wal' bin/instance-test.out
 sed -n '/^# errors/,$p' bin/instance-test.out
 ```
 
-`validate` prints one line per finding, `error` or `warning`, and nothing when there is none. It exits with 1 only when a line starts with `error`. `test` prints a series per line, then `# skipped` with one line per query it did not run, then `# errors`. Healthy output has `cnpg_collector_pg_wal` series and nothing after `# errors`. `test` opens its own connections, up to `maxConnections` (`internal/cli/instance_tools.go`, `connect`).
+`validate` prints one line per finding, `error` or `warning`, and nothing when there is none. It exits with 1 only when a line starts with `error`. `test` prints a series per line, then `# skipped` with one line per query it did not run, then `# errors`. Healthy output has `cnpg_collector_pg_wal` series and nothing after `# errors`.
 
 Last, check what the collector received. The example collector's `debug` exporter logs every metric it gets. Wait one export interval first.
 
@@ -453,7 +453,7 @@ NEW_REF=$(cat bin/image-ref)
    kubectl delete pod -l app=pull-check -n $NS
    ```
 
-   The check Pods run as the ServiceAccount `$CLUSTER`, which is the one the instance Pods use. CloudNativePG adds the Cluster's `spec.imagePullSecrets` to it. With the default ServiceAccount, a registry credential that sits on the Cluster's account would make the check fail where the instances pull fine. To use a secret directly, add `\"imagePullSecrets\":[{\"name\":\"<secret>\"}]` to the `spec` in `--overrides`. When the wait times out, `kubectl get pods -l app=pull-check -n $NS -o wide` shows which node cannot pull. Delete those Pods and fix the pull before you go on. Then change the ConfigMap and watch the instances roll.
+   The check Pods run as the ServiceAccount `$CLUSTER`, which is the one the instance Pods use unless the Cluster sets `spec.serviceAccountName`. In that case use that name. CloudNativePG adds the Cluster's `spec.imagePullSecrets` to it. With the default ServiceAccount, a registry credential that sits on the Cluster's account would make the check fail where the instances pull fine. To use a secret directly, add `\"imagePullSecrets\":[{\"name\":\"<secret>\"}]` to the `spec` in `--overrides`. When the wait times out, `kubectl get pods -l app=pull-check -n $NS -o wide` shows which node cannot pull. Delete those Pods and fix the pull before you go on. Then change the ConfigMap and watch the instances roll.
 
    ```bash
    sed "s|^      - image=.*|      - image=$NEW_REF|" bin/install/kustomization.yaml > bin/install/kustomization.yaml.new \

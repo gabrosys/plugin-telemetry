@@ -181,7 +181,7 @@ The hold is therefore about 10 s plus the query in flight, whatever `planInterva
 
 Cost of the probe:
 
-- One short connection every 10 s per instance, outside `spec.postgres.maxConnections`. The monitoring role's connection limit must be at least `maxConnections` + 1.
+- One short connection every 10 s per instance, outside `spec.metrics.limits.maxConnections`. The monitoring role's connection limit must be at least `maxConnections` + 1.
 - The probe is 8,640 connections a day (86,400 s / 10 s). With `log_connections` and `log_disconnections` on, each one logs up to four lines on PostgreSQL 18 (connection received, authenticated and authorized, then the disconnection), so up to 34,560 lines a day per instance. The authenticated line appears only for authentication methods that log it, and PostgreSQL 17 and earlier log fewer lines per connection. Both settings are off by default and CloudNativePG v1.30.1 does not set them.
 - While the role's connection limit is reached, PostgreSQL logs one FATAL line every 10 s.
 

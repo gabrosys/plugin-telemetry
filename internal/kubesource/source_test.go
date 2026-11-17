@@ -704,16 +704,16 @@ var _ = Describe("Source", func() {
 
 	It("waits for the token file and logs the first wait with the stat error", func() {
 		dir := GinkgoT().TempDir()
-		s := kubesource.New(kubesource.Options{Namespace: "ns", Cluster: "pg", APIServer: "https://x", TokenDir: dir, Clock: clk})
+		s := kubesource.New(kubesource.Options{Namespace: "ns", Cluster: "pg", APIServer: "https://x", TokenDir: dir, Clock: lateClock{clk}})
 		found := make(chan bool, 1)
 		go func() { found <- s.WaitForToken(ctx) }()
 
 		Eventually(clk.HasWaiters).Should(BeTrue())
 		clk.Step(5 * time.Second)
+		Eventually(clk.HasWaiters).Should(BeTrue())
 		Consistently(found, "50ms").ShouldNot(Receive())
 
 		Expect(writeFile(dir+"/token", "t")).To(Succeed())
-		Eventually(clk.HasWaiters).Should(BeTrue())
 		clk.Step(5 * time.Second)
 		Eventually(found).Should(Receive(BeTrue()))
 		Expect(strings.Count(logs.String(), "waiting for the sidecar token")).To(Equal(1))
@@ -743,3 +743,17 @@ var _ = Describe("Source.Sensitive", func() {
 		Expect(src.Sensitive("/etc/secret/x")).To(BeFalse())
 	})
 })
+
+// lateClock delivers each After 100 ms after the fake clock fires it, like a waiter that is slow to wake.
+type lateClock struct{ *clocktesting.FakeClock }
+
+func (c lateClock) After(d time.Duration) <-chan time.Time {
+	inner := c.FakeClock.After(d)
+	out := make(chan time.Time, 1)
+	go func() {
+		t := <-inner
+		time.Sleep(100 * time.Millisecond)
+		out <- t
+	}()
+	return out
+}

@@ -60,7 +60,7 @@ const (
 	primaryOnlyOnStandby = "primary-only-on-standby"
 )
 
-// backupTimestamps stay 0 in e2e: no state takes a backup (R1).
+// backupTimestamps stay 0 in e2e: no state takes a backup.
 var backupTimestamps = []string{
 	"first_recoverability_point", "last_available_backup_timestamp", "last_failed_backup_timestamp",
 }

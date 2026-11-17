@@ -334,7 +334,7 @@ var _ = Describe("Ours", func() {
 		Expect(parity.Ours(ourLines(), "plugin-peer-9", index())).To(BeEmpty())
 	})
 
-	DescribeTable("times each query by its own last success (PAR-03, PAR-04)",
+	DescribeTable("times each query by its own last success",
 		func(series string, success int64) {
 			Expect(named(ours(), series).At).To(BeTemporally("~", time.UnixMicro(success), time.Microsecond))
 		},
@@ -402,7 +402,7 @@ var _ = Describe("Bracket", func() {
 			Expect(c.Rule).To(Equal("bracket"))
 		},
 		Entry("a counter between both samples passes", xactApp, 150.0, 168.0, 199.0, "pass"),
-		Entry("a fresh small counter 30 % over the first sample passes under the second (PAR-02)",
+		Entry("a fresh small counter 30 % over the first sample passes under the second",
 			xactApp, 10.0, 13.0, 14.0, "pass"),
 		Entry("a counter equal to a sample passes", xactApp, 168.0, 168.0, 199.0, "pass"),
 		Entry("a counter above the second sample fails", xactApp, 150.0, 200.0, 199.0, "fail"),
@@ -424,7 +424,7 @@ var _ = Describe("Bracket", func() {
 		},
 		Entry("samples a margin or more away bracket ours", float64(beforeUpdate), float64(afterUpdate), "pass"),
 		Entry("a CNPG sample 0.5 s before ours is unused", xactSuccess-0.5, float64(afterUpdate), "not compared"),
-		Entry("ours newer than after − margin is not compared (PAR-05)", float64(beforeUpdate), xactSuccess+0.5, "not compared"),
+		Entry("ours newer than after − margin is not compared", float64(beforeUpdate), xactSuccess+0.5, "not compared"),
 		Entry("ours newer than both samples is not compared", float64(beforeUpdate), xactSuccess-1.5, "not compared"),
 	)
 
@@ -478,7 +478,7 @@ var _ = Describe("Bracket", func() {
 		Expect(checkOf(checks, local).Detail).To(ContainSubstring("only in ours"))
 	})
 
-	It("expects the query-cache metrics on CNPG's side and names our equivalents (PAR-01)", func() {
+	It("expects the query-cache metrics on CNPG's side and names our equivalents", func() {
 		checks := parity.Bracket(parseCNPG(beforeText(), beforeScrape), parseCNPG(fixture.Read(GinkgoTB(), "testdata", "cnpg.prom"), afterScrape), ours(), parity.Options{})
 
 		for metric, equivalent := range map[string]string{
@@ -687,7 +687,7 @@ var _ = Describe("Markdown", func() {
 		return parity.Bracket(bs, as, mine, parity.Options{Gate: func(m string) bool { return m == "cnpg_backends_total" }})
 	}
 
-	It("prints each check's gate inputs (PAR-10)", func() {
+	It("prints each check's gate inputs", func() {
 		md := parity.Markdown("Parity", checks(xactApp, 168))
 
 		Expect(md).To(HavePrefix("# Parity\n"))

@@ -28,9 +28,9 @@ const (
 	boundMargin    = 2 * time.Second
 )
 
-// switchoverSpecs adds ENG-06: the primary-only metric moves with the primary.
+// switchoverSpecs adds the spec that checks the primary-only metric moves with the primary.
 func switchoverSpecs(s *suite) {
-	It("ENG-06: after a switchover the primary-only metric comes only from the new primary within one planning cycle",
+	It("after a switchover the primary-only metric comes only from the new primary within one planning cycle plus observation lag",
 		func(ctx SpecContext) {
 			s.healthy(ctx)
 

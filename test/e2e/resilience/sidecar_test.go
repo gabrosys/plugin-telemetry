@@ -72,9 +72,9 @@ func (s *suite) killSidecar(ctx context.Context, primary string) time.Duration {
 	return longest
 }
 
-// sidecarSpecs adds ENG-04: killing the primary's sidecar under load.
+// sidecarSpecs adds the spec that kills the primary's sidecar under load.
 func sidecarSpecs(s *suite) {
-	It("ENG-04: killing the primary's sidecar under pgbench keeps the primary out of -rw for at most 5 s", func(ctx SpecContext) {
+	It("killing the primary's sidecar under pgbench keeps the primary out of -rw for at most 5 s", func(ctx SpecContext) {
 		s.healthy(ctx)
 
 		var cluster apiv1.Cluster

@@ -30,27 +30,27 @@ import (
 )
 
 const (
-	policyName        = "plugin-telemetry-identities"
-	rolesPolicy       = "plugin-telemetry-roles"
-	reservedPolicy    = "plugin-telemetry-reserved-names"
-	clusterName       = "adm"
-	exporterName      = "default"
-	pluginAccount     = "plugin-telemetry"
-	pluginNS          = "cnpg-system"
-	grantName         = "plugin-telemetry-admission-e2e"
-	tokenGrantName    = "plugin-telemetry-admission-token-e2e"
-	escalateGrantName = "plugin-telemetry-admission-escalate-e2e"
-	throwawayName     = "throwaway.telemetry"
-	telemetryName     = "adm.telemetry"
-	oldTelemetryName  = "adm-telemetry"
-	telemetryToken    = "adm.telemetry-token"
-	otherToken        = "other-token"
-	dashedName        = "probe-telemetry"
-	probeName         = "probe.telemetry"
-	chainName         = "chain.telemetry"
-	clusterRoleName   = "admission-e2e.telemetry"
-	legacyName        = "legacy.telemetry"
-	timeout           = 2 * time.Minute
+	policyName          = "plugin-telemetry-identities"
+	rolesPolicy         = "plugin-telemetry-roles"
+	reservedPolicy      = "plugin-telemetry-reserved-names"
+	clusterName         = "adm"
+	exporterName        = "default"
+	pluginAccount       = "plugin-telemetry"
+	pluginNS            = "cnpg-system"
+	grantName           = "plugin-telemetry-admission-e2e"
+	tokenGrantName      = "plugin-telemetry-admission-token-e2e"
+	escalateGrantName   = "plugin-telemetry-admission-escalate-e2e"
+	throwawayName       = "throwaway.telemetry"
+	telemetryName       = "adm.telemetry"
+	dashedTelemetryName = "adm-telemetry"
+	telemetryToken      = "adm.telemetry-token"
+	otherToken          = "other-token"
+	dashedName          = "probe-telemetry"
+	probeName           = "probe.telemetry"
+	chainName           = "chain.telemetry"
+	clusterRoleName     = "admission-e2e.telemetry"
+	legacyName          = "legacy.telemetry"
+	timeout             = 2 * time.Minute
 
 	// Parts of the roles policy's messages, one per rule.
 	nameRule     = "named *.telemetry may be"
@@ -276,8 +276,8 @@ var _ = Describe("admission policy", Ordered, ContinueOnFailure, func() {
 		Expect(err).To(denied(writeRule))
 	})
 
-	It("denies a ServiceAccount named adm-telemetry, the 0.4.0 name", func(ctx SpecContext) {
-		_, err := plugin.CoreV1().ServiceAccounts(ns).Create(ctx, serviceAccount(ns, oldTelemetryName), metav1.CreateOptions{DryRun: dryRun})
+	It("denies a ServiceAccount named adm-telemetry: a dash, not .telemetry", func(ctx SpecContext) {
+		_, err := plugin.CoreV1().ServiceAccounts(ns).Create(ctx, serviceAccount(ns, dashedTelemetryName), metav1.CreateOptions{DryRun: dryRun})
 		Expect(err).To(denied(writeRule))
 	})
 

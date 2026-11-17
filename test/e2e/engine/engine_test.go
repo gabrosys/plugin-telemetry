@@ -128,7 +128,7 @@ var _ = Describe("the engine", Ordered, ContinueOnFailure, func() {
 		Expect(string(got)).To(Equal(string(want)))
 	}, SpecTimeout(2*time.Minute))
 
-	It("sets the resource attributes of design 6.6", func(ctx SpecContext) {
+	It("sets exactly the service.*, k8s.* and configured resource attributes", func(ctx SpecContext) {
 		var lines []otlp.Line
 		Eventually(func(g Gomega) {
 			lines = exported(ctx, g)

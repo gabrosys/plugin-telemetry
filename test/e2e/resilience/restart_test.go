@@ -19,9 +19,9 @@ const (
 	afterRestarts  = 30 * time.Second
 )
 
-// restartSpecs adds PLG-01: the plugin's rolling restarts under traffic.
+// restartSpecs adds the spec that rolls the plugin out three times under traffic.
 func restartSpecs(s *suite) {
-	It("PLG-01: three rolling restarts of the plugin cause no failed hook call", func(ctx SpecContext) {
+	It("three rolling restarts of the plugin cause no failed hook call", func(ctx SpecContext) {
 		s.healthy(ctx)
 
 		start := time.Now()
@@ -43,7 +43,7 @@ func restartSpecs(s *suite) {
 		Expect(framework.WaitUntil(ctx, restarted.Add(afterRestarts))).To(Succeed())
 		stop()
 
-		s.expectNoFailedHookCall(ctx, "PLG-01", start)
+		s.expectNoFailedHookCall(ctx, "rolling restarts", start)
 		s.expectEvaluatedSince(ctx, restarted)
 	}, SpecTimeout(15*time.Minute))
 }

@@ -42,7 +42,7 @@ func fixtureEntries(dir string, run func(file string) TableEntry) []TableEntry {
 	return entries
 }
 
-var _ = Describe("AC1: the CRDs", Ordered, func() {
+var _ = Describe("the CRDs", Ordered, func() {
 	var strict client.Client
 
 	// dryRun applies the fixture the way kubectl does: server-side dry-run with strict field validation.

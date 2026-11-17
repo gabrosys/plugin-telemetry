@@ -211,7 +211,7 @@ var _ = Describe("Lifecycle", func() {
 				Expect(resp.GetJsonPatch()).To(BeEmpty())
 			})
 
-			It("is idempotent: a second EVALUATE of the same Pod gives the same result, of its own output nothing", func(ctx context.Context) {
+			It("is idempotent: EVALUATE of the same Pod gives the same patched Pod, and of the patched Pod no patch", func(ctx context.Context) {
 				cluster := clusterJSON(ours(nil))
 				first, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, cluster, pod))
 				Expect(err).NotTo(HaveOccurred())

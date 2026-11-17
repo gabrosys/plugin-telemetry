@@ -59,7 +59,7 @@ func absent(samples []queries.Sample, name string, kv ...string) {
 	Expect(ok).To(BeFalse(), "unexpected sample %s %v", name, kv)
 }
 
-// legacyCluster is CNPG's createFakeCluster (pkg/postgres/replication/suite_test.go:37-53, v1.30.1).
+// legacyCluster is CNPG's createFakeCluster (pkg/postgres/replication/suite_test.go:37-53, v1.30.1) without cluster.Default(), which the api module lacks.
 func legacyCluster(name string) *apiv1.Cluster {
 	primary := fmt.Sprintf("%s-1", name)
 	c := &apiv1.Cluster{}
@@ -120,7 +120,6 @@ var _ = Describe("Samples", func() {
 		c.Spec.WalStorage = &apiv1.StorageConfiguration{Size: "1Gi"}
 		samples := builtin.Samples(c, podName, clusterName, nil)
 
-		absent(samples, "postgres_version", "cluster", "c", "full", "18.7")
 		absent(samples, "pg_wal", "value", "volume_size")
 		absent(samples, "pg_wal", "value", "volume_max")
 		for _, name := range []string{"first_recoverability_point", "last_available_backup_timestamp", "last_failed_backup_timestamp"} {

@@ -14,7 +14,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
-// builtinHelp is the Help text of each metric in CNPG v1.30.1 pg_collector.go:160-180,217-272.
+// builtinHelp is the Help text of each metric in CNPG v1.30.1 pg_collector.go:148-153,160-180,217-272.
 var builtinHelp = map[string]string{
 	"cnpg_collector_pg_wal": "Total size in bytes of WAL segments in the '/var/lib/postgresql/data/pgdata/pg_wal' directory " +
 		" computed as (wal_segment_size * count)",

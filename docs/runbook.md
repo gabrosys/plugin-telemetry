@@ -444,7 +444,7 @@ docker push $IMG
 echo "${IMG%:*}@$(docker buildx imagetools inspect $IMG | awk '/^Digest:/ {print $2}')" > bin/image-ref
 ```
 
-Then read the new reference. If it equals the old one, steps 1 to 3 change nothing: the Deployment does not roll and no Service event reaches CloudNativePG. This command says so. If it prints `same reference: nothing to upgrade`, stop here: there is nothing to upgrade. On kind, a rebuild at the same commit with a clean tree gives the same digest, so an upgrade needs a new commit. The later blocks of this section use `NEW_REF`, so keep the same shell.
+Then read the new reference. If it equals the old one, steps 1 to 3 change nothing: the Deployment does not roll and no Service event reaches CloudNativePG. This command says so. If it prints `same reference: nothing to upgrade`, stop here: there is nothing to upgrade. On kind, a rebuild at the same commit with a clean tree can give the same digest, so an upgrade needs a new commit. The later blocks of this section use `NEW_REF`, so keep the same shell.
 
 ```bash
 NEW_REF=$(cat bin/image-ref)
@@ -479,7 +479,7 @@ cmp -s bin/image-ref bin/image-ref.previous && echo "same reference: nothing to 
    kubectl delete pod -l app=pull-check -n $NS
    ```
 
-   The check Pods run as the ServiceAccount `$CLUSTER`, which is the one the instance Pods use unless the Cluster sets `spec.serviceAccountName`. In that case use that name. CloudNativePG adds the Cluster's `spec.imagePullSecrets` to it. With the default ServiceAccount, a registry credential that sits on the Cluster's account would make the check fail where the instances pull fine. To use a secret directly, add `\"imagePullSecrets\":[{\"name\":\"<secret>\"}]` to the `spec` in `--overrides`. When the wait times out, `kubectl get pods -l app=pull-check -n $NS -o wide` shows which node cannot pull. Delete those Pods and fix the pull before you go on. Then change the ConfigMap and watch the instances roll. The ConfigMap comes last because every plugin replica reads that one ConfigMap: changing it after the Deployment has rolled makes the instances roll once, onto a sidecar the new plugin already serves. Changed first, the instances would roll onto the new sidecar while old replicas still serve, and the new replicas could then return a different Pod patch and roll them again.
+   The check Pods run as the ServiceAccount `$CLUSTER`, which is the one the instance Pods use unless the Cluster sets `spec.serviceAccountName`. In that case use that name. CloudNativePG adds the Cluster's `spec.imagePullSecrets` to it. With the default ServiceAccount, a registry credential that sits on the Cluster's account would make the check fail where the instances pull fine. To use a secret directly, add `\"imagePullSecrets\":[{\"name\":\"<secret>\"}]` to the `spec` in `--overrides`. When the wait times out, `kubectl get pods -l app=pull-check -n $NS -o wide` shows which node cannot pull. Delete those Pods and fix the pull before you go on. Then change the ConfigMap and watch the instances roll. The ConfigMap comes last so that the new sidecar starts only after step 1 has applied the release's CRDs and RBAC and every plugin replica runs the new version.
 
    ```bash
    sed "s|^      - image=.*|      - image=$NEW_REF|" bin/install/kustomization.yaml > bin/install/kustomization.yaml.new \

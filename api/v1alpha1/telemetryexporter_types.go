@@ -44,8 +44,9 @@ type TelemetryExporterSpec struct {
 	// and OTEL_RESOURCE_ATTRIBUTES. A Secret key wins over the same ConfigMap key, and a field of
 	// spec.exporter wins over both. OTEL_EXPORTER_OTLP_METRICS_ENDPOINT is used as given.
 	// OTEL_EXPORTER_OTLP_ENDPOINT gets v1/metrics appended when the protocol is http/protobuf. HEADERS
-	// and METRICS_HEADERS must be in the Secret, and the key in the ConfigMap is rejected. The keys CERTIFICATE, CLIENT_KEY and CLIENT_CERTIFICATE are
-	// rejected: use spec.exporter.tls. OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE other than
+	// and METRICS_HEADERS must be in the Secret, and the key in the ConfigMap is rejected. The keys
+	// CERTIFICATE, CLIENT_KEY and CLIENT_CERTIFICATE are rejected: use spec.exporter.tls.
+	// OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE other than
 	// cumulative and OTEL_EXPORTER_OTLP_METRICS_DEFAULT_HISTOGRAM_AGGREGATION other than
 	// explicit_bucket_histogram are rejected. INSECURE is ignored with a warning, because the endpoint
 	// scheme selects TLS. OTEL_SERVICE_NAME is ignored with a warning, because service.name is the

@@ -3,7 +3,6 @@ package queries
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -320,22 +319,22 @@ func (d *Definition) labelColumns(q UserQuery) []string {
 }
 
 type canonicalColumn struct {
-	Name        string            `json:"name"`
-	Role        string            `json:"role"`
-	Usage       string            `json:"usage"`
-	Metric      string            `json:"metric"`
-	Kind        string            `json:"kind"`
-	Description string            `json:"description"`
-	Mapping     map[string]string `json:"mapping"`
-	Versions    string            `json:"versions"`
+	Name        string
+	Role        string
+	Usage       string
+	Metric      string
+	Kind        string
+	Description string
+	Mapping     map[string]string
+	Versions    string
 }
 
 type canonicalDefinition struct {
-	Namespace   string            `json:"namespace"`
-	SQL         string            `json:"sql"`
-	Predicate   string            `json:"predicate"`
-	PrimaryOnly bool              `json:"primaryOnly"`
-	Columns     []canonicalColumn `json:"columns"`
+	Namespace   string
+	SQL         string
+	Predicate   string
+	PrimaryOnly bool
+	Columns     []canonicalColumn
 }
 
 // fingerprint hashes what shapes samples: namespace, SQL, predicate, primary-only and the columns. Written from plain values
@@ -366,8 +365,7 @@ func (d *Definition) fingerprint(versionSources map[string]string) string {
 		})
 	}
 
-	// Strings, a bool and string maps always encode.
-	encoded, _ := json.Marshal(canonical)
+	encoded := fmt.Appendf(nil, "%#v", canonical)
 	sum := sha256.Sum256(encoded)
 
 	return hex.EncodeToString(sum[:])

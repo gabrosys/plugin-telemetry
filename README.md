@@ -1,6 +1,5 @@
 # plugin-telemetry
 
-> [!WARNING]
 > This plugin was built with AI assistance. Its quality and production readiness are still under review.
 
 A CloudNativePG (CNPG) plugin that pushes a Cluster's PostgreSQL metrics to an OpenTelemetry Collector over OTLP. CNPG exposes the same metrics on a Prometheus endpoint in each instance pod. This plugin delivers them by push, so a cluster can move to an OpenTelemetry pipeline. It reads the custom-query configuration you already keep for CNPG's exporter, so your metric definitions keep working. It also reproduces CNPG's built-in `cnpg_collector_*` metrics, which dashboards depend on.

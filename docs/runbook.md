@@ -426,7 +426,7 @@ Then build as in section 2, which overwrites `bin/image-ref`. On kind:
 make kind-load KIND_CLUSTER=$KIND_CLUSTER
 ```
 
-On any other cluster, use the same registry path as in section 2 and a new tag. A moved tag can leave the previous digest untagged, and some registries then garbage-collect it, which breaks the rollback.
+On any other cluster, use the same registry path as in section 2 and a new tag. Each release then keeps its own tag next to the digest in `bin/image-ref.previous`.
 
 ```bash
 IMG=registry.example.com/team/plugin-telemetry:v0.6.0

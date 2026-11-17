@@ -2,8 +2,8 @@ processor:
   ignoreTypes:
     - "(MetricQuerySet|TelemetryExporter)List$"
   ignoreFields:
-    - "status$"
-    - "TypeMeta$"
+    - "\\.status$"
+    - "\\.TypeMeta$"
 
 render:
-  kubernetesVersion: 1.37
+  kubernetesVersion: "1.37"

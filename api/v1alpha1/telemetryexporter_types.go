@@ -40,7 +40,7 @@ type TelemetryExporterSpec struct {
 
 	// EnvFrom names a ConfigMap and a Secret whose OpenTelemetry environment keys are read as settings.
 	// The sidecar reads the ENDPOINT, PROTOCOL, COMPRESSION, TIMEOUT (in milliseconds) and HEADERS keys
-	// of OTEL_EXPORTER_OTLP_, where OTEL_EXPORTER_OTLP_METRICS_<NAME> wins over OTEL_EXPORTER_OTLP_<NAME>,
+	// of OTEL_EXPORTER_OTLP_, where `OTEL_EXPORTER_OTLP_METRICS_<NAME>` wins over `OTEL_EXPORTER_OTLP_<NAME>`,
 	// and OTEL_RESOURCE_ATTRIBUTES. A Secret key wins over the same ConfigMap key, and a field of
 	// spec.exporter wins over both. OTEL_EXPORTER_OTLP_METRICS_ENDPOINT is used as given.
 	// OTEL_EXPORTER_OTLP_ENDPOINT gets v1/metrics appended when the protocol is http/protobuf. HEADERS
@@ -55,7 +55,7 @@ type TelemetryExporterSpec struct {
 	EnvFrom *EnvFromSource `json:"envFrom,omitempty"`
 
 	// ResourceLabels lists Cluster label keys to copy into the resource attributes, each as
-	// cnpg.cluster.label.<key>. A label the Cluster does not have is skipped. Such an attribute wins
+	// `cnpg.cluster.label.<key>`. A label the Cluster does not have is skipped. Such an attribute wins
 	// over the same key in resourceAttributes. The instance role label (cnpg.io/instanceRole) is not
 	// allowed, because it changes at switchover.
 	//

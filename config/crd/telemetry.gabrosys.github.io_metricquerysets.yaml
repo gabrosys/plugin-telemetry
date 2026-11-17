@@ -97,7 +97,7 @@ spec:
                               type: object
                             name:
                               description: |-
-                                Name replaces the column name in the metric name: cnpg_<query name>_<name>. A DURATION metric
+                                Name replaces the column name in the metric name: `cnpg_<query name>_<name>`. A DURATION metric
                                 also ends in _milliseconds.
                               type: string
                             pg_version:
@@ -138,7 +138,7 @@ spec:
                       x-kubernetes-list-type: atomic
                     name:
                       description: 'Name replaces the query key in the metric names:
-                        cnpg_<name>_<column>.'
+                        `cnpg_<name>_<column>`.'
                       type: string
                     predicate_query:
                       description: |-
@@ -180,7 +180,7 @@ spec:
                 description: |-
                   Queries maps a query key to its definition. A key starts with a letter or underscore and
                   continues with letters, digits and underscores, up to 63 characters. Unless the query sets name,
-                  its metrics are named cnpg_<key>_<column>. A metric name must not start with cnpg_otel_.
+                  its metrics are named `cnpg_<key>_<column>`. A metric name must not start with cnpg_otel_.
                 maxProperties: 128
                 minProperties: 1
                 type: object

@@ -30,7 +30,7 @@ type MetricQuerySetList struct {
 type MetricQuerySetSpec struct {
 	// Queries maps a query key to its definition. A key starts with a letter or underscore and
 	// continues with letters, digits and underscores, up to 63 characters. Unless the query sets name,
-	// its metrics are named cnpg_<key>_<column>. A metric name must not start with cnpg_otel_.
+	// its metrics are named `cnpg_<key>_<column>`. A metric name must not start with cnpg_otel_.
 	//
 	// +kubebuilder:validation:MinProperties=1
 	// +kubebuilder:validation:MaxProperties=128
@@ -97,7 +97,7 @@ type Query struct {
 	// +optional
 	TargetDatabases []string `json:"target_databases,omitempty"`
 
-	// Name replaces the query key in the metric names: cnpg_<name>_<column>.
+	// Name replaces the query key in the metric names: `cnpg_<name>_<column>`.
 	//
 	// +optional
 	Name string `json:"name,omitempty"`
@@ -138,7 +138,7 @@ type ColumnSpec struct {
 	// +optional
 	MetricsMapping map[string]float64 `json:"metrics_mapping,omitempty"`
 
-	// Name replaces the column name in the metric name: cnpg_<query name>_<name>. A DURATION metric
+	// Name replaces the column name in the metric name: `cnpg_<query name>_<name>`. A DURATION metric
 	// also ends in _milliseconds.
 	//
 	// +optional

@@ -3,25 +3,17 @@
 ## Packages
 - [telemetry.gabrosys.github.io/v1alpha1](#telemetrygabrosysgithubiov1alpha1)
 
-
 ## telemetry.gabrosys.github.io/v1alpha1
 
 Package v1alpha1 holds the TelemetryExporter and MetricQuerySet custom resources.
-
 
 ### Resource Types
 - [MetricQuerySet](#metricqueryset)
 - [TelemetryExporter](#telemetryexporter)
 
-
-
 #### ColumnSpec
 
-
-
 ColumnSpec says how a result column is used.
-
-
 
 _Appears in:_
 - [MetricColumn](#metriccolumn)
@@ -32,17 +24,12 @@ _Appears in:_
 | `description` _string_ | Description is the metric's description. A LABEL or DISCARD column does not use it. |  | Optional: \{\} <br /> |
 | `metric_mapping` _object (keys:string, values:float)_ | MetricMapping maps the text values of a MAPPEDMETRIC column to numbers. A value it does not list<br />drops that sample. |  | MaxProperties: 256 <br />Optional: \{\} <br /> |
 | `metrics_mapping` _object (keys:string, values:float)_ | MetricsMapping is MetricMapping under the other spelling, the one CloudNativePG's documentation<br />uses. MetricMapping wins when both are set. |  | MaxProperties: 256 <br />Optional: \{\} <br /> |
-| `name` _string_ | Name replaces the column name in the metric name: cnpg_<query name>_<name>. A DURATION metric<br />also ends in _milliseconds. |  | Optional: \{\} <br /> |
+| `name` _string_ | Name replaces the column name in the metric name: `cnpg_<query name>_<name>`. A DURATION metric<br />also ends in _milliseconds. |  | Optional: \{\} <br /> |
 | `pg_version` _string_ | PgVersion is a semantic version range of PostgreSQL servers. On another version, the metric of a<br />value column is not exported, but the column must still be in the result. It has no effect on a<br />LABEL or DISCARD column. An invalid range is ignored with a warning, as if the field were empty.<br />When empty, the column applies to every version. |  | Optional: \{\} <br /> |
-
 
 #### EnvFromSource
 
-
-
 EnvFromSource names the objects that hold OTEL_* settings.
-
-
 
 _Appears in:_
 - [TelemetryExporterSpec](#telemetryexporterspec)
@@ -52,14 +39,9 @@ _Appears in:_
 | `configMap` _[LocalObjectReference](#localobjectreference)_ | ConfigMap is a ConfigMap in this namespace. |  | Optional: \{\} <br /> |
 | `secret` _[LocalObjectReference](#localobjectreference)_ | Secret is a Secret in this namespace. |  | Optional: \{\} <br /> |
 
-
 #### Exclude
 
-
-
 Exclude removes queries, metrics and databases from collection.
-
-
 
 _Appears in:_
 - [MetricsSpec](#metricsspec)
@@ -70,14 +52,9 @@ _Appears in:_
 | `metrics` _string array_ | Metrics lists full metric names to drop, such as cnpg_pg_stat_database_xact_commit. A name may be<br />a Go path.Match pattern. A query whose metrics are all dropped does not run. |  | MaxItems: 64 <br />Optional: \{\} <br /> |
 | `databases` _string array_ | Databases lists database names to skip: no query runs in them. A name may be a Go path.Match pattern. |  | MaxItems: 64 <br />Optional: \{\} <br /> |
 
-
 #### KeyReference
 
-
-
 KeyReference points to a key of a Secret or of a ConfigMap.
-
-
 
 _Appears in:_
 - [OTLPTLS](#otlptls)
@@ -87,14 +64,9 @@ _Appears in:_
 | `secret` _[KeySelector](#keyselector)_ | Secret is a key of a Secret in this namespace. |  | Optional: \{\} <br /> |
 | `configMap` _[KeySelector](#keyselector)_ | ConfigMap is a key of a ConfigMap in this namespace. |  | Optional: \{\} <br /> |
 
-
 #### KeySelector
 
-
-
 KeySelector names a key of an object in this namespace.
-
-
 
 _Appears in:_
 - [KeyReference](#keyreference)
@@ -105,14 +77,9 @@ _Appears in:_
 | `name` _string_ | Name is the object's name. |  | MinLength: 1 <br /> |
 | `key` _string_ | Key is the key in the object's data. |  | MinLength: 1 <br /> |
 
-
 #### Limits
 
-
-
 Limits bounds what the queries may cost. A limit left unset keeps the sidecar's default.
-
-
 
 _Appears in:_
 - [MetricsSpec](#metricsspec)
@@ -129,14 +96,9 @@ _Appears in:_
 | `queryTimeout` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#duration-v1-meta)_ | QueryTimeout is the time one query may run, set as statement_timeout. It must be at least 100ms and<br />at most 1073741823ms, so that twice it fits PostgreSQL's idle_in_transaction_session_timeout. The<br />default is 10s. |  | MaxLength: 32 <br />Type: string <br />Optional: \{\} <br /> |
 | `lockTimeout` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#duration-v1-meta)_ | LockTimeout is the time a query waits for a lock, set as lock_timeout. It must be more than zero and<br />at most 2147483647ms (PostgreSQL's lock_timeout maximum). The default is 1s. |  | MaxLength: 32 <br />Type: string <br />Optional: \{\} <br /> |
 
-
 #### LocalObjectReference
 
-
-
 LocalObjectReference names an object in this namespace.
-
-
 
 _Appears in:_
 - [EnvFromSource](#envfromsource)
@@ -146,10 +108,9 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | Name is the object's name. |  | MinLength: 1 <br /> |
 
-
 #### MetricColumn
 
-_Underlying type:_ _[map[string]ColumnSpec](#map[string]columnspec)_
+_Underlying type:_ _object (keys:string, values:[ColumnSpec](#columnspec))_
 
 MetricColumn describes one result column: a single entry whose key is the column name.
 
@@ -160,19 +121,11 @@ _Validation:_
 _Appears in:_
 - [Query](#query)
 
-
-
 #### MetricQuerySet
-
-
 
 MetricQuerySet holds custom metric queries in the CloudNativePG format: the same field names and
 meanings as the queries in a CloudNativePG monitoring ConfigMap, as a schema Kubernetes validates
 when the resource is applied. A TelemetryExporter lists the sets it uses in spec.metrics.querySets.
-
-
-
-
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -181,30 +134,20 @@ when the resource is applied. A TelemetryExporter lists the sets it uses in spec
 | `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[MetricQuerySetSpec](#metricquerysetspec)_ | Spec holds the queries. |  |  |
 
-
 #### MetricQuerySetSpec
 
-
-
 MetricQuerySetSpec holds the queries of a MetricQuerySet.
-
-
 
 _Appears in:_
 - [MetricQuerySet](#metricqueryset)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `queries` _object (keys:string, values:[Query](#query))_ | Queries maps a query key to its definition. A key starts with a letter or underscore and<br />continues with letters, digits and underscores, up to 63 characters. Unless the query sets name,<br />its metrics are named cnpg_<key>_<column>. A metric name must not start with cnpg_otel_. |  | MaxProperties: 128 <br />MinProperties: 1 <br /> |
-
+| `queries` _object (keys:string, values:[Query](#query))_ | Queries maps a query key to its definition. A key starts with a letter or underscore and<br />continues with letters, digits and underscores, up to 63 characters. Unless the query sets name,<br />its metrics are named `cnpg_<key>_<column>`. A metric name must not start with cnpg_otel_. |  | MaxProperties: 128 <br />MinProperties: 1 <br /> |
 
 #### MetricsSpec
 
-
-
 MetricsSpec holds the metrics settings.
-
-
 
 _Appears in:_
 - [TelemetryExporterSpec](#telemetryexporterspec)
@@ -221,14 +164,9 @@ _Appears in:_
 | `limits` _[Limits](#limits)_ | Limits bounds what the queries may cost. A limit left out keeps its default. |  | Optional: \{\} <br /> |
 | `exclude` _[Exclude](#exclude)_ | Exclude removes queries, metrics and databases from collection. It is empty by default. |  | Optional: \{\} <br /> |
 
-
 #### OTLPExporter
 
-
-
 OTLPExporter is the OTLP connection every signal shares.
-
-
 
 _Appears in:_
 - [TelemetryExporterSpec](#telemetryexporterspec)
@@ -242,14 +180,9 @@ _Appears in:_
 | `headers` _[KeySelector](#keyselector)_ | Headers is a key of a Secret in this namespace that holds request headers in the<br />OTEL_EXPORTER_OTLP_HEADERS format: name=value pairs separated by commas, values percent-encoded.<br />When empty, the HEADERS key of the envFrom Secret is used. |  | Optional: \{\} <br /> |
 | `tls` _[OTLPTLS](#otlptls)_ | TLS sets the TLS options. It needs an https:// endpoint. When empty, the system roots verify the<br />collector, no client certificate is sent and TLS 1.2 is the lowest version. |  | Optional: \{\} <br /> |
 
-
 #### OTLPTLS
 
-
-
 OTLPTLS sets the TLS options of the OTLP connection.
-
-
 
 _Appears in:_
 - [OTLPExporter](#otlpexporter)
@@ -261,15 +194,10 @@ _Appears in:_
 | `serverName` _string_ | ServerName is the name to check in the collector's certificate. When empty, the host of the<br />endpoint is used. |  | Optional: \{\} <br /> |
 | `minVersion` _string_ | MinVersion is the lowest TLS version to accept: 1.2 or 1.3. The default is 1.2. |  | Enum: [1.2 1.3] <br />Optional: \{\} <br /> |
 
-
 #### Query
-
-
 
 Query is one query and the metrics its result columns produce. Field names and meanings are those
 of a CloudNativePG custom query.
-
-
 
 _Appears in:_
 - [MetricQuerySetSpec](#metricquerysetspec)
@@ -284,16 +212,11 @@ _Appears in:_
 | `cache_seconds` _integer_ | CacheSeconds is the minimum number of seconds between two runs of the query. A shorter interval is<br />raised to this value. The default is 0, no minimum. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `runonserver` _string_ | RunOnServer is a semantic version range of PostgreSQL servers the query runs on, such as<br />">=15.0.0". A query with an invalid range is disabled. When empty, it runs on every version. |  | Optional: \{\} <br /> |
 | `target_databases` _string array_ | TargetDatabases lists the databases to run the query in. A name with *, ? or [ is a Go path.Match<br />pattern matched against the databases that accept connections and are not templates. When empty,<br />the query runs in the Cluster's application database, which is postgres when the bootstrap sets none. |  | MaxItems: 64 <br />Optional: \{\} <br /> |
-| `name` _string_ | Name replaces the query key in the metric names: cnpg_<name>_<column>. |  | Optional: \{\} <br /> |
-
+| `name` _string_ | Name replaces the query key in the metric names: `cnpg_<name>_<column>`. |  | Optional: \{\} <br /> |
 
 #### QueryGroup
 
-
-
 QueryGroup runs a set of queries at its own interval.
-
-
 
 _Appears in:_
 - [MetricsSpec](#metricsspec)
@@ -304,18 +227,11 @@ _Appears in:_
 | `interval` _[Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#duration-v1-meta)_ | Interval is how often the group's queries run. At least 1s. The default is spec.metrics.defaultInterval.<br />A query whose cache_seconds is higher runs at that interval instead. |  | MaxLength: 32 <br />Type: string <br />Optional: \{\} <br /> |
 | `queries` _string array_ | Queries lists query keys or Go path.Match patterns, such as pg_stat_*. A key is the name under<br />which the query is defined, not its name field. A query that several groups match uses the first<br />of them in the list. |  | MaxItems: 64 <br />MinItems: 1 <br /> |
 
-
 #### TelemetryExporter
-
-
 
 TelemetryExporter says where and how the plugin sidecar exports telemetry for the Clusters in its
 namespace. One TelemetryExporter can serve every Cluster in the namespace; a Cluster picks it with the
 plugin parameter "exporter", and uses the one named default when the parameter is not set.
-
-
-
-
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -324,14 +240,9 @@ plugin parameter "exporter", and uses the one named default when the parameter i
 | `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.37/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
 | `spec` _[TelemetryExporterSpec](#telemetryexporterspec)_ | Spec holds the exporter settings. The endpoint is required: set spec.exporter.endpoint, or put<br />OTEL_EXPORTER_OTLP_METRICS_ENDPOINT or OTEL_EXPORTER_OTLP_ENDPOINT in envFrom. |  |  |
 
-
 #### TelemetryExporterSpec
 
-
-
 TelemetryExporterSpec holds what every signal shares, then one section per signal.
-
-
 
 _Appears in:_
 - [TelemetryExporter](#telemetryexporter)
@@ -339,9 +250,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `exporter` _[OTLPExporter](#otlpexporter)_ | Exporter is the OTLP connection every signal shares. |  | Optional: \{\} <br /> |
-| `envFrom` _[EnvFromSource](#envfromsource)_ | EnvFrom names a ConfigMap and a Secret whose OpenTelemetry environment keys are read as settings.<br />The sidecar reads the ENDPOINT, PROTOCOL, COMPRESSION, TIMEOUT (in milliseconds) and HEADERS keys<br />of OTEL_EXPORTER_OTLP_, where OTEL_EXPORTER_OTLP_METRICS_<NAME> wins over OTEL_EXPORTER_OTLP_<NAME>,<br />and OTEL_RESOURCE_ATTRIBUTES. A Secret key wins over the same ConfigMap key, and a field of<br />spec.exporter wins over both. OTEL_EXPORTER_OTLP_METRICS_ENDPOINT is used as given.<br />OTEL_EXPORTER_OTLP_ENDPOINT gets v1/metrics appended when the protocol is http/protobuf. HEADERS<br />is read from the Secret only. The keys CERTIFICATE, CLIENT_KEY and CLIENT_CERTIFICATE are<br />rejected: use spec.exporter.tls. OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE other than<br />cumulative and OTEL_EXPORTER_OTLP_METRICS_DEFAULT_HISTOGRAM_AGGREGATION other than<br />explicit_bucket_histogram are rejected. INSECURE is ignored with a warning, because the endpoint<br />scheme selects TLS. OTEL_SERVICE_NAME is ignored with a warning, because service.name is the<br />Cluster name. |  | Optional: \{\} <br /> |
-| `resourceLabels` _string array_ | ResourceLabels lists Cluster label keys to copy into the resource attributes, each as<br />cnpg.cluster.label.<key>. A label the Cluster does not have is skipped. Such an attribute wins<br />over the same key in resourceAttributes. The instance role label (cnpg.io/instanceRole) is not<br />allowed, because it changes at switchover. |  | MaxItems: 32 <br />items:MaxLength: 317 <br />items:Pattern: `^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$` <br />Optional: \{\} <br /> |
+| `envFrom` _[EnvFromSource](#envfromsource)_ | EnvFrom names a ConfigMap and a Secret whose OpenTelemetry environment keys are read as settings.<br />The sidecar reads the ENDPOINT, PROTOCOL, COMPRESSION, TIMEOUT (in milliseconds) and HEADERS keys<br />of OTEL_EXPORTER_OTLP_, where `OTEL_EXPORTER_OTLP_METRICS_<NAME>` wins over `OTEL_EXPORTER_OTLP_<NAME>`,<br />and OTEL_RESOURCE_ATTRIBUTES. A Secret key wins over the same ConfigMap key, and a field of<br />spec.exporter wins over both. OTEL_EXPORTER_OTLP_METRICS_ENDPOINT is used as given.<br />OTEL_EXPORTER_OTLP_ENDPOINT gets v1/metrics appended when the protocol is http/protobuf. HEADERS<br />is read from the Secret only. The keys CERTIFICATE, CLIENT_KEY and CLIENT_CERTIFICATE are<br />rejected: use spec.exporter.tls. OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE other than<br />cumulative and OTEL_EXPORTER_OTLP_METRICS_DEFAULT_HISTOGRAM_AGGREGATION other than<br />explicit_bucket_histogram are rejected. INSECURE is ignored with a warning, because the endpoint<br />scheme selects TLS. OTEL_SERVICE_NAME is ignored with a warning, because service.name is the<br />Cluster name. |  | Optional: \{\} <br /> |
+| `resourceLabels` _string array_ | ResourceLabels lists Cluster label keys to copy into the resource attributes, each as<br />`cnpg.cluster.label.<key>`. A label the Cluster does not have is skipped. Such an attribute wins<br />over the same key in resourceAttributes. The instance role label (cnpg.io/instanceRole) is not<br />allowed, because it changes at switchover. |  | MaxItems: 32 <br />items:MaxLength: 317 <br />items:Pattern: `^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$` <br />Optional: \{\} <br /> |
 | `resourceAttributes` _object (keys:string, values:string)_ | ResourceAttributes adds fixed attributes to the resource of every export. They win over<br />OTEL_RESOURCE_ATTRIBUTES from envFrom. The sidecar sets service.name, service.namespace,<br />service.instance.id and the k8s.namespace.name, k8s.pod.name, k8s.pod.uid, k8s.node.name and<br />k8s.container.name attributes itself, and an entry with one of these keys is dropped. |  | MaxProperties: 32 <br />Optional: \{\} <br /> |
 | `metrics` _[MetricsSpec](#metricsspec)_ | Metrics holds the metrics settings. |  | Optional: \{\} <br /> |
-
-

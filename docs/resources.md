@@ -1,6 +1,6 @@
 # Resource use
 
-Measured on kind (Kubernetes 1.37, PostgreSQL 18.7) with the commands below; each writes its numbers to `bin/measure/<name>-<cnpg>.json`. Every result was taken at commit 33fdac5 unless a section names an earlier run.
+Measured on kind (Kubernetes 1.37, PostgreSQL 18.7) with the commands below; each writes its numbers to `bin/measure/<name>-<cnpg>.json`. Every result was taken at commit 33fdac5, apart from the runs kept as history; the Environment table names their commits.
 
 ## Verdicts
 
@@ -91,7 +91,7 @@ Why it stands for a real replica: the replica is the deployed one, with the same
 
 The measurement was taken with the single Cluster List of `exportersToClusters` using `client.UnsafeDisableDeepCopy`.
 
-Objects: 100 namespaces, 1000 unreconciled Clusters (plus `measure-ref`), 1000 token Secrets with a token, no Pod in the 100 namespaces. The mean JSON size of one Cluster is 9482 B (`clusterBytes`). Creating the objects took 38 s; the 1000 token Secrets were ready 201 s after the first create (149 s in an earlier run on a less loaded host).
+Objects: 100 namespaces, 1000 unreconciled Clusters (plus `measure-ref`), 1000 token Secrets with a token, no Pod in the 100 namespaces. The mean JSON size of one Cluster is 9482 B (`clusterBytes`). Creating the objects took 38 s; the 1000 token Secrets were ready 201 s after the first create (149 s in an earlier run; this run shared the host with the watches measurement).
 
 Idle replicas, 5 minutes after the identities were ready, then 41 readings over 10 minutes:
 
@@ -197,11 +197,11 @@ The spec `test/e2e/resilience/shutdown_test.go` deletes the Pod of a one-instanc
 | Docker server (`docker version --format '{{.Server.Version}}'`) | 29.2.1 |
 | kind node image | `kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5` (Kubernetes 1.37.0), kind v0.33.0 |
 | CloudNativePG, PostgreSQL | v1.30.1, 18.7 |
-| Commit, image | 33fdac5, image `v0.4.0-212-g33fdac5`, for every result. Earlier runs, kept as history: the two 64Mi runs (before and after bd37222, the per-row change), the first 96Mi run at ccc4235 (the 96Mi default) and the per-row "before" and "after the change" figures at bd37222 |
+| Commit, image | 33fdac5, image `v0.4.0-212-g33fdac5`, for every result. Earlier runs, kept as history: the two 64Mi runs (before and after bd37222, the per-row change), the first 96Mi run at ccc4235 (the 96Mi default) and the per-row "before" figures at the parent of bd37222 and the "after the change" figures at bd37222 |
 
 ## Reproducing
 
-Each command needs the kind cluster of its CNPG version (`KIND_CLUSTER=plugin-telemetry-v1-30-1`). Durations are from the runs above.
+Each command needs the kind cluster of its CNPG version (`KIND_CLUSTER=plugin-telemetry-v1-30-1`). Durations are from the runs above. At 33fdac5 two kind clusters ran side by side: the sidecar, series and plugin runs on one, the watches run on the other.
 
 | Measurement | Command | Duration |
 |---|---|---|

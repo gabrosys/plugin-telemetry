@@ -1,0 +1,59 @@
+# Restricts the plugin Pods in cnpg-system to the traffic they need. It needs a CNI that enforces NetworkPolicy.
+# Fill in the API server address and the collector rule before you apply it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: plugin-telemetry
+  namespace: cnpg-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: plugin-telemetry
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # gRPC from the CloudNativePG operator.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudnative-pg
+      ports:
+        - protocol: TCP
+          port: 9090
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # API server. The policy sees the address after the Service is translated, so use the
+    # endpoint IP and port from `kubectl get endpoints kubernetes`, not the Service IP and 443.
+    # Replace 192.0.2.10/32 with that IP. Port 6443 is the common value; use the port that command shows.
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.10/32
+      ports:
+        - protocol: TCP
+          port: 6443
+    # Collector for the plugin's own metrics. Uncomment it when you set --metrics-endpoint,
+    # and match the namespace, labels and port to the collector.
+    # - to:
+    #     - namespaceSelector:
+    #         matchLabels:
+    #           kubernetes.io/metadata.name: otel
+    #       podSelector:
+    #         matchLabels:
+    #           app.kubernetes.io/name: collector
+    #   ports:
+    #     - protocol: TCP
+    #       port: 4318

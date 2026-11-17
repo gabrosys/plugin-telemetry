@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
-	"os"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -56,13 +54,10 @@ type manifest struct {
 }
 
 func readManifests(file string) ([]manifest, error) {
-	raw, err := fs.ReadFile(os.DirFS(repoRoot), file)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", file, err)
-	}
+	GinkgoHelper()
 
 	var out []manifest
-	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec := yaml.NewDecoder(bytes.NewReader(readRepoFile(file)))
 	for {
 		var m manifest
 		err := dec.Decode(&m)

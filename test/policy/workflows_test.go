@@ -135,11 +135,9 @@ func findWorkflow(name string) (workflowFile, bool) {
 }
 
 func readJSON(name string, v any) error {
-	raw, err := fs.ReadFile(os.DirFS(repoRoot), name)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", name, err)
-	}
-	if err := json.Unmarshal(raw, v); err != nil {
+	GinkgoHelper()
+
+	if err := json.Unmarshal(readRepoFile(name), v); err != nil {
 		return fmt.Errorf("parse %s: %w", name, err)
 	}
 

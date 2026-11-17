@@ -9,9 +9,13 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
-const goldenPath = "../../docs/self-metrics.md"
+const (
+	goldenDir  = "../../docs"
+	goldenName = "self-metrics.md"
+)
 
 var _ = Describe("Catalogue", func() {
 	It("has the designed rows", func() {
@@ -92,9 +96,7 @@ var _ = Describe("Catalogue", func() {
 	})
 
 	It("generates a plugin section in docs/self-metrics.md", func() {
-		doc, err := os.ReadFile(goldenPath)
-		Expect(err).NotTo(HaveOccurred())
-		text := string(doc)
+		text := string(fixture.Read(GinkgoTB(), goldenDir, goldenName))
 		Expect(text).To(ContainSubstring("## Engine"))
 		Expect(text).To(ContainSubstring("## Plugin"))
 		Expect(text).To(ContainSubstring("| `cnpg_otel_plugin_hook_calls_total` | counter | `{call}` | `service`, `operation`, `outcome` |"))
@@ -121,9 +123,7 @@ var _ = Describe("Catalogue", func() {
 	})
 
 	It("documents denied and cnpg_otel_check in docs/self-metrics.md", func() {
-		doc, err := os.ReadFile(goldenPath)
-		Expect(err).NotTo(HaveOccurred())
-		text := string(doc)
+		text := string(fixture.Read(GinkgoTB(), goldenDir, goldenName))
 		Expect(text).To(ContainSubstring("Query runs by outcome (ok, error, timeout, skipped, capped, denied)."))
 		Expect(text).To(ContainSubstring("Configuration loads by source and outcome (ok, error, denied)."))
 		Expect(text).To(ContainSubstring("| `cnpg_otel_check` | gauge |  | `check` |"))
@@ -137,12 +137,10 @@ var _ = Describe("Catalogue", func() {
 		Expect(selfmetrics.Render(&buf, selfmetrics.Catalogue())).To(Succeed())
 
 		if os.Getenv("UPDATE_GOLDEN") != "" {
-			Expect(os.WriteFile(goldenPath, buf.Bytes(), 0o600)).To(Succeed())
+			Expect(fixture.Open(GinkgoTB(), goldenDir).WriteFile(goldenName, buf.Bytes(), 0o600)).To(Succeed())
 		}
 
-		want, err := os.ReadFile(goldenPath)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(buf.String()).To(Equal(string(want)))
+		Expect(buf.String()).To(Equal(string(fixture.Read(GinkgoTB(), goldenDir, goldenName))))
 	})
 })
 

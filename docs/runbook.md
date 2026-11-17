@@ -46,10 +46,10 @@ Its endpoints are `http://collector.otel.svc:4318` and `http://collector.otel.sv
 
 The image package on ghcr is private, so you build the image and put it where your nodes can pull it. The plugin and the sidecar are one image. The plugin pins it by digest, and a tag is refused. Both steps below end with the digest reference in `bin/image-ref`. The next section reads it from there.
 
-On kind, `make kind-load` builds the image, loads it into the cluster and writes the reference. Pass the same `KIND_CLUSTER` you gave `make dev-up`.
+On kind, `make kind-load` builds the image, loads it into the cluster and writes the reference. It also runs `make dev-up`, which creates the kind environment or brings it up to date, and pre-pulls the collector image on the nodes. Pass the same `KIND_CLUSTER` you gave `make dev-up`. The default name, used below, is `plugin-telemetry-v1-30-1`.
 
 ```bash
-make kind-load
+make kind-load KIND_CLUSTER=plugin-telemetry-v1-30-1
 cat bin/image-ref
 ```
 
@@ -287,10 +287,10 @@ Last, check what the collector received. The example collector's `debug` exporte
 ```bash
 sleep 45
 kubectl logs deployment/collector -n otel | grep -m1 'Name: cnpg_collector_up'
-kubectl logs deployment/collector -n otel | grep 'service.name' | sort -u
+kubectl logs deployment/collector -n otel | grep -o 'service.name: Str([^)]*)' | grep -v 'Str(plugin-telemetry)' | sort -u
 ```
 
-The first `grep` prints `-> Name: cnpg_collector_up`. The second lists `service.name: Str(<cluster>)` for each Cluster that exports. If nothing prints, wait a minute and run it again. With a collector of your own, look for the same metric name and resource attribute in your backend.
+The first `grep` prints `-> Name: cnpg_collector_up`. The second lists `service.name: Str(<cluster>)` for each Cluster that exports. It leaves out `Str(plugin-telemetry)`, which are the plugin's own metrics if you enabled them. If nothing prints, wait a minute and run it again. With a collector of your own, look for the same metric name and resource attribute in your backend.
 
 ## 6. Notice a quiet sidecar
 
@@ -313,7 +313,7 @@ kubectl annotate cluster.postgresql.cnpg.io $CLUSTER -n $NS runbook.telemetry.ga
 
 | Symptom | What the plugin shows | Fix |
 |---|---|---|
-| The TelemetryExporter does not exist, or the `exporter` parameter names the wrong one | Status `"exporterState":"missing"`, with `exporter` set to the name it looked for. The sidecar logs `no configuration, waiting for one` with `reason` `no configuration: telemetryexporter "default" does not exist`, and exports nothing, its own metrics included. | Create the TelemetryExporter in the Cluster's namespace under that name, or correct the parameter. The sidecar starts on its own and no Pod restarts. |
+| The TelemetryExporter does not exist, or the `exporter` parameter names the wrong one | Status `"exporterState":"missing"`, with `exporter` set to the name it looked for. The sidecar logs `no configuration, waiting for one` with `reason` `load settings: no configuration: telemetryexporter "default" does not exist`. A first line right after the sidecar starts has `reason` `load settings: no configuration: cluster "<name>" is not known yet`, which clears at once. The sidecar exports nothing, its own metrics included. | Create the TelemetryExporter in the Cluster's namespace under that name, or correct the parameter. The sidecar starts on its own and no Pod restarts. |
 | The TelemetryExporter is invalid | Status `"exporterState":"invalid"` and a `message` that starts with `check exporter:` and names the field. The sidecar logs `invalid configuration, waiting for a valid one`, or `invalid configuration, keeping the one in force` when an earlier configuration worked. | Fix the field the message names. The sidecar reloads at once. The plugin does not read Secrets, so a bad key inside the headers, CA, client certificate or `envFrom` Secret still shows `ok`. The sidecar logs it. |
 | The Cluster was opted in before its TelemetryExporter, and the status still says `missing` after you created it | Exports and the identity resume at once, but the status changes only when CloudNativePG reconciles the Cluster, and creating the exporter does not trigger that. | Touch the Cluster (above). |
 | `"identity":"pending"` with a line in `problems` that names an object | `Secret/<c>.telemetry-token has type <type>, not kubernetes.io/service-account-token: delete it`, `Secret/<c>.telemetry-token names ServiceAccount "<a>", not "<c>.telemetry": delete it`, `RoleBinding/<c>.telemetry refers to <kind>/<name>, not Role/<c>.telemetry: delete it`, or `<Kind>/<name> is not in the plugin's cache: not created yet, or not the plugin's`. The plugin logs `identity controller` with `"outcome":"in the way"` once. | The plugin never adopts an object it did not create. Delete the object the line names, for example `kubectl delete secret <c>.telemetry-token -n $NS`. The plugin retries every 5 s. `has no data.token yet` clears when Kubernetes fills the token. |
@@ -388,10 +388,10 @@ Then make CloudNativePG reconcile your Cluster, give it 30 s, and read its phase
 kubectl annotate cluster.postgresql.cnpg.io $CLUSTER -n $NS runbook.telemetry.gabrosys.github.io/touch="$(date +%s)" --overwrite
 sleep 30
 kubectl get cluster.postgresql.cnpg.io $CLUSTER -n $NS -o jsonpath='{.status.phase}'; echo
-kubectl logs -n cnpg-system deployment/cnpg-controller-manager --since=2m | grep -c '"level":"error"'
+kubectl logs -n cnpg-system deployment/cnpg-controller-manager --since=2m | grep -c '"level":"error"' || true
 ```
 
-The phase is `Cluster in healthy state`, and the count is 0. When the plugin cannot answer, the phase is `Cluster cannot proceed to reconciliation due to an error while interacting with plugins`.
+The phase is `Cluster in healthy state`, and the count is 0. `grep -c` exits 1 when the count is 0, so the command ends with `|| true`. When the plugin cannot answer, the phase is `Cluster cannot proceed to reconciliation due to an error while interacting with plugins`.
 
 Finally, check that the policy is enforced, using a Pod that is not the operator. From `default`, the connection to the plugin times out. Run the same command after you delete the policy to see the difference.
 
@@ -401,7 +401,7 @@ kubectl run curl-np -n default --rm -i --restart=Never \
   -- curl -sv -m 5 -k -o /dev/null https://plugin-telemetry.cnpg-system:9090
 ```
 
-With the policy the output ends with `Connection timed out after 5000 milliseconds` and the exit code is 28. Without it, curl completes the TLS handshake with `SSL connection using TLSv1.3`.
+With the policy the connection times out after about 5 s with `Connection timed out`, and the exit code is 28. Without it, curl completes the TLS handshake with `SSL connection using TLSv1.3`.
 
 ### Back out
 
@@ -419,7 +419,22 @@ Run the steps in this order. Build the new image as in [section 2](#2-build-the-
 cp bin/image-ref bin/image-ref.previous
 ```
 
-Then build, which overwrites `bin/image-ref`, and read the new reference.
+Then build as in section 2, which overwrites `bin/image-ref`. On kind:
+
+```bash
+make kind-load KIND_CLUSTER=plugin-telemetry-v1-30-1
+```
+
+On any other cluster, use a new tag:
+
+```bash
+IMG=registry.example.com/team/plugin-telemetry:v0.6.0
+make image IMG=$IMG
+docker push $IMG
+echo "${IMG%:*}@$(docker buildx imagetools inspect $IMG | awk '/^Digest:/ {print $2}')" > bin/image-ref
+```
+
+Then read the new reference.
 
 ```bash
 NEW_REF=$(cat bin/image-ref)
@@ -434,7 +449,7 @@ NEW_REF=$(cat bin/image-ref)
    kubectl rollout status deployment/plugin-telemetry -n cnpg-system --timeout=180s
    ```
 
-2. Once the Deployment has rolled out, change the plugin Service's annotation. CloudNativePG reads the plugin's capabilities only when it rebuilds its connection, and it rebuilds on an event of the Service. Without this step it can keep calling with the old capability set for up to about 10 hours.
+2. Once the Deployment has rolled out, change the plugin Service's annotation. If `$NEW_REF` equals the reference already in the kustomization, steps 1 to 3 change nothing: the Deployment does not roll, and annotating with the same value leaves the Service's `resourceVersion` unchanged, so CloudNativePG gets no event. Compare the two references, or check that the Service's `resourceVersion` moved (`kubectl get service -n cnpg-system plugin-telemetry -o jsonpath='{.metadata.resourceVersion}'`). CloudNativePG reads the plugin's capabilities only when it rebuilds its connection, and it rebuilds on an event of the Service. Without this step it can keep calling with the old capability set for up to about 10 hours.
 
    ```bash
    kubectl annotate service -n cnpg-system plugin-telemetry "telemetry.gabrosys.github.io/image=$NEW_REF" --overwrite

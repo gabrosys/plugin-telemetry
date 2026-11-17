@@ -26,12 +26,13 @@ The plugin runs in `cnpg-system`, and the example collector in `otel`. Those two
 - `kubectl`. `make dev-up` also downloads one to `bin/kubectl-v1.37.2`.
 - An OTLP collector that the instance Pods can reach, over HTTP (4318) or gRPC (4317). HTTP is the default. With gRPC, each sidecar stays on one collector Pod, so set `max_connection_age` on the collector gateway to spread them: in the `otlp` receiver, under `grpc`, `keepalive.server_parameters.max_connection_age`.
 
-For a local try, `make dev-up` creates a kind cluster with cert-manager and CloudNativePG. The cluster is named `plugin-telemetry-v1-30-1` by default. Set `KIND_CLUSTER` to that name once, or to another name if you want a different cluster, and the kind commands below use it. `CNPG_VERSION` defaults to v1.30.1 (Makefile); `make dev-up CNPG_VERSION=main` uses `main`. Point kubectl at the cluster afterwards.
+For a local try, `make dev-up` creates a kind cluster with cert-manager and CloudNativePG. The cluster is named `plugin-telemetry-v1-30-1` by default. Set `KIND_CLUSTER` to that name once, or to another name if you want a different cluster, and the kind commands below use it. Set `CNPG_VERSION` once too: v1.30.1, or `main`, which is also allowed. Every kind command below passes both. Point kubectl at the cluster afterwards.
 
 ```bash
 KIND_CLUSTER=plugin-telemetry-v1-30-1
-make dev-up KIND_CLUSTER=$KIND_CLUSTER CNPG_VERSION=v1.30.1
-kubectl config use-context kind-$KIND_CLUSTER
+CNPG_VERSION=v1.30.1
+make dev-up KIND_CLUSTER=${KIND_CLUSTER:?set KIND_CLUSTER, see section 1} CNPG_VERSION=${CNPG_VERSION:?set CNPG_VERSION, see section 1}
+kubectl config use-context kind-${KIND_CLUSTER:?set KIND_CLUSTER, see section 1}
 ```
 
 If you have no collector, apply the example one. It receives OTLP and prints a summary of what it gets.
@@ -47,10 +48,10 @@ Its endpoints are `http://collector.otel.svc:4318` and `http://collector.otel.sv
 
 The image package on ghcr is private, so you build the image and put it where your nodes can pull it. The plugin and the sidecar are one image. The plugin pins it by digest, and a tag is refused. Both steps below end with the digest reference in `bin/image-ref`. The next section reads it from there.
 
-On kind, `make kind-load` builds the image, loads it into the cluster and writes the reference. It also runs `make dev-up`, which re-applies cert-manager and CloudNativePG onto that cluster at the versions the Makefile pins (cert-manager v1.21.3, CloudNativePG v1.30.1 unless `CNPG_VERSION` says otherwise), and it pre-pulls the collector image on the nodes. Pass the same `KIND_CLUSTER` as for `make dev-up`. kind may print `not yet present on node ... loading` even for an unchanged image. That is harmless.
+On kind, `make kind-load` builds the image, loads it into the cluster and writes the reference. It also runs `make dev-up`, which re-applies cert-manager and CloudNativePG onto that cluster at the versions the Makefile pins (cert-manager v1.21.3, CloudNativePG v1.30.1 unless `CNPG_VERSION` says otherwise), and it pre-pulls the collector image on the nodes. Pass the same `KIND_CLUSTER` and `CNPG_VERSION` as for `make dev-up`. kind may print `not yet present on node ... loading` even for an unchanged image. That is harmless.
 
 ```bash
-make kind-load KIND_CLUSTER=$KIND_CLUSTER
+make kind-load KIND_CLUSTER=${KIND_CLUSTER:?set KIND_CLUSTER, see section 1} CNPG_VERSION=${CNPG_VERSION:?set CNPG_VERSION, see section 1}
 cat bin/image-ref
 ```
 
@@ -429,10 +430,12 @@ cp bin/image-ref bin/image-ref.previous
 Then build as in section 2, which overwrites `bin/image-ref`. On kind:
 
 ```bash
-make kind-load KIND_CLUSTER=${KIND_CLUSTER:-plugin-telemetry-v1-30-1}
+make kind-load KIND_CLUSTER=${KIND_CLUSTER:?set KIND_CLUSTER, see section 1} CNPG_VERSION=${CNPG_VERSION:?set CNPG_VERSION, see section 1}
 ```
 
-kind may print `not yet present on node ... loading` here too, even for an unchanged image. It is harmless. On any other cluster, use the same registry path as in section 2 and a new tag. Each release then keeps its own tag next to the digest in `bin/image-ref.previous`.
+kind may print `not yet present on node ... loading` here too, even for an unchanged image. It is harmless.
+
+On any other cluster, use the same registry path as in section 2. Use a new tag for each release.
 
 ```bash
 IMG=registry.example.com/team/plugin-telemetry:v0.6.0
@@ -441,7 +444,7 @@ docker push $IMG
 echo "${IMG%:*}@$(docker buildx imagetools inspect $IMG | awk '/^Digest:/ {print $2}')" > bin/image-ref
 ```
 
-Then read the new reference. If it equals the old one, steps 1 to 3 change nothing: the Deployment does not roll and no Service event reaches CloudNativePG. This command says so. If it prints `same reference: nothing to upgrade`, stop here: there is nothing to upgrade. The later blocks of this section use `NEW_REF`, so keep the same shell.
+Then read the new reference. If it equals the old one, steps 1 to 3 change nothing: the Deployment does not roll and no Service event reaches CloudNativePG. This command says so. If it prints `same reference: nothing to upgrade`, stop here: there is nothing to upgrade. On kind, a rebuild of unchanged code gives the same digest, so an upgrade needs a code change. The later blocks of this section use `NEW_REF`, so keep the same shell.
 
 ```bash
 NEW_REF=$(cat bin/image-ref)

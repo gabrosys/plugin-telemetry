@@ -24,7 +24,7 @@ const (
 	collectorService   = "collector"
 	exportsWarmup      = 3 * time.Minute
 	usageEvery         = 15 * time.Second
-	steadyWindow       = 2 * time.Minute
+	steadyWindow       = outageWindow
 	outageWindow       = 10 * time.Minute
 	growthLimit        = 1.10
 	resumeLimit        = 20 * time.Second
@@ -149,5 +149,5 @@ func collectorSpecs(s *suite) {
 			soft.Expect(framework.SidecarRestarts(&p)).To(Equal(restartsBefore[i]), "restarts of the sidecar of %s", pod.Name)
 		}
 		Expect(breaches).To(BeEmpty())
-	}, SpecTimeout(20*time.Minute))
+	}, SpecTimeout(30*time.Minute))
 }

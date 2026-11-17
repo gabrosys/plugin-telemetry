@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"strconv"
@@ -19,7 +20,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
@@ -177,6 +181,110 @@ func sidecarLogs(ctx context.Context, cfg *rest.Config, ns, pod string) (string,
 		metadata.SidecarContainerName, &corev1.PodLogOptions{})
 }
 
+// reconcileCounts is the identity-reconcile counter per plugin pod and attribute set.
+type reconcileCounts map[string]map[string]float64
+
+// equal reports whether both hold the same pods, attribute sets and values; a replaced pod differs.
+func (r reconcileCounts) equal(o reconcileCounts) bool {
+	return maps.EqualFunc(r, o, maps.Equal[map[string]float64])
+}
+
+func (r reconcileCounts) String() string {
+	var out []string
+	for _, pod := range slices.Sorted(maps.Keys(r)) {
+		for _, attrs := range slices.Sorted(maps.Keys(r[pod])) {
+			out = append(out, fmt.Sprintf("%s %s = %g", pod, attrs, r[pod][attrs]))
+		}
+	}
+	if len(out) == 0 {
+		return "none"
+	}
+
+	return strings.Join(out, "\n")
+}
+
+// clusterOwned maps "Kind/name" to the resourceVersion of the ServiceAccounts, Roles, RoleBindings and
+// Secrets of ns whose controller owner is a CloudNativePG Cluster, the objects the identity controller's Owns() matches.
+func clusterOwned(ctx context.Context, c client.Client, ns string) (map[string]string, error) {
+	out := map[string]string{}
+	for kind, list := range map[string]client.ObjectList{
+		"ServiceAccount": &corev1.ServiceAccountList{}, "Role": &rbacv1.RoleList{},
+		"RoleBinding": &rbacv1.RoleBindingList{}, "Secret": &corev1.SecretList{},
+	} {
+		if err := c.List(ctx, list, client.InNamespace(ns)); err != nil {
+			return nil, fmt.Errorf("list %s in %s: %w", kind, ns, err)
+		}
+		err := meta.EachListItem(list, func(obj runtime.Object) error {
+			o, ok := obj.(client.Object)
+			if !ok {
+				return fmt.Errorf("%T is not a client.Object", obj)
+			}
+			owner := metav1.GetControllerOf(o)
+			if owner == nil || owner.Kind != apiv1.ClusterKind {
+				return nil
+			}
+			gv, err := schema.ParseGroupVersion(owner.APIVersion)
+			if err != nil {
+				return fmt.Errorf("owner apiVersion of %s/%s: %w", kind, o.GetName(), err)
+			}
+			if gv.Group == cnpgGroup {
+				out[kind+"/"+o.GetName()] = o.GetResourceVersion()
+			}
+
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("walk %s in %s: %w", kind, ns, err)
+		}
+	}
+
+	return out, nil
+}
+
+// changedOwned lists the objects of after whose resourceVersion differs from before, and those that vanished.
+func changedOwned(before, after map[string]string) string {
+	var out []string
+	for _, k := range slices.Sorted(maps.Keys(after)) {
+		switch rv, ok := before[k]; {
+		case !ok:
+			out = append(out, fmt.Sprintf("%s appeared at %s", k, after[k]))
+		case rv != after[k]:
+			out = append(out, fmt.Sprintf("%s %s -> %s", k, rv, after[k]))
+		}
+	}
+	for _, k := range slices.Sorted(maps.Keys(before)) {
+		if _, ok := after[k]; !ok {
+			out = append(out, k+" vanished")
+		}
+	}
+	if len(out) == 0 {
+		return "no change"
+	}
+
+	return strings.Join(out, "\n")
+}
+
+// clustersEverywhere lists "namespace/name generation" of every Cluster, marked when it is being deleted.
+func clustersEverywhere(ctx context.Context, c client.Client) (string, error) {
+	var list apiv1.ClusterList
+	if err := c.List(ctx, &list); err != nil {
+		return "", fmt.Errorf("list Clusters: %w", err)
+	}
+
+	out := make([]string, 0, len(list.Items))
+	for i := range list.Items {
+		cl := &list.Items[i]
+		entry := fmt.Sprintf("%s/%s generation %d", cl.Namespace, cl.Name, cl.Generation)
+		if cl.DeletionTimestamp != nil {
+			entry += " (deleting)"
+		}
+		out = append(out, entry)
+	}
+	slices.Sort(out)
+
+	return strings.Join(out, "\n"), nil
+}
+
 //nolint:maintidx // one Ordered container per mode; the specs share its state
 func describeMode(m mode) {
 	Describe(m.name, Ordered, Serial, func() {
@@ -302,29 +410,26 @@ func describeMode(m mode) {
 			g.Expect(plugin).NotTo(BeEmpty(), "the collector received nothing from the plugin since %s", since)
 		}
 
-		// identityReconciles sums, over the plugin pods, the latest value of every
-		// cnpg_otel_plugin_identity_reconciles_total series the collector holds.
-		identityReconciles := func(g Gomega, ctx SpecContext) float64 {
+		// identityReconciles returns the latest cnpg_otel_plugin_identity_reconciles_total value per plugin pod
+		// and attribute set. It fails unless every plugin pod has exported a point at or after since.
+		identityReconciles := func(g Gomega, ctx SpecContext, since time.Time) reconcileCounts {
 			pluginPods, err := framework.PluginPods(ctx, c)
 			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(pluginPods).NotTo(BeEmpty(), "no plugin pod")
 
-			recent := lines(g, ctx, time.Now().Add(-time.Minute))
-			var total float64
-			found := false
+			recent := lines(g, ctx, since)
+			counts := reconcileCounts{}
 			for _, pod := range pluginPods {
-				latest := map[string]float64{}
+				counts[pod] = map[string]float64{}
 				for _, p := range otlp.Points(otlp.ForResource(recent, "k8s.pod.name", pod), selfmetrics.IdentityReconciles) {
-					latest[fmt.Sprint(p.Attrs)] = p.Value
+					if !p.Time.Before(since) {
+						counts[pod][fmt.Sprint(p.Attrs)] = p.Value
+					}
 				}
-				for _, v := range latest {
-					total += v
-					found = true
-				}
+				g.Expect(counts[pod]).NotTo(BeEmpty(), "%s exported no %s point since %s", pod, selfmetrics.IdentityReconciles, since)
 			}
 
-			g.Expect(found).To(BeTrue(), "the collector holds no %s point", selfmetrics.IdentityReconciles)
-
-			return total
+			return counts
 		}
 
 		awaitPluginExport := func(ctx SpecContext, since time.Time) {
@@ -950,6 +1055,48 @@ func describeMode(m mode) {
 					return out
 				}
 
+				var (
+					reconcilesBefore reconcileCounts
+					lastReading      reconcileCounts
+					lastReadingAt    time.Time
+					reconcilesAfter  reconcileCounts
+					ownedBefore      map[string]string
+					clustersBefore   string
+				)
+				defer func() {
+					report, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+					defer cancel()
+
+					baseline := reconcilesBefore.String()
+					if reconcilesBefore == nil {
+						baseline = "baseline (not reached), last reading:\n" + lastReading.String()
+					}
+					changes := "no baseline snapshot"
+					ownedAfter, ownedErr := clusterOwned(report, c, ns)
+					switch {
+					case ownedErr != nil:
+						changes = ownedErr.Error()
+					case ownedBefore != nil:
+						changes = changedOwned(ownedBefore, ownedAfter)
+					}
+					clustersAfter, clustersErr := clustersEverywhere(report, c)
+					if clustersErr != nil {
+						clustersAfter = clustersErr.Error()
+					}
+					AddReportEntry("item 2 identity reconciles at baseline", baseline)
+					end := "not read"
+					if reconcilesAfter != nil {
+						end = reconcilesAfter.String()
+					}
+					if clustersBefore == "" {
+						clustersBefore = "not reached"
+					}
+					AddReportEntry("item 2 identity reconciles at the end", end)
+					AddReportEntry("item 2 Cluster-owned objects in "+ns+" that changed", changes)
+					AddReportEntry("item 2 Clusters at baseline", clustersBefore)
+					AddReportEntry("item 2 Clusters at the end", clustersAfter)
+				}()
+
 				var before map[string]otlp.Export
 				Eventually(func(g Gomega, ctx SpecContext) {
 					before = latest(g, ctx, time.Now().Add(-2*exportInterval))
@@ -958,12 +1105,30 @@ func describeMode(m mode) {
 					}
 				}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(specPoll).Should(Succeed())
 
-				var reconcilesBefore float64
+				// The baseline is taken when every plugin pod has exported since mark and the counters did not move
+				// over two consecutive readings at least 2*exportInterval apart. A reconcile between the baseline's
+				// newest point and the first edit (at most about one export interval) still shows as a difference.
 				mark := time.Now()
 				Eventually(func(g Gomega, ctx SpecContext) {
-					pluginExported(g, ctx, mark)
-					reconcilesBefore = identityReconciles(g, ctx)
+					readAt := time.Now()
+					since := mark
+					if lastReading != nil {
+						since = lastReadingAt
+						g.Expect(readAt.Sub(lastReadingAt)).To(BeNumerically(">=", 2*exportInterval), "waiting for the second reading")
+					}
+					cur := identityReconciles(g, ctx, since)
+					previous := lastReading
+					lastReading, lastReadingAt = cur, readAt
+					g.Expect(previous).NotTo(BeNil(), "the first reading is taken, a second one confirms it")
+					g.Expect(cur).To(Equal(previous), "the identity controller reconciled between two readings")
+					reconcilesBefore = cur
 				}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(specPoll).Should(Succeed())
+
+				var err error
+				ownedBefore, err = clusterOwned(ctx, c, ns)
+				Expect(err).NotTo(HaveOccurred())
+				clustersBefore, err = clustersEverywhere(ctx, c)
+				Expect(err).NotTo(HaveOccurred())
 
 				edits := time.Now()
 				var lastWrite string
@@ -994,8 +1159,8 @@ func describeMode(m mode) {
 
 				// Annotation edits don't change the generation, so the identity controller has nothing to reconcile.
 				Eventually(func(g Gomega, ctx SpecContext) {
-					pluginExported(g, ctx, edits.Add(2*exportInterval))
-					g.Expect(identityReconciles(g, ctx)).To(Equal(reconcilesBefore))
+					reconcilesAfter = identityReconciles(g, ctx, edits.Add(2*exportInterval))
+					g.Expect(reconcilesAfter.equal(reconcilesBefore)).To(BeTrue(), "identity reconciles moved:\nbefore %v\nafter %v", reconcilesBefore, reconcilesAfter)
 				}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(specPoll).Should(Succeed())
 
 				noRollout(ctx)

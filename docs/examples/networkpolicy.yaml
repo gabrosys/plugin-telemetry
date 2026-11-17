@@ -1,0 +1,68 @@
+# Restricts the plugin Pods in cnpg-system to the traffic they need. It needs a CNI that enforces NetworkPolicy.
+# Fill in the API server address, and the collector rule if you set --metrics-endpoint.
+# The plugin runs in the CloudNativePG operator's namespace. If CloudNativePG is not in cnpg-system,
+# change metadata.namespace and the ingress namespaceSelector together.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: plugin-telemetry
+  namespace: cnpg-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: plugin-telemetry
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # gRPC from the CloudNativePG operator.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cnpg-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudnative-pg
+      ports:
+        - protocol: TCP
+          port: 9090
+  egress:
+    # DNS. The plugin reaches the API server by IP, so it needs DNS only to resolve the
+    # --metrics-endpoint host. The k8s-app: kube-dns selector does not cover NodeLocal DNSCache
+    # or other DNS setups; adjust it to yours.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # API server. On kindnet the policy matches the endpoint IP and port after the Service is
+    # translated. Other CNIs may match the Service IP and 443 instead, because the Kubernetes
+    # NetworkPolicy docs leave ipBlock before or after DNAT undefined. Test the rule on your CNI,
+    # and if the plugin cannot reach the API server, also allow the Service IP and 443.
+    # Get the endpoint address and port with:
+    #   kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes
+    # Replace 192.0.2.10/32 and 6443 with them. An HA or managed control plane has several
+    # addresses: add one ipBlock per address, or use the provider's API-server CIDR.
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.10/32
+      ports:
+        - protocol: TCP
+          port: 6443
+    # Collector for the plugin's own metrics. Uncomment it when you set --metrics-endpoint,
+    # and match the namespace, labels and port to the collector.
+    # - to:
+    #     - namespaceSelector:
+    #         matchLabels:
+    #           kubernetes.io/metadata.name: otel
+    #       podSelector:
+    #         matchLabels:
+    #           app.kubernetes.io/name: collector
+    #   ports:
+    #     - protocol: TCP
+    #       port: 4318

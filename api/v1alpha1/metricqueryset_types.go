@@ -28,8 +28,9 @@ type MetricQuerySetList struct {
 
 // MetricQuerySetSpec holds the queries of a MetricQuerySet.
 type MetricQuerySetSpec struct {
-	// Queries maps a query name to its definition. A name starts with a letter or underscore and
-	// continues with letters, digits and underscores, up to 63 characters.
+	// Queries maps a query key to its definition. A key starts with a letter or underscore and
+	// continues with letters, digits and underscores, up to 63 characters. Unless the query sets name,
+	// its metrics are named `cnpg_<key>_<column>`. A metric name must not start with cnpg_otel_.
 	//
 	// +kubebuilder:validation:MinProperties=1
 	// +kubebuilder:validation:MaxProperties=128
@@ -49,54 +50,62 @@ type Query struct {
 	// reports the sidecar's limits.
 	Query string `json:"query"`
 
-	// PredicateQuery is SQL that must return a row for Query to run.
+	// PredicateQuery is SQL that runs first, in the same transaction. Query runs only when the first
+	// column of the first row is true.
 	//
 	// +optional
 	PredicateQuery string `json:"predicate_query,omitempty"`
 
 	// Metrics lists the result columns, one single-key item per column: the key is the column name
-	// and the value says how to use it.
+	// and the value says how to use it. The result must have as many columns as the list has, and a
+	// HISTOGRAM column also needs its _bucket, _sum and _count columns in the result.
 	//
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=128
 	// +listType=atomic
 	Metrics []MetricColumn `json:"metrics"`
 
-	// Master runs the query on the primary only. It is the old name of Primary.
+	// Master is the old name of Primary: the query runs on the primary only and is skipped on a replica.
+	// The default is false.
 	//
 	// +optional
 	Master bool `json:"master,omitempty"`
 
-	// Primary runs the query on the primary only.
+	// Primary runs the query on the primary only, and skips it on a replica. The default is false.
 	//
 	// +optional
 	Primary bool `json:"primary,omitempty"`
 
-	// CacheSeconds is how long a result is reused before the query runs again.
+	// CacheSeconds is the minimum number of seconds between two runs of the query. A shorter interval is
+	// raised to this value. The default is 0, no minimum.
 	//
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	CacheSeconds *int64 `json:"cache_seconds,omitempty"`
 
-	// RunOnServer is a semantic version range of PostgreSQL servers the query runs on.
+	// RunOnServer is a semantic version range of PostgreSQL servers the query runs on, such as
+	// ">=15.0.0". A query with an invalid range is disabled. When empty, it runs on every version.
 	//
 	// +optional
 	RunOnServer string `json:"runonserver,omitempty"`
 
-	// TargetDatabases lists the databases to run the query in. Names may use wildcards. The default is
-	// the cluster's default database.
+	// TargetDatabases lists the databases to run the query in. A name with *, ? or [ is a Go path.Match
+	// pattern matched against the databases that accept connections and are not templates. When empty,
+	// the query runs in the Cluster's application database, which is postgres when the bootstrap sets none.
 	//
 	// +kubebuilder:validation:MaxItems=64
 	// +optional
 	TargetDatabases []string `json:"target_databases,omitempty"`
 
-	// Name replaces the query name in the metric names.
+	// Name replaces the query key in the metric names: `cnpg_<name>_<column>`.
 	//
 	// +optional
 	Name string `json:"name,omitempty"`
 }
 
 // MetricColumn describes one result column: a single entry whose key is the column name.
+// The name must match `^[a-zA-Z_][a-zA-Z0-9_]{0,62}$`: it starts with a letter or underscore and has up to 63
+// letters, digits or underscores.
 //
 // +kubebuilder:validation:MinProperties=1
 // +kubebuilder:validation:MaxProperties=1
@@ -105,19 +114,20 @@ type MetricColumn map[string]ColumnSpec
 
 // ColumnSpec says how a result column is used.
 type ColumnSpec struct {
-	// Usage is what the column is: a LABEL of every metric of the query, a COUNTER, a GAUGE, a
-	// HISTOGRAM, a MAPPEDMETRIC whose text is turned into a number through MetricMapping, a DURATION
-	// whose text is turned into milliseconds, or DISCARD to ignore it.
+	// Usage is what the column is: a LABEL of every metric of the query, a COUNTER (a cumulative sum), a
+	// GAUGE, a HISTOGRAM, a MAPPEDMETRIC whose text is turned into a number through MetricMapping, a
+	// DURATION whose Go duration text, such as 1.5s, is turned into milliseconds, or DISCARD to ignore it.
 	//
 	// +kubebuilder:validation:Enum=LABEL;COUNTER;GAUGE;HISTOGRAM;MAPPEDMETRIC;DURATION;DISCARD
 	Usage string `json:"usage"`
 
-	// Description is the metric's description.
+	// Description is the metric's description. A LABEL or DISCARD column does not use it.
 	//
 	// +optional
 	Description string `json:"description,omitempty"`
 
-	// MetricMapping maps the text values of a MAPPEDMETRIC column to numbers.
+	// MetricMapping maps the text values of a MAPPEDMETRIC column to numbers. A value it does not list
+	// drops that sample.
 	//
 	// +kubebuilder:validation:MaxProperties=256
 	// +optional
@@ -130,12 +140,16 @@ type ColumnSpec struct {
 	// +optional
 	MetricsMapping map[string]float64 `json:"metrics_mapping,omitempty"`
 
-	// Name replaces the column name in the metric name.
+	// Name replaces the column name in the metric name: `cnpg_<query name>_<name>`. A DURATION metric
+	// also ends in _milliseconds.
 	//
 	// +optional
 	Name string `json:"name,omitempty"`
 
-	// PgVersion is a semantic version range of PostgreSQL servers the column applies to.
+	// PgVersion is a semantic version range of PostgreSQL servers. On another version, the metric of a
+	// value column is not exported, but the column must still be in the result. It has no effect on a
+	// LABEL or DISCARD column. An invalid range is ignored with a warning, as if the field were empty.
+	// When empty, the column applies to every version.
 	//
 	// +optional
 	PgVersion string `json:"pg_version,omitempty"`

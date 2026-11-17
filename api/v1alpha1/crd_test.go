@@ -280,6 +280,27 @@ var _ = Describe("the generated CRDs", func() {
 		Expect(definitions(original)[0].Columns["state"].Mapping).NotTo(BeEmpty())
 	})
 
+	It("every CRD property has a description", func() {
+		files, err := fs.Glob(os.DirFS(crdDir), "telemetry.gabrosys.github.io_*.yaml")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(files).To(ContainElements(exporterCRD, querySetCRD))
+
+		var missing []string
+		for _, name := range files {
+			var external apiextensionsv1.CustomResourceDefinition
+			Expect(yaml.UnmarshalStrict(readFile(crdDir, name), &external)).To(Succeed())
+
+			for _, version := range external.Spec.Versions {
+				Expect(version.Schema).NotTo(BeNil(), "%s %s has no schema", name, version.Name)
+				Expect(version.Schema.OpenAPIV3Schema).NotTo(BeNil(), "%s %s has no OpenAPI schema", name, version.Name)
+				Expect(version.Schema.OpenAPIV3Schema.Properties).NotTo(BeEmpty(), "%s %s has an empty schema", name, version.Name)
+				missing = append(missing, undescribed(name+" "+version.Name, version.Schema.OpenAPIV3Schema, true)...)
+			}
+		}
+
+		Expect(missing).To(BeEmpty(), "properties without a description")
+	})
+
 	It("registers its kinds in a scheme", func() {
 		scheme := runtime.NewScheme()
 		Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
@@ -287,6 +308,47 @@ var _ = Describe("the generated CRDs", func() {
 		Expect(scheme.Recognizes(v1alpha1.GroupVersion.WithKind("MetricQuerySetList"))).To(BeTrue())
 	})
 })
+
+// undescribed returns the JSON path of every named property under schema that has no description. It
+// walks into properties, items and additionalProperties. Only a named property is checked: the schema of
+// an array item or a map value is described by the field that holds it. The root skips apiVersion, kind
+// and metadata, and everything under status.
+func undescribed(where string, schema *apiextensionsv1.JSONSchemaProps, root bool) []string {
+	var missing []string
+
+	for _, name := range sortedKeys(schema.Properties) {
+		if root && (name == "apiVersion" || name == "kind" || name == "metadata" || name == "status") {
+			continue
+		}
+
+		child := schema.Properties[name]
+		path := where + "." + name
+		if strings.TrimSpace(child.Description) == "" {
+			missing = append(missing, path)
+		}
+		missing = append(missing, undescribed(path, &child, false)...)
+	}
+
+	if schema.Items != nil && schema.Items.Schema != nil {
+		missing = append(missing, undescribed(where+"[]", schema.Items.Schema, false)...)
+	}
+
+	if schema.AdditionalProperties != nil && schema.AdditionalProperties.Schema != nil {
+		missing = append(missing, undescribed(where+".*", schema.AdditionalProperties.Schema, false)...)
+	}
+
+	return missing
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	return keys
+}
 
 func specOf(object []byte) any {
 	GinkgoHelper()

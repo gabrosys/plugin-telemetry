@@ -71,14 +71,14 @@ exporter:
 		Expect(series).To(ContainElement(HavePrefix(`cnpg_collector_lo_pages{datname="postgres"} `)))
 		Expect(out).To(ContainSubstring("# skipped"))
 		Expect(out).To(ContainSubstring("# errors"))
-	}, SpecTimeout(time.Minute))
+	}, NodeTimeout(time.Minute))
 
 	It("prints the plan from live facts", func(ctx SpecContext) {
 		out, err := execute(ctx, "instance", "print-config", "--config", config)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(out).To(ContainSubstring("job extra_probe postgres group= interval=30s"))
 		Expect(out).NotTo(ContainSubstring("unplanned"))
-	}, SpecTimeout(time.Minute))
+	}, NodeTimeout(time.Minute))
 
 	It("fails test and print-config with the superuser error when the session role is a superuser", func(ctx SpecContext) {
 		const role = "cnpg_super_test"
@@ -94,5 +94,5 @@ exporter:
 			_, err := execute(ctx, "instance", sub, "--config", superuser)
 			Expect(err).To(MatchError(ContainSubstring("the session role is a superuser")), sub)
 		}
-	}, SpecTimeout(time.Minute))
+	}, NodeTimeout(time.Minute))
 })

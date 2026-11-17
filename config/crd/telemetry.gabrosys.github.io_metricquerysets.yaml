@@ -55,31 +55,36 @@ spec:
                     of a CloudNativePG custom query.
                   properties:
                     cache_seconds:
-                      description: CacheSeconds is how long a result is reused before
-                        the query runs again.
+                      description: |-
+                        CacheSeconds is the minimum number of seconds between two runs of the query. A shorter interval is
+                        raised to this value. The default is 0, no minimum.
                       format: int64
                       minimum: 0
                       type: integer
                     master:
-                      description: Master runs the query on the primary only. It is
-                        the old name of Primary.
+                      description: |-
+                        Master is the old name of Primary: the query runs on the primary only and is skipped on a replica.
+                        The default is false.
                       type: boolean
                     metrics:
                       description: |-
                         Metrics lists the result columns, one single-key item per column: the key is the column name
-                        and the value says how to use it.
+                        and the value says how to use it. The result must have as many columns as the list has, and a
+                        HISTOGRAM column also needs its _bucket, _sum and _count columns in the result.
                       items:
                         additionalProperties:
                           description: ColumnSpec says how a result column is used.
                           properties:
                             description:
                               description: Description is the metric's description.
+                                A LABEL or DISCARD column does not use it.
                               type: string
                             metric_mapping:
                               additionalProperties:
                                 type: number
-                              description: MetricMapping maps the text values of a
-                                MAPPEDMETRIC column to numbers.
+                              description: |-
+                                MetricMapping maps the text values of a MAPPEDMETRIC column to numbers. A value it does not list
+                                drops that sample.
                               maxProperties: 256
                               type: object
                             metrics_mapping:
@@ -91,18 +96,22 @@ spec:
                               maxProperties: 256
                               type: object
                             name:
-                              description: Name replaces the column name in the metric
-                                name.
+                              description: |-
+                                Name replaces the column name in the metric name: `cnpg_<query name>_<name>`. A DURATION metric
+                                also ends in _milliseconds.
                               type: string
                             pg_version:
-                              description: PgVersion is a semantic version range of
-                                PostgreSQL servers the column applies to.
+                              description: |-
+                                PgVersion is a semantic version range of PostgreSQL servers. On another version, the metric of a
+                                value column is not exported, but the column must still be in the result. It has no effect on a
+                                LABEL or DISCARD column. An invalid range is ignored with a warning, as if the field were empty.
+                                When empty, the column applies to every version.
                               type: string
                             usage:
                               description: |-
-                                Usage is what the column is: a LABEL of every metric of the query, a COUNTER, a GAUGE, a
-                                HISTOGRAM, a MAPPEDMETRIC whose text is turned into a number through MetricMapping, a DURATION
-                                whose text is turned into milliseconds, or DISCARD to ignore it.
+                                Usage is what the column is: a LABEL of every metric of the query, a COUNTER (a cumulative sum), a
+                                GAUGE, a HISTOGRAM, a MAPPEDMETRIC whose text is turned into a number through MetricMapping, a
+                                DURATION whose Go duration text, such as 1.5s, is turned into milliseconds, or DISCARD to ignore it.
                               enum:
                               - LABEL
                               - COUNTER
@@ -115,8 +124,10 @@ spec:
                           required:
                           - usage
                           type: object
-                        description: 'MetricColumn describes one result column: a
-                          single entry whose key is the column name.'
+                        description: |-
+                          MetricColumn describes one result column: a single entry whose key is the column name.
+                          The name must match `^[a-zA-Z_][a-zA-Z0-9_]{0,62}$`: it starts with a letter or underscore and has up to 63
+                          letters, digits or underscores.
                         maxProperties: 1
                         minProperties: 1
                         type: object
@@ -128,14 +139,17 @@ spec:
                       type: array
                       x-kubernetes-list-type: atomic
                     name:
-                      description: Name replaces the query name in the metric names.
+                      description: 'Name replaces the query key in the metric names:
+                        `cnpg_<name>_<column>`.'
                       type: string
                     predicate_query:
-                      description: PredicateQuery is SQL that must return a row for
-                        Query to run.
+                      description: |-
+                        PredicateQuery is SQL that runs first, in the same transaction. Query runs only when the first
+                        column of the first row is true.
                       type: string
                     primary:
-                      description: Primary runs the query on the primary only.
+                      description: Primary runs the query on the primary only, and
+                        skips it on a replica. The default is false.
                       type: boolean
                     query:
                       description: |-
@@ -148,13 +162,15 @@ spec:
                         reports the sidecar's limits.
                       type: string
                     runonserver:
-                      description: RunOnServer is a semantic version range of PostgreSQL
-                        servers the query runs on.
+                      description: |-
+                        RunOnServer is a semantic version range of PostgreSQL servers the query runs on, such as
+                        ">=15.0.0". A query with an invalid range is disabled. When empty, it runs on every version.
                       type: string
                     target_databases:
                       description: |-
-                        TargetDatabases lists the databases to run the query in. Names may use wildcards. The default is
-                        the cluster's default database.
+                        TargetDatabases lists the databases to run the query in. A name with *, ? or [ is a Go path.Match
+                        pattern matched against the databases that accept connections and are not templates. When empty,
+                        the query runs in the Cluster's application database, which is postgres when the bootstrap sets none.
                       items:
                         type: string
                       maxItems: 64
@@ -164,8 +180,9 @@ spec:
                   - query
                   type: object
                 description: |-
-                  Queries maps a query name to its definition. A name starts with a letter or underscore and
-                  continues with letters, digits and underscores, up to 63 characters.
+                  Queries maps a query key to its definition. A key starts with a letter or underscore and
+                  continues with letters, digits and underscores, up to 63 characters. Unless the query sets name,
+                  its metrics are named `cnpg_<key>_<column>`. A metric name must not start with cnpg_otel_.
                 maxProperties: 128
                 minProperties: 1
                 type: object

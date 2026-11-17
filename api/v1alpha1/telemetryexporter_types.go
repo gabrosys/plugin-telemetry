@@ -14,8 +14,8 @@ type TelemetryExporter struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// Spec holds the exporter settings. It sets exporter.endpoint, or envFrom with an
-	// OTEL_EXPORTER_OTLP_METRICS_ENDPOINT or OTEL_EXPORTER_OTLP_ENDPOINT key.
+	// Spec holds the exporter settings. The endpoint is required: set spec.exporter.endpoint, or put
+	// OTEL_EXPORTER_OTLP_METRICS_ENDPOINT or OTEL_EXPORTER_OTLP_ENDPOINT in envFrom.
 	Spec TelemetryExporterSpec `json:"spec"`
 }
 
@@ -38,15 +38,27 @@ type TelemetryExporterSpec struct {
 	// +optional
 	Exporter OTLPExporter `json:"exporter,omitempty"`
 
-	// EnvFrom names a ConfigMap and a Secret whose OTEL_EXPORTER_OTLP_* and OTEL_RESOURCE_ATTRIBUTES
-	// keys are read as settings. The endpoint comes from OTEL_EXPORTER_OTLP_METRICS_ENDPOINT or
-	// OTEL_EXPORTER_OTLP_ENDPOINT.
+	// EnvFrom names a ConfigMap and a Secret whose OpenTelemetry environment keys are read as settings.
+	// The sidecar reads the ENDPOINT, PROTOCOL, COMPRESSION, TIMEOUT (in milliseconds) and HEADERS keys
+	// of OTEL_EXPORTER_OTLP_, where `OTEL_EXPORTER_OTLP_METRICS_<NAME>` wins over `OTEL_EXPORTER_OTLP_<NAME>`,
+	// and OTEL_RESOURCE_ATTRIBUTES. A Secret key wins over the same ConfigMap key, and a field of
+	// spec.exporter wins over both. OTEL_EXPORTER_OTLP_METRICS_ENDPOINT is used as given.
+	// OTEL_EXPORTER_OTLP_ENDPOINT gets v1/metrics appended when the protocol is http/protobuf. HEADERS
+	// and METRICS_HEADERS must be in the Secret, and the key in the ConfigMap is rejected. The keys
+	// CERTIFICATE, CLIENT_KEY and CLIENT_CERTIFICATE are rejected: use spec.exporter.tls.
+	// OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE other than
+	// cumulative and OTEL_EXPORTER_OTLP_METRICS_DEFAULT_HISTOGRAM_AGGREGATION other than
+	// explicit_bucket_histogram are rejected. INSECURE is ignored with a warning, because the endpoint
+	// scheme selects TLS. OTEL_SERVICE_NAME is ignored with a warning, because service.name is the
+	// Cluster name.
 	//
 	// +optional
 	EnvFrom *EnvFromSource `json:"envFrom,omitempty"`
 
-	// ResourceLabels lists Cluster label keys to copy into the resource attributes. The instance role
-	// label is not allowed, because it changes at switchover.
+	// ResourceLabels lists Cluster label keys to copy into the resource attributes, each as
+	// `cnpg.cluster.label.<key>`. A label the Cluster does not have is skipped. Such an attribute wins
+	// over the same key in resourceAttributes. The instance role label (cnpg.io/instanceRole) is not
+	// allowed, because it changes at switchover.
 	//
 	// +kubebuilder:validation:MaxItems=32
 	// +kubebuilder:validation:items:MaxLength=317
@@ -56,7 +68,10 @@ type TelemetryExporterSpec struct {
 	// +optional
 	ResourceLabels []string `json:"resourceLabels,omitempty"`
 
-	// ResourceAttributes adds fixed attributes to every resource.
+	// ResourceAttributes adds fixed attributes to the resource of every export. They win over
+	// OTEL_RESOURCE_ATTRIBUTES from envFrom. The sidecar sets service.name, service.namespace,
+	// service.instance.id and the k8s.namespace.name, k8s.pod.name, k8s.pod.uid, k8s.node.name and
+	// k8s.container.name attributes itself, and an entry with one of these keys is dropped.
 	//
 	// +kubebuilder:validation:MaxProperties=32
 	// +optional
@@ -74,27 +89,30 @@ type TelemetryExporterSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.endpoint) || isURL(self.endpoint)",fieldPath=".endpoint",message="endpoint must parse as a URL"
 // +kubebuilder:validation:XValidation:rule="!has(self.tls) || !has(self.endpoint) || self.endpoint.startsWith('https://')",message="tls requires an https:// endpoint"
 type OTLPExporter struct {
-	// Protocol is the OTLP transport: http/protobuf or grpc.
+	// Protocol is the OTLP transport: http/protobuf or grpc. When empty, the PROTOCOL key of envFrom
+	// is used, else http/protobuf.
 	//
 	// +kubebuilder:validation:Enum=http/protobuf;grpc
 	// +optional
 	Protocol string `json:"protocol,omitempty"`
 
-	// Endpoint is the base URL of the collector, such as https://collector:4318. The signal's path is
-	// appended for http/protobuf. It has a host, and no user info, query or fragment.
+	// Endpoint is the URL of the collector, such as https://collector:4318. An http:// endpoint is
+	// plaintext and an https:// one uses TLS. For http/protobuf, v1/metrics is appended to it. It has a
+	// host, and no user info, query or fragment. When empty, the ENDPOINT key of envFrom is used.
 	//
 	// +kubebuilder:validation:MaxLength=2048
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
 
-	// Compression is gzip or none.
+	// Compression is gzip or none. When empty, the COMPRESSION key of envFrom is used, else gzip.
 	//
 	// +kubebuilder:validation:Enum=gzip;none
 	// +optional
 	Compression string `json:"compression,omitempty"`
 
-	// Timeout is the time one export attempt may take, such as 10s. At least 1s, and at most half of
-	// spec.metrics.interval, which is 30s when not set.
+	// Timeout is the time one export attempt may take, such as 10s. It must be at least 1s and at most
+	// half of spec.metrics.interval, which is 30s when not set. When empty, the TIMEOUT key of envFrom is used,
+	// else the lower of 10s and half the interval.
 	//
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MaxLength=32
@@ -102,12 +120,15 @@ type OTLPExporter struct {
 	// +optional
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
 
-	// Headers is a Secret key holding request headers in the OTEL_EXPORTER_OTLP_HEADERS format.
+	// Headers is a key of a Secret in this namespace that holds request headers in the
+	// OTEL_EXPORTER_OTLP_HEADERS format: name=value pairs separated by commas, values percent-encoded.
+	// When empty, the HEADERS key of the envFrom Secret is used.
 	//
 	// +optional
 	Headers *KeySelector `json:"headers,omitempty"`
 
-	// TLS sets the TLS options. It needs an https:// endpoint.
+	// TLS sets the TLS options. It needs an https:// endpoint. When empty, the system roots verify the
+	// collector, no client certificate is sent and TLS 1.2 is the lowest version.
 	//
 	// +optional
 	TLS *OTLPTLS `json:"tls,omitempty"`
@@ -115,7 +136,7 @@ type OTLPExporter struct {
 
 // MetricsSpec holds the metrics settings.
 type MetricsSpec struct {
-	// Interval is how often metrics are exported, such as 30s. At least 1s.
+	// Interval is how often metrics are exported, such as 30s. It must be at least 1s. The default is 30s.
 	//
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MaxLength=32
@@ -123,20 +144,23 @@ type MetricsSpec struct {
 	// +optional
 	Interval *metav1.Duration `json:"interval,omitempty"`
 
-	// MaxPointsPerRequest caps the data points in one export request.
+	// MaxPointsPerRequest caps the data points in one export request. An export with more points is
+	// split into several requests. The default is 2000.
 	//
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100000
 	// +optional
 	MaxPointsPerRequest *int32 `json:"maxPointsPerRequest,omitempty"`
 
-	// UseClusterMonitoring reads the queries of the Cluster's spec.monitoring ConfigMaps and Secrets,
-	// as CloudNativePG does. The default is true.
+	// UseClusterMonitoring loads the queries listed in the Cluster's spec.monitoring.customQueriesConfigMap
+	// and spec.monitoring.customQueriesSecret, as CloudNativePG does. The default is true. The plugin's
+	// own built-in queries load either way.
 	//
 	// +optional
 	UseClusterMonitoring *bool `json:"useClusterMonitoring,omitempty"`
 
-	// QuerySets lists the MetricQuerySet names in this namespace to load.
+	// QuerySets lists the MetricQuerySet names in this namespace to load, after the Cluster's monitoring
+	// queries. When a query key appears twice, the later source wins.
 	//
 	// +kubebuilder:validation:MaxItems=16
 	// +kubebuilder:validation:items:MaxLength=253
@@ -145,7 +169,10 @@ type MetricsSpec struct {
 	// +optional
 	QuerySets []string `json:"querySets,omitempty"`
 
-	// PlanInterval is how often the sidecar re-reads the query sources and plans the queries. At least 1s.
+	// PlanInterval is how often the sidecar reads the server version, the databases and the settings it
+	// checks from PostgreSQL. It plans the queries again only when the version, the primary or replica
+	// role or the list of databases changed. Changes to the query sources apply when they happen, not
+	// on this timer. At least 1s. The default is 30s.
 	//
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MaxLength=32
@@ -153,7 +180,8 @@ type MetricsSpec struct {
 	// +optional
 	PlanInterval *metav1.Duration `json:"planInterval,omitempty"`
 
-	// DefaultInterval is how often a query runs when no group sets its own. At least 1s.
+	// DefaultInterval is how often a query runs when no group matches it. At least 1s. When empty, the
+	// Cluster's spec.monitoring.metricsQueriesTTL is used if it is at least 1s, else 30s.
 	//
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MaxLength=32
@@ -161,7 +189,8 @@ type MetricsSpec struct {
 	// +optional
 	DefaultInterval *metav1.Duration `json:"defaultInterval,omitempty"`
 
-	// Groups run sets of queries at their own interval.
+	// Groups run sets of queries at their own interval. A query that no group matches runs at
+	// defaultInterval.
 	//
 	// +kubebuilder:validation:MaxItems=32
 	// +listType=map
@@ -169,12 +198,12 @@ type MetricsSpec struct {
 	// +optional
 	Groups []QueryGroup `json:"groups,omitempty"`
 
-	// Limits bounds what the queries may cost. Each limit has a default in the sidecar.
+	// Limits bounds what the queries may cost. A limit left out keeps its default.
 	//
 	// +optional
 	Limits Limits `json:"limits,omitempty"`
 
-	// Exclude removes queries, metrics and databases from collection.
+	// Exclude removes queries, metrics and databases from collection. It is empty by default.
 	//
 	// +optional
 	Exclude Exclude `json:"exclude,omitempty"`
@@ -182,29 +211,32 @@ type MetricsSpec struct {
 
 // OTLPTLS sets the TLS options of the OTLP connection.
 type OTLPTLS struct {
-	// CA is the certificate authority bundle that signs the collector's certificate.
+	// CA is a PEM bundle of the certificate authorities that sign the collector's certificate. It is
+	// added to the system roots.
 	//
 	// +optional
 	CA *KeyReference `json:"ca,omitempty"`
 
-	// ClientCertificate is a kubernetes.io/tls Secret with the client certificate, for mutual TLS.
+	// ClientCertificate is a Secret in this namespace that holds the client certificate in tls.crt and
+	// its key in tls.key, for mutual TLS.
 	//
 	// +optional
 	ClientCertificate *LocalObjectReference `json:"clientCertificate,omitempty"`
 
-	// ServerName is the name to check in the collector's certificate.
+	// ServerName is the name to check in the collector's certificate. When empty, the host of the
+	// endpoint is used.
 	//
 	// +optional
 	ServerName string `json:"serverName,omitempty"`
 
-	// MinVersion is the lowest TLS version to accept: 1.2 or 1.3.
+	// MinVersion is the lowest TLS version to accept: 1.2 or 1.3. The default is 1.2.
 	//
 	// +kubebuilder:validation:Enum="1.2";"1.3"
 	// +optional
 	MinVersion string `json:"minVersion,omitempty"`
 }
 
-// KeyReference points to a key of a Secret or of a ConfigMap.
+// KeyReference points to a key of a Secret or of a ConfigMap. Set exactly one of secret or configMap.
 //
 // +kubebuilder:validation:XValidation:rule="has(self.secret) != has(self.configMap)",message="set exactly one of secret or configMap"
 type KeyReference struct {
@@ -240,7 +272,7 @@ type LocalObjectReference struct {
 	Name string `json:"name"`
 }
 
-// EnvFromSource names the objects that hold OTEL_* settings.
+// EnvFromSource names the objects that hold OTEL_* settings. Set at least one of configMap or secret.
 //
 // +kubebuilder:validation:XValidation:rule="has(self.configMap) || has(self.secret)",message="set at least one of configMap or secret"
 type EnvFromSource struct {
@@ -257,12 +289,13 @@ type EnvFromSource struct {
 
 // QueryGroup runs a set of queries at its own interval.
 type QueryGroup struct {
-	// Name identifies the group.
+	// Name identifies the group. It is unique in the list.
 	//
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
 	// Interval is how often the group's queries run. At least 1s. The default is spec.metrics.defaultInterval.
+	// A query whose cache_seconds is higher runs at that interval instead.
 	//
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MaxLength=32
@@ -270,7 +303,9 @@ type QueryGroup struct {
 	// +optional
 	Interval *metav1.Duration `json:"interval,omitempty"`
 
-	// Queries lists query names or Go path.Match patterns, such as pg_stat_*.
+	// Queries lists query keys or Go path.Match patterns, such as pg_stat_*. A key is the name under
+	// which the query is defined, not its name field. A query that several groups match uses the first
+	// of them in the list.
 	//
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=64
@@ -279,52 +314,60 @@ type QueryGroup struct {
 
 // Limits bounds what the queries may cost. A limit left unset keeps the sidecar's default.
 type Limits struct {
-	// MaxConnections is the most database connections the sidecar opens for queries. Every 10 seconds
-	// it also opens one more short connection, outside this cap, to see whether PostgreSQL is shutting
-	// down, so the monitoring role needs a connection limit of maxConnections + 1 or more.
+	// MaxConnections is the most database connections the sidecar opens for queries. The default is 4.
+	// Every 10 seconds it also opens one more short connection, outside this cap, to see whether
+	// PostgreSQL is shutting down, so the monitoring role needs a connection limit of maxConnections + 1
+	// or more.
 	//
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	MaxConnections *int32 `json:"maxConnections,omitempty"`
 
-	// MaxRowsPerQuery is the most rows read from one query.
+	// MaxRowsPerQuery is the most rows one query may return. A query with more is stopped and exports
+	// nothing in that run. The default is 10000.
 	//
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	MaxRowsPerQuery *int32 `json:"maxRowsPerQuery,omitempty"`
 
-	// MaxSeriesPerQuery is the most series one query may produce.
+	// MaxSeriesPerQuery is the most series one query may produce in one database. A query with more
+	// exports nothing in that run. The default is 10000.
 	//
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	MaxSeriesPerQuery *int32 `json:"maxSeriesPerQuery,omitempty"`
 
-	// MaxSeriesTotal is the most series all queries may produce together.
+	// MaxSeriesTotal is the most series all queries may produce together. A result that would pass it is
+	// not stored, and that query stops exporting until a later result fits. The default is 50000.
 	//
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	MaxSeriesTotal *int32 `json:"maxSeriesTotal,omitempty"`
 
-	// MaxDatabases is the most databases a query runs in.
+	// MaxDatabases is the most databases one query runs in. The databases it matches are taken in name
+	// order and the rest are skipped. The default is 50.
 	//
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	MaxDatabases *int32 `json:"maxDatabases,omitempty"`
 
-	// MaxLabelValueLength is the longest label value kept.
+	// MaxLabelValueLength is the longest label value, in bytes. A row with a longer value is dropped.
+	// The default is 1024.
 	//
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	MaxLabelValueLength *int32 `json:"maxLabelValueLength,omitempty"`
 
-	// MaxLabelsPerSeries is the most labels a series may have.
+	// MaxLabelsPerSeries is the most label columns a query may have. A query with more is disabled.
+	// The default is 32.
 	//
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	MaxLabelsPerSeries *int32 `json:"maxLabelsPerSeries,omitempty"`
 
-	// QueryTimeout is the time one query may run. At least 100ms. At most 1073741823ms, so twice it fits
-	// PostgreSQL's idle_in_transaction_session_timeout.
+	// QueryTimeout is the time one query may run, set as statement_timeout. It must be at least 100ms and
+	// at most 1073741823ms, so that twice it fits PostgreSQL's idle_in_transaction_session_timeout. The
+	// default is 10s.
 	//
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MaxLength=32
@@ -333,8 +376,8 @@ type Limits struct {
 	// +optional
 	QueryTimeout *metav1.Duration `json:"queryTimeout,omitempty"`
 
-	// LockTimeout is the time a query waits for a lock. More than zero, at most 2147483647ms (PostgreSQL's
-	// lock_timeout maximum).
+	// LockTimeout is the time a query waits for a lock, set as lock_timeout. It must be more than zero and
+	// at most 2147483647ms (PostgreSQL's lock_timeout maximum). The default is 1s.
 	//
 	// +kubebuilder:validation:Type=string
 	// +kubebuilder:validation:MaxLength=32
@@ -346,21 +389,22 @@ type Limits struct {
 
 // Exclude removes queries, metrics and databases from collection.
 type Exclude struct {
-	// Queries lists query names never planned, so their SQL never runs. A name may be a Go path.Match pattern.
+	// Queries lists query keys never planned, so their SQL never runs. A key may be a Go path.Match pattern.
 	//
 	// +kubebuilder:validation:MaxItems=64
 	// +listType=set
 	// +optional
 	Queries []string `json:"queries,omitempty"`
 
-	// Metrics lists metric names to drop. A name may be a Go path.Match pattern.
+	// Metrics lists full metric names to drop, such as cnpg_pg_stat_database_xact_commit. A name may be
+	// a Go path.Match pattern. A query whose metrics are all dropped does not run.
 	//
 	// +kubebuilder:validation:MaxItems=64
 	// +listType=set
 	// +optional
 	Metrics []string `json:"metrics,omitempty"`
 
-	// Databases lists database names to skip. A name may be a Go path.Match pattern.
+	// Databases lists database names to skip: no query runs in them. A name may be a Go path.Match pattern.
 	//
 	// +kubebuilder:validation:MaxItems=64
 	// +listType=set

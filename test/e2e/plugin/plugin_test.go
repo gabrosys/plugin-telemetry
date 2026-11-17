@@ -1052,14 +1052,6 @@ func describeMode(m mode) {
 					return out
 				}
 
-				var before map[string]otlp.Export
-				Eventually(func(g Gomega, ctx SpecContext) {
-					before = latest(g, ctx, time.Now().Add(-2*exportInterval))
-					for pod, e := range before {
-						g.Expect(info(e)).To(HaveLen(1), pod)
-					}
-				}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(specPoll).Should(Succeed())
-
 				var (
 					reconcilesBefore reconcileCounts
 					lastReading      reconcileCounts
@@ -1089,11 +1081,26 @@ func describeMode(m mode) {
 						clustersAfter = clustersErr.Error()
 					}
 					AddReportEntry("item 2 identity reconciles at baseline", baseline)
-					AddReportEntry("item 2 identity reconciles at the end", reconcilesAfter.String())
+					end := "not read"
+					if reconcilesAfter != nil {
+						end = reconcilesAfter.String()
+					}
+					if clustersBefore == "" {
+						clustersBefore = "not reached"
+					}
+					AddReportEntry("item 2 identity reconciles at the end", end)
 					AddReportEntry("item 2 Cluster-owned objects in "+ns+" that changed", changes)
 					AddReportEntry("item 2 Clusters at baseline", clustersBefore)
 					AddReportEntry("item 2 Clusters at the end", clustersAfter)
 				}()
+
+				var before map[string]otlp.Export
+				Eventually(func(g Gomega, ctx SpecContext) {
+					before = latest(g, ctx, time.Now().Add(-2*exportInterval))
+					for pod, e := range before {
+						g.Expect(info(e)).To(HaveLen(1), pod)
+					}
+				}).WithContext(ctx).WithTimeout(2 * time.Minute).WithPolling(specPoll).Should(Succeed())
 
 				// The baseline is taken when every plugin pod has exported since mark and the counters did not move
 				// over two consecutive readings at least 2*exportInterval apart. A reconcile between the baseline's

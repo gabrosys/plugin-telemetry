@@ -20,14 +20,14 @@ CNPG operator --> plugin --> sidecar in each instance pod --> OTLP --> your coll
 ## Compatibility
 
 - CNPG v1.30.1 and `main`.
-- Kubernetes 1.34 to 1.37. Tested on 1.37 and on a 1.34 node.
+- Kubernetes 1.34 to 1.37. Tested on 1.37 in the e2e workflow, and on a 1.34 node for the `admission` suite and the `peer` container of the `plugin` suite.
 - PostgreSQL 18.
 - Connection modes `peer` and `password`.
 - OpenShift through `password` mode. Untested.
 
 ## Opt in
 
-A `TelemetryExporter` in the Cluster's namespace holds the collector's address. The Cluster names the plugin and maps the sidecar's OS user to the monitoring role in `pg_ident`.
+A `TelemetryExporter` in the Cluster's namespace holds the collector's address. The Cluster names the plugin and maps the sidecar's OS user to the monitoring role in `pg_ident`. This example uses `peer` mode, the default. `password` mode needs different Cluster lines; see section 4 of the [runbook](docs/runbook.md#4-send-a-clusters-metrics).
 
 ```yaml
 apiVersion: telemetry.gabrosys.github.io/v1alpha1
@@ -54,6 +54,8 @@ spec:
   plugins:
     - name: telemetry.gabrosys.github.io
 ```
+
+Peer mode needs the user `nobody` (UID 65534) in the operand image's `/etc/passwd`. The runbook lists the images checked for it.
 
 ## Documents
 

@@ -15,6 +15,7 @@ GOARCH := $(shell $(GO) env GOARCH)
 GOLANGCI_LINT_VERSION := v2.15.0
 GOVULNCHECK_VERSION := v1.9.0
 CONTROLLER_GEN_VERSION := v0.23.0
+CRD_REF_DOCS_VERSION := v0.3.0
 ACTIONLINT_VERSION := v1.7.12
 KIND_VERSION := v0.33.0
 KUBECTL_VERSION := v1.37.2
@@ -76,9 +77,10 @@ test-integration: ## Run the tests that need Docker (PostgreSQL in a container)
 	POSTGRES_IMAGE=$(POSTGRES_IMAGE) $(GO) test -race -count=1 -tags integration ./...
 
 .PHONY: generate
-generate: ## Regenerate docs/self-metrics.md, the deepcopy code and the CRDs
+generate: ## Regenerate docs/self-metrics.md, docs/crd-reference.md, the deepcopy code and the CRDs
 	@mkdir -p $(BIN) && $(GO) run ./internal/selfmetrics/gen > $(BIN)/self-metrics.md && mv $(BIN)/self-metrics.md docs/self-metrics.md
 	$(GO) run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION) object crd:allowDangerousTypes=true paths=./api/... output:crd:dir=config/crd
+	$(GO) run github.com/elastic/crd-ref-docs@$(CRD_REF_DOCS_VERSION) --source-path=./api/v1alpha1 --config=hack/crd-ref-docs.yaml --renderer=markdown --output-path=docs/crd-reference.md
 
 .PHONY: image
 image: ## Build the image for the local platform and load it into Docker

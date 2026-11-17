@@ -421,13 +421,13 @@ kubectl delete networkpolicy plugin-telemetry -n cnpg-system
 
 ## 10. Upgrade the plugin
 
-Run the steps in this order. Build the new image as in [section 2](#2-build-the-image). Keep the old reference first, because you may need it.
+Run the steps in this order. First keep the old reference, because you may need it.
 
 ```bash
 cp bin/image-ref bin/image-ref.previous
 ```
 
-Then build as in section 2, which overwrites `bin/image-ref`. On kind:
+Then build the new image as in [section 2](#2-build-the-image), which overwrites `bin/image-ref`. On kind:
 
 ```bash
 make kind-load KIND_CLUSTER=${KIND_CLUSTER:?set KIND_CLUSTER, see section 1} CNPG_VERSION=${CNPG_VERSION:?set CNPG_VERSION, see section 1}
@@ -500,7 +500,7 @@ cmp -s bin/image-ref bin/image-ref.previous && echo "same reference: nothing to 
 
 ### From a Cluster
 
-Remove the `plugins` entry from the Cluster. This is also the emergency exit when the plugin is down, since an outage stops the reconciles of every Cluster that names it. It costs one rolling restart, because the sidecar leaves the Pod. If the plugin is the Cluster's only entry:
+Remove the `plugins` entry from the Cluster. This is also the emergency exit when the plugin is down, since an outage stops the reconciles of every Cluster that names it. The sidecar leaves the Pod, so the Cluster has one rolling restart. If the plugin is the Cluster's only entry:
 
 ```bash
 kubectl patch cluster.postgresql.cnpg.io $CLUSTER -n $NS --type=json -p '[{"op":"remove","path":"/spec/plugins"}]'

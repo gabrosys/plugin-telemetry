@@ -9,6 +9,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 var opts = queries.Options{MaxLabelsPerSeries: 32}
@@ -16,7 +17,7 @@ var opts = queries.Options{MaxLabelsPerSeries: 32}
 var _ = Describe("Define", func() {
 	DescribeTable("loads CNPG's default queries as the golden file says",
 		func(ref string) {
-			defs := defineAll(configMapQueries(readTestdata("default-monitoring-" + ref + ".yaml")))
+			defs := defineAll(configMapQueries(fixture.Read(GinkgoTB(), "testdata", "default-monitoring-"+ref+".yaml")))
 			Expect(defs).To(HaveLen(20))
 			Expect(defs).To(HaveKey("collector"))
 
@@ -31,10 +32,10 @@ var _ = Describe("Define", func() {
 			got := marshalSummary(defs)
 			golden := "defaults-" + ref + ".golden.json"
 			if os.Getenv("UPDATE_GOLDEN") != "" {
-				Expect(testdata().WriteFile(golden, got, 0o600)).To(Succeed())
+				Expect(fixture.Open(GinkgoTB(), "testdata").WriteFile(golden, got, 0o600)).To(Succeed())
 			}
 
-			want := readTestdata(golden)
+			want := fixture.Read(GinkgoTB(), "testdata", golden)
 			Expect(string(got)).To(Equal(string(want)))
 		},
 		Entry("v1.30.1", "v1.30.1"),

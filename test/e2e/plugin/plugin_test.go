@@ -38,6 +38,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/framework"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/otlp"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 const (
@@ -107,24 +108,11 @@ func touchCluster(ctx context.Context, c client.Client, key client.ObjectKey, va
 	return rv
 }
 
-func readTestdata(name string) []byte {
-	GinkgoHelper()
-
-	root, err := os.OpenRoot("testdata")
-	Expect(err).NotTo(HaveOccurred())
-	DeferCleanup(root.Close)
-
-	data, err := root.ReadFile(name)
-	Expect(err).NotTo(HaveOccurred())
-
-	return data
-}
-
 func configMap(ns, file string) *corev1.ConfigMap {
 	GinkgoHelper()
 
 	var cm corev1.ConfigMap
-	Expect(yaml.UnmarshalStrict(readTestdata(file), &cm)).To(Succeed())
+	Expect(yaml.UnmarshalStrict(fixture.Read(GinkgoTB(), "testdata", file), &cm)).To(Succeed())
 	cm.Namespace = ns
 
 	return &cm
@@ -134,7 +122,7 @@ func querySet(ns, file string) *v1alpha1.MetricQuerySet {
 	GinkgoHelper()
 
 	var set v1alpha1.MetricQuerySet
-	Expect(yaml.UnmarshalStrict(readTestdata(file), &set)).To(Succeed())
+	Expect(yaml.UnmarshalStrict(fixture.Read(GinkgoTB(), "testdata", file), &set)).To(Succeed())
 	set.Namespace = ns
 
 	return &set

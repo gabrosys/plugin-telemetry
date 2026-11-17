@@ -18,6 +18,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/scheduler"
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/otlp"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 // The intervals of testdata/engine.yaml and testdata/collector.yaml.
@@ -56,14 +57,6 @@ const (
 var failureOnly = map[string]bool{
 	"cnpg_otel_query_capped_series":        true,
 	"cnpg_otel_query_dropped_series_total": true,
-}
-
-func testdata() *os.Root {
-	GinkgoHelper()
-	root, err := os.OpenRoot("testdata")
-	Expect(err).NotTo(HaveOccurred())
-	DeferCleanup(root.Close)
-	return root
 }
 
 // marshalShapes writes one metric per line, so the golden file diffs by metric.
@@ -126,7 +119,7 @@ var _ = Describe("the engine", Ordered, ContinueOnFailure, func() {
 		shapes, err := otlp.Shapes(lines, engineScope)
 		Expect(err).NotTo(HaveOccurred())
 		got := marshalShapes(shapes)
-		root := testdata()
+		root := fixture.Open(GinkgoTB(), "testdata")
 		if os.Getenv("UPDATE_GOLDEN") != "" {
 			Expect(root.WriteFile(goldenFile, got, 0o600)).To(Succeed())
 		}

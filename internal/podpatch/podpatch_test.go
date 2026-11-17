@@ -13,6 +13,7 @@ import (
 
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/podpatch"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 const (
@@ -20,21 +21,10 @@ const (
 	image   = "ghcr.io/gabrosys/plugin-telemetry@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
 
-func testdata() *os.Root {
+func loadPod(name string) *corev1.Pod {
 	GinkgoHelper()
 
-	root, err := os.OpenRoot("testdata")
-	Expect(err).NotTo(HaveOccurred())
-	DeferCleanup(root.Close)
-
-	return root
-}
-
-func loadPod(fixture string) *corev1.Pod {
-	GinkgoHelper()
-
-	data, err := testdata().ReadFile(fixture + ".json")
-	Expect(err).NotTo(HaveOccurred())
+	data := fixture.Read(GinkgoTB(), "testdata", name+".json")
 
 	pod := &corev1.Pod{}
 	Expect(json.Unmarshal(data, pod)).To(Succeed())
@@ -70,12 +60,12 @@ func sidecarOf(pod *corev1.Pod) corev1.Container {
 }
 
 var _ = Describe("Apply", func() {
-	for _, fixture := range []string{"pod-v1.30.1", "pod-main"} {
-		Context("on "+fixture, func() {
+	for _, input := range []string{"pod-v1.30.1", "pod-main"} {
+		Context("on "+input, func() {
 			var original, pod *corev1.Pod
 
 			BeforeEach(func() {
-				original = loadPod(fixture)
+				original = loadPod(input)
 				pod = original.DeepCopy()
 			})
 
@@ -224,8 +214,8 @@ var _ = Describe("Apply", func() {
 				It("matches the golden Pod in "+string(mode)+" mode", func() {
 					Expect(podpatch.Apply(pod, cluster, params(mode), image)).To(Succeed())
 
-					root := testdata()
-					golden := fixture + "." + string(mode) + ".golden.json"
+					root := fixture.Open(GinkgoTB(), "testdata")
+					golden := input + "." + string(mode) + ".golden.json"
 					if os.Getenv("UPDATE_GOLDEN") != "" {
 						Expect(root.WriteFile(golden, marshal(pod), 0o600)).To(Succeed())
 					}

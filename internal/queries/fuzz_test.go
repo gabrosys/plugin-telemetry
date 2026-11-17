@@ -1,34 +1,21 @@
 package queries_test
 
 import (
-	"os"
 	"testing"
 
 	"go.yaml.in/yaml/v4"
 
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 func FuzzParse(f *testing.F) {
-	root, err := os.OpenRoot("testdata")
-	if err != nil {
-		f.Fatalf("open testdata: %v", err)
-	}
-	f.Cleanup(func() {
-		if err := root.Close(); err != nil {
-			f.Errorf("close testdata: %v", err)
-		}
-	})
-
 	for _, name := range []string{
 		"default-monitoring-v1.30.1.yaml",
 		"default-monitoring-main.yaml",
 		"cnpg-pg-exporter.yaml",
 	} {
-		data, err := root.ReadFile(name)
-		if err != nil {
-			f.Fatalf("read seed %s: %v", name, err)
-		}
+		data := fixture.Read(f, "testdata", name)
 		f.Add(data)
 
 		var cm struct {

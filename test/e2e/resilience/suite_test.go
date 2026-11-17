@@ -23,6 +23,7 @@ import (
 
 	"github.com/gabrosys/plugin-telemetry/internal/podpatch"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/framework"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 const (
@@ -63,7 +64,7 @@ func (s *suite) setUp(ctx SpecContext) {
 	s.cluster = client.ObjectKey{Namespace: s.ns, Name: clusterName}
 
 	var queries corev1.ConfigMap
-	Expect(yaml.UnmarshalStrict(readTestdata("queries.yaml"), &queries)).To(Succeed())
+	Expect(yaml.UnmarshalStrict(fixture.Read(GinkgoTB(), "testdata", "queries.yaml"), &queries)).To(Succeed())
 	queries.Namespace = s.ns
 	Expect(s.c.Create(ctx, &queries)).To(Succeed())
 
@@ -162,17 +163,4 @@ func (s *suite) expectNoFailedHookCall(ctx context.Context, name string, since t
 	Expect(err).NotTo(HaveOccurred())
 	AddReportEntry("failed hook calls: "+name, strings.Join(calls, "\n"))
 	Expect(calls).To(BeEmpty())
-}
-
-func readTestdata(name string) []byte {
-	GinkgoHelper()
-
-	root, err := os.OpenRoot("testdata")
-	Expect(err).NotTo(HaveOccurred())
-	defer func() { Expect(root.Close()).To(Succeed()) }()
-
-	data, err := root.ReadFile(name)
-	Expect(err).NotTo(HaveOccurred())
-
-	return data
 }

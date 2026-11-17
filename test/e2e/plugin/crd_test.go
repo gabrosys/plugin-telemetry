@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/gabrosys/plugin-telemetry/test/e2e/framework"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 // strictFieldValidation is fieldValidation=Strict, which kubectl applies by default.
@@ -112,7 +113,7 @@ var _ = Describe("AC1: the CRDs", Ordered, func() {
 	}, SpecTimeout(time.Minute))
 
 	It("keeps metric_mapping: {} in a MetricQuerySet", func(ctx SpecContext) {
-		obj, err := dryRun(ctx, ns, readTestdata("metricqueryset-empty-mapping.yaml"))
+		obj, err := dryRun(ctx, ns, fixture.Read(GinkgoTB(), "testdata", "metricqueryset-empty-mapping.yaml"))
 		Expect(err).NotTo(HaveOccurred())
 
 		metrics, found, err := unstructured.NestedSlice(obj.Object, "spec", "queries", "e2e_mapped", "metrics")

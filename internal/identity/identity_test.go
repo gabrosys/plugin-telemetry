@@ -13,6 +13,7 @@ import (
 
 	"github.com/gabrosys/plugin-telemetry/internal/clusterconfig"
 	"github.com/gabrosys/plugin-telemetry/internal/identity"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 const goldenFile = "desired.golden.json"
@@ -26,9 +27,7 @@ var _ = Describe("Desired", func() {
 		Expect(err).NotTo(HaveOccurred())
 		got = append(got, '\n')
 
-		root, err := os.OpenRoot("testdata")
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(root.Close)
+		root := fixture.Open(GinkgoTB(), "testdata")
 
 		if os.Getenv("UPDATE_GOLDEN") != "" {
 			Expect(root.WriteFile(goldenFile, got, 0o600)).To(Succeed())

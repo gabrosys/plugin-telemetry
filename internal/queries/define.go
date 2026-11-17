@@ -180,7 +180,7 @@ func Define(key string, q UserQuery, opts Options) Definition {
 	return def
 }
 
-// addColumns fills Columns as CNPG's ToMetricMap does (mappings.go:79-232 at v1.30.1) and returns
+// addColumns fills Columns as CNPG's ToMetricMap does (mappings.go:80-232 at v1.30.1) and returns
 // the pg_version text each column was built with.
 func (d *Definition) addColumns(key string, q UserQuery, sensitive bool) map[string]string {
 	sources := make(map[string]string)

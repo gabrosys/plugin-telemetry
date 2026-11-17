@@ -10,7 +10,7 @@ const (
 	KeySyncObserved  = "collector_sync_replicas"
 )
 
-// PGWALHelp is CNPG's help for pg_wal (pg_collector.go:196-201 at v1.30.1), shared with the Cluster-derived rows.
+// PGWALHelp is CNPG's help for pg_wal (pg_collector.go:173-180 at v1.30.1), shared with the Cluster-derived rows.
 const PGWALHelp = "Total size in bytes of WAL segments in the '/var/lib/postgresql/data/pgdata/pg_wal' directory " +
 	" computed as (wal_segment_size * count)"
 
@@ -64,7 +64,8 @@ func statWALQuery(sql, runOnServer string, columns ...Mapping) UserQuery {
 }
 
 // Builtin returns the queries behind CNPG's hard-coded metrics that PostgreSQL computes. The names and
-// descriptions are CNPG's (pg_collector.go:160-180, 217-272 at v1.30.1); the pg_wal count follows main (wal.go:147).
+// descriptions are CNPG's (pg_collector.go:160-180, 217-272 at v1.30.1); the pg_wal count takes only names of
+// exactly 24 hex digits, as main does at bc0889a (wal.go:147); v1.30.1 does not anchor the pattern.
 func Builtin() UserQueries {
 	return UserQueries{
 		KeyLOPages: UserQuery{

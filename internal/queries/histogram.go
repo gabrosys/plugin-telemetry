@@ -12,7 +12,7 @@ import (
 // typeMaps holds the pgtype.Map values scanArray uses; a Map is not safe for concurrent use.
 var typeMaps = sync.Pool{New: func() any { return pgtype.NewMap() }}
 
-// histogramFrom builds a histogram as CNPG's histogram.NewFromRawData does (pkg/management/postgres/metrics/histogram/histogram.go:46-105
+// histogramFrom builds a histogram as CNPG's histogram.NewFromRawData does (pkg/management/postgres/metrics/histogram/histogram.go:50-110
 // at v1.30.1). The arrays arrive as text and are parsed with pgtype. It reports false when a part is
 // missing, empty, malformed, NaN or multi-dimensional.
 func histogramFrom(name string, byName map[string]any) (*Histogram, bool) {

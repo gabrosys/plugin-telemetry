@@ -78,8 +78,9 @@ type Exclude struct {
 	Databases []string `yaml:"databases"`
 }
 
-// Exporter names follow the OTel declarative configuration v1.2.0 otlp_http/otlp_grpc
-// exporter (schema/meter_provider.yaml:355-518), in camelCase; serverName and minVersion are ours.
+// Exporter takes the keys endpoint, compression, timeout and tls caFile, certFile and keyFile from the
+// OTel declarative configuration OTLP exporter, in camelCase; protocol, headersFile, interval,
+// maxPointsPerRequest and tls serverName and minVersion are its own.
 type Exporter struct {
 	Protocol            string        `yaml:"protocol"` // "http/protobuf" or "grpc"
 	Endpoint            string        `yaml:"endpoint"` // full URL; http:// is plaintext, https:// is TLS

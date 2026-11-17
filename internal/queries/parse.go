@@ -28,7 +28,7 @@ const (
 )
 
 // ColumnMapping describes one result column. Field tags follow CloudNativePG v1.30.1
-// pkg/management/postgres/metrics/parser.go:51-67, plus MetricsMapping.
+// pkg/management/postgres/metrics/parser.go:51-64, plus MetricsMapping.
 type ColumnMapping struct {
 	Usage         Usage              `yaml:"usage"`
 	Description   string             `yaml:"description"`

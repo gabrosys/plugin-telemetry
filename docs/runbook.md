@@ -136,7 +136,7 @@ kubectl apply --server-side -k bin/install
 kubectl rollout status deployment/plugin-telemetry -n cnpg-system --timeout=180s
 ```
 
-Use your collector's address instead of `collector.otel.svc:4318`. The metrics are listed in [self-metrics.md](self-metrics.md).
+Use your collector's address instead of `collector.otel.svc:4318`. The metrics are the "Plugin" table in [self-metrics.md](self-metrics.md). They are hook and identity counters, so they reach the collector only after the plugin has served CloudNativePG calls. With no opted-in Cluster nothing arrives, and that is not an error.
 
 ## 4. Send a Cluster's metrics
 
@@ -282,12 +282,9 @@ sed -n '/^# errors/,$p' bin/instance-test.out
 
 `validate` prints one line per finding, `error` or `warning`, and nothing when there is none. It exits with 1 only when a line starts with `error`. `test` prints a series per line, then `# skipped` with one line per query it did not run, then `# errors`. Healthy output has `cnpg_collector_pg_wal` series and nothing after `# errors`.
 
-Last, check what the collector received. The example collector's `debug` exporter prints only counts at `verbosity: basic`. Apply the example again with `detailed`, which prints metric names, restart the collector, and wait one export interval.
+Last, check what the collector received. The example collector's `debug` exporter logs every metric it gets. Wait one export interval first.
 
 ```bash
-sed 's/verbosity: basic/verbosity: detailed/' docs/examples/collector.yaml | kubectl apply -f -
-kubectl rollout restart deployment/collector -n otel
-kubectl rollout status deployment/collector -n otel --timeout=180s
 sleep 45
 kubectl logs deployment/collector -n otel | grep -m1 'Name: cnpg_collector_up'
 kubectl logs deployment/collector -n otel | grep 'service.name' | sort -u
@@ -297,7 +294,7 @@ The first `grep` prints `-> Name: cnpg_collector_up`. The second lists `service.
 
 ## 6. Notice a quiet sidecar
 
-A push pipeline has no scrape `up`: when a sidecar stops, its series stop arriving and no sample says so. Alerting belongs to your backend, so this runbook gives no rules. The plugin gives you the signals.
+A push pipeline has no scrape `up`: when a sidecar stops, its series stop arriving and no sample says so. Alerting belongs to your backend, so this runbook gives no rules. The signals below are metrics of the sidecar (the "Engine" table in [self-metrics.md](self-metrics.md)), not of the plugin Pod.
 
 - The heartbeat is `cnpg_otel_last_export_success_timestamp_seconds`, the Unix time of the last successful export. It moves only when a request had at least one accepted point. Alert when the newest point of an instance is older than two export intervals, which is 60 s with the default 30 s. Alert too when an instance has no point at all. Compare the instances that report with the instances that exist (`k8s.pod.name` and `service.instance.id` are resource attributes on every point). Your backend's staleness window may be longer than two intervals, so measure the age of the newest point yourself.
 - `cnpg_otel_exports_total` by `outcome` (`ok`, `error`, `skipped`). A rising `error` count means the sidecar runs but its exports fail.
@@ -340,7 +337,7 @@ On every clean stop of a plugin Pod, cnpg-i-machinery v0.4.2 logs an error-level
 
 It needs a CNI that enforces NetworkPolicy. kind's default CNI, kindnet, does.
 
-The policy matches the API server by IP address, and what the CNI matches depends on the CNI. On kindnet in kind v0.33.0 the address that counts is the endpoint's, after the Service address is translated: `172.18.0.3:6443` on the test cluster. A rule for the Service address and port 443 blocked the traffic there. This was measured on kindnet only. Your CNI may differ, so verify with the checks below.
+The policy matches the API server by IP address, and what a CNI matches depends on the CNI. On kindnet in kind v0.33.0 the policy matches the endpoint's IP and port after the Service address is translated: `172.18.0.3:6443` on the test cluster. A rule for the Service address and port 443 blocked the traffic there. This was measured on a single-node kind cluster. Other CNIs may match the Service IP and 443 instead, because the Kubernetes NetworkPolicy documentation leaves undefined whether `ipBlock` applies before or after the Service address is rewritten ("Behavior of ipBlock selectors"). Test on your CNI with the checks below. If the plugin cannot reach the API server, also allow the Service IP and port 443 (`kubectl get service kubernetes -n default`).
 
 Find the API server's address and port. The `kubernetes` Service in `default` has an EndpointSlice for it.
 
@@ -348,7 +345,7 @@ Find the API server's address and port. The `kubernetes` Service in `default` ha
 kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes
 ```
 
-Write them into a copy of the example and apply it. The example holds the placeholder `192.0.2.10/32`, which blocks the API server until you replace it. With several addresses, copy the file and add one `ipBlock` entry for each. Replace `/32` with `/128` for an IPv6 address.
+Write them into a copy of the example and apply it. The example holds the placeholder `192.0.2.10/32`, which blocks the API server until you replace it. An HA or managed control plane has several addresses: copy the file and add one `ipBlock` entry for each, or use the provider's API server CIDR. Replace `/32` with `/128` for an IPv6 address.
 
 ```bash
 API_IP=$(kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes \
@@ -359,13 +356,17 @@ sed -e "s|192.0.2.10/32|$API_IP/32|" -e "s|port: 6443|port: $API_PORT|" \
   docs/examples/networkpolicy.yaml | kubectl apply -f -
 ```
 
-If you set `--metrics-endpoint`, the plugin's metrics export also needs a rule. Without it, the export times out and the plugin logs `export metrics` with `"error.type":"timeout"`. The example has the rule commented out, for a collector in `otel` with the label `app.kubernetes.io/name: collector` on port 4318. Change those to match yours and uncomment it. For the example collector, apply the policy like this instead:
+If you set `--metrics-endpoint`, the plugin's metrics export also needs a rule. Without it, the export times out and the plugin logs `export metrics` with `"error.type":"timeout"`. With the rule, the metrics arrive only after the plugin has served CloudNativePG calls, so with no opted-in Cluster none arrive. That is not an error. The example has the rule commented out, for a collector in `otel` with the label `app.kubernetes.io/name: collector` on port 4318. Change those to match yours and uncomment it. For the example collector, apply the policy like this instead:
 
 ```bash
 sed -e "s|192.0.2.10/32|$API_IP/32|" -e "s|port: 6443|port: $API_PORT|" \
   -e '/^    # - to:/,$ s|^    # |    |' \
   docs/examples/networkpolicy.yaml | kubectl apply -f -
 ```
+
+DNS is needed only to resolve the `--metrics-endpoint` host, because the plugin reaches the API server by IP. The example's `kube-dns` selector does not cover NodeLocal DNSCache or other DNS setups, so adjust it to yours. The plugin runs in the CloudNativePG operator's namespace. If that is not `cnpg-system`, change the policy's `metadata.namespace` and the ingress `namespaceSelector` together.
+
+The readiness probe is a TCP check on port 9090 from the kubelet. Kubernetes allows node traffic to Pods, but some CNIs differ. The restart check below covers it: a replica that never becomes ready may be blocked by the policy.
 
 The policy covers the plugin's Pods only. A policy on the instance Pods would also govern PostgreSQL's own traffic, so none is given. The sidecar's export path, from the Cluster's namespace to the collector, is not covered. If you restrict instance Pods yourself, the sidecar needs the API server and the collector.
 

@@ -17,14 +17,14 @@ The plugin runs in `cnpg-system`, and the example collector in `otel`. Those two
 
 ## 1. What you need
 
-- Kubernetes 1.34 to 1.37. The e2e workflow tests 1.37; 1.34 is not tested in CI.
+- Kubernetes 1.34 to 1.37. The e2e workflow tests 1.37 only; 1.34 to 1.36 are not tested in CI.
 - CloudNativePG v1.30.1 and `main`.
 - cert-manager. It is tested with v1.21.3. The plugin's gRPC server uses mutual TLS with certificates from it.
 - Docker, to build the plugin image, and `make`.
 - `kubectl`. `make dev-up` also downloads one to `bin/kubectl-v1.37.2`.
 - An OTLP collector that the instance Pods can reach, over HTTP (4318) or gRPC (4317). HTTP is the default. With gRPC, each sidecar stays on one collector Pod, so set `max_connection_age` on the collector gateway to spread them: in the `otlp` receiver, under `protocols.grpc`, set `keepalive.server_parameters.max_connection_age`.
 
-For a local try, `make dev-up` creates a kind cluster with cert-manager and CloudNativePG. Set `KIND_CLUSTER` (default `plugin-telemetry-v1-30-1`) and `CNPG_VERSION` (`v1.30.1` or `main`); the kind commands below pass both. Point kubectl at the cluster afterwards.
+For a local try, `make dev-up` creates a kind cluster with cert-manager and CloudNativePG. Set `CNPG_VERSION` (`v1.30.1` or `main`) and `KIND_CLUSTER` to any name; the Makefile's default is `plugin-telemetry-v1-30-1` for v1.30.1 and `plugin-telemetry-main` for `main`. The kind commands below pass both. Point kubectl at the cluster afterwards.
 
 ```bash
 KIND_CLUSTER=plugin-telemetry-v1-30-1
@@ -336,7 +336,7 @@ kubectl annotate cluster.postgresql.cnpg.io $CLUSTER -n $NS runbook.telemetry.ga
 | `ImagePullBackOff` after an image change | `kubectl get pods -n $NS` shows `Init:ImagePullBackOff` or `Init:ErrImagePull` on instance Pods. The sidecar is an init container, so the Pod never starts. | The sidecar digest in the `telemetry-sidecar-image` ConfigMap cannot be pulled by that node. Make it pullable, or put the previous digest back ([section 10](#10-upgrade-the-plugin)). Either change rolls the instances again, and each Cluster needs a touch ([section 10](#10-upgrade-the-plugin) step 3). |
 | The plugin's Pods are not ready | The log of a replica stops at `waiting for the sidecar image`, with no `ignoring sidecar image configmap` line. The plugin serves only after it logs `sidecar image loaded, serving`. A log that stops at `waiting for the caches to sync` means the caches have not synced. | With no `ignoring` line, the ConfigMap is missing or the replica has no API server access. Check that the `telemetry-sidecar-image` ConfigMap exists in `cnpg-system`, then look for a NetworkPolicy ([section 9](#9-restrict-the-plugins-network)). `ignoring sidecar image configmap` means the `image` value is invalid: it must be `<repository>@sha256:<64 hex digits>`, and a tag is refused. Fix the ConfigMap. |
 | `problems` names a plugin parameter | `unknown plugin parameter "<key>" is ignored`, or `invalid plugin parameters: sidecarCPU "<value>": <parse error>` or `invalid plugin parameters: sidecarMemory "<value>" is below 32Mi` (`10m` for CPU). The plugin logs `invalid sidecar resource, using the default`, and the sidecar gets the default. | Correct the key (`exporter`, `auth`, `passwordSecret`, `sidecarCPU`, `sidecarMemory`) or the value. A change to the resources rolls the instances. |
-| Deleting, draining or restarting an instance takes about 10 s longer | None. The sidecar holds PostgreSQL's smart shutdown open until its next probe, which runs every 10 s. | Nothing. The stop takes 0.18 s without the plugin. Without the probe, idle sessions held the smart shutdown to the full 180 s (182.5 s measured). The measurements are in [resources.md](resources.md#pod-shutdown). |
+| Deleting, draining or restarting an instance takes about 10 s longer | None. The sidecar holds PostgreSQL's smart shutdown open until its next probe, which runs every 10 s. | Nothing. The stop takes 0.18 s without the plugin. Without the probe, the sidecar's idle sessions held the smart shutdown to the full 180 s (182.5 s measured). The measurements are in [resources.md](resources.md#pod-shutdown). |
 
 ## 8. Known log lines
 

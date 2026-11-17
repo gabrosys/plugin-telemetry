@@ -1,6 +1,6 @@
 # Resource use
 
-Measured on kind (Kubernetes 1.37, PostgreSQL 18.7) with the commands below; each writes its numbers to `bin/measure/<name>-<cnpg>.json`. The current results ran on the v0.5.0 code with one difference, the sidecar image reference check in `internal/operator/sidecarimage.go`. The runs kept as history ran on earlier code; the Environment table lists them.
+Measured on kind (Kubernetes 1.37, PostgreSQL 18.7) with the commands below; each writes its numbers to `bin/measure/<name>-<cnpg>.json`. The current results ran on code identical to v0.5.0 except for the sidecar image reference check in `internal/operator/sidecarimage.go`, which v0.5.0 changed. The runs kept as history ran on earlier code; the Environment table lists them.
 
 ## Verdicts
 
@@ -12,7 +12,7 @@ Measured on kind (Kubernetes 1.37, PostgreSQL 18.7) with the commands below; eac
 | Plugin replica with 1000 Clusters cached: settled working set | <= 64 MiB (67108864 B) | max 58527744 B (55.8 MiB) over both replicas | met |
 | A replacement replica with 1000 Clusters | no OOM kill under its 128Mi limit, settles <= 64 MiB | Ready in 2.0 s, 0 restarts, no termination reason, max 56889344 B (54.3 MiB) | met |
 | Open watches added by 10 sidecars | 60 +/- 5 (6 per sidecar: its 5 informers and the kubelet's watch on the token Secret volume) | 60 | met |
-| Per-row conversion cost | measured, no target | 296 to 4756 B and 0.4 to 5.3 us per row; the histogram row was 5464 B and 5.6 us without the pooled map | see "Per-row conversion and batching" |
+| Per-row conversion cost | measured, no target | 296 to 4756 B and 0.4 to 5.3 us per row; the histogram row was 5464 B and 5.6 us without the pooled `pgtype.Map` | see "Per-row conversion and batching" |
 | Pipelined batches | needed only if `skippedRuns` > 0 | `skippedRuns` 0 | not needed |
 
 ## How the numbers are taken
@@ -49,7 +49,7 @@ Setup: a `MetricQuerySet` `synthetic` of five queries, each returning 4800 rows 
 
 ### Result at 64Mi: missed, twice
 
-With a 64Mi limit, the kernel's OOM killer ended the sidecar (`lastState.terminated.reason: OOMKilled`) in both runs; the default is 96Mi. Both runs are kept as history: `bin/measure/series-v1.30.1-64Mi-first.json` (first run, without the pooled map) and `bin/measure/series-v1.30.1-64Mi-rerun.json` (rerun, with it).
+With a 64Mi limit, the kernel's OOM killer ended the sidecar (`lastState.terminated.reason: OOMKilled`) in both runs; the default is 96Mi. Both runs are kept as history: `bin/measure/series-v1.30.1-64Mi-first.json` (first run, without the pooled `pgtype.Map`, see [Allocation](#allocation)) and `bin/measure/series-v1.30.1-64Mi-rerun.json` (rerun, with it).
 
 | Quantity | First run | Rerun |
 |---|---|---|
@@ -66,7 +66,7 @@ The sidecar sets `GOMEMLIMIT` to 80% of its limit (`internal/memlimit/memlimit.g
 
 ### Result at 96Mi: met
 
-The default `sidecarMemory` is 96Mi (100663296 B), and the default `maxSeriesTotal` is 50000. `GOMEMLIMIT` is then 80530636 B (80.5 MB). Run: `bin/measure/series-v1.30.1.json`, 829 s. An earlier 96Mi run read a highest 77631488 B (74.0 MiB).
+The default `sidecarMemory` is 96Mi (100663296 B), sized so that the default `maxSeriesTotal` of 50000 fits without being lowered. `GOMEMLIMIT` is then 80530636 B (80.5 MB). Run: `bin/measure/series-v1.30.1.json`, 829 s. An earlier 96Mi run read a highest 77631488 B (74.0 MiB).
 
 | Quantity | Measured | Target |
 |---|---|---|
@@ -87,7 +87,7 @@ Method: one real peer Cluster `measure-ref` with 2 instances, brought to Ready. 
 
 The measured replica is the deployed one, with the same binary, manifest (request 64Mi, limit 128Mi) and manager options. Its cache decodes the 1000 Clusters into the pinned CloudNativePG types, and the identity controller gives each its ServiceAccount, Role, RoleBinding and token Secret, so the cache holds 1000 Clusters and 4000 identity objects as in production. The 1000 Clusters make no hook calls, so there is no per-call allocation from them; hook traffic comes from real Clusters, whose allocations are per call and short-lived.
 
-The measurement was taken with the single Cluster List of `exportersToClusters` using `client.UnsafeDisableDeepCopy`.
+`exportersToClusters` lists a namespace's Clusters once, with `client.UnsafeDisableDeepCopy`.
 
 Objects: 100 namespaces, 1000 unreconciled Clusters (plus `measure-ref`), 1000 token Secrets with a token, no Pod in the 100 namespaces. The mean JSON size of one Cluster is 9482 B (`clusterBytes`). Creating the objects took 38 s; the 1000 token Secrets were ready 201 s after the first create (149 s in an earlier run; this run shared the host with the watches measurement).
 
@@ -150,7 +150,7 @@ The sixth watch per sidecar is the kubelet's. A single-Cluster check (the same s
 
 ### Allocation
 
-The sidecar missed its memory target at 64Mi, so the case with the largest B/op per sample picks the site. That is `histogram` (5464 B), where every array scan built a `pgtype.Map` (`pgtype.NewMap()`). `scanArray` takes the map from a `sync.Pool` (`internal/queries/histogram.go`). With the pool, and no other change, the histogram case was 5124 ns/op, 4540 B/op and 102 allocs/op (`bin/measure/bench-after.txt`).
+The sidecar missed its memory target at 64Mi, so the case with the largest B/op per sample picks the site. That is `histogram` (5464 B), where every array scan built a `pgtype.Map` (`pgtype.NewMap()`). `scanArray` takes the map from a `sync.Pool` (`internal/queries/histogram.go`). With the pooled map, and no other change, the histogram case was 5124 ns/op, 4540 B/op and 102 allocs/op (`bin/measure/bench-after.txt`).
 
 At v0.5.0 (median of 5 runs):
 
@@ -161,9 +161,9 @@ At v0.5.0 (median of 5 runs):
 | `synthetic` | 697.5 | 664 | 14 | 2 | 332 |
 | `histogram` | 5349 | 4756 | 109 | 1 | 4756 |
 
-A histogram row now costs 216 B and 7 allocations more than with the pool alone; there is no target on it.
+A histogram row now costs 216 B and 7 allocations more than with the pooled map alone; there is no target on it.
 
-The other cases allocate about 300 B per sample, which is the sample and its labels. The pool cannot lower the 50000-series working set (see above); it lowers the garbage of histogram queries only.
+The other cases allocate about 300 B per sample, which is the sample and its labels. The pooled map cannot lower the 50000-series working set (see above); it lowers the garbage of histogram queries only.
 
 ### Batching
 
@@ -171,7 +171,7 @@ Pipelined batches are not needed. `skippedRuns` is 0 in `sidecar-v1.30.1.json` (
 
 ## Pod shutdown
 
-The sidecar is a native sidecar, so it stops only after `postgres` has stopped. PostgreSQL's smart shutdown waits for every open session, and CloudNativePG falls back to a fast shutdown only after `smartShutdownTimeout`, 180 s by default (CloudNativePG v1.30.1 `api/v1/cluster_funcs.go` `GetSmartShutdownTimeout`). Without the probe, idle sessions held the smart shutdown to the full 180 s (182.5 s measured from the smart request to the fast one), against 0.18 s for the same Cluster without the plugin (measured on kind with CloudNativePG v1.30.1 and PostgreSQL 18.7, one instance).
+The sidecar is a native sidecar, so it stops only after `postgres` has stopped. PostgreSQL's smart shutdown waits for every open session, and CloudNativePG falls back to a fast shutdown only after `smartShutdownTimeout`, 180 s by default (CloudNativePG v1.30.1 `api/v1/cluster_funcs.go` `GetSmartShutdownTimeout`). Without the probe, the sidecar's idle sessions held the smart shutdown to the full 180 s (182.5 s measured from the smart request to the fast one), against 0.18 s for the same Cluster without the plugin (measured on kind with CloudNativePG v1.30.1 and PostgreSQL 18.7, one instance).
 
 The sidecar keeps its sessions between rounds and probes PostgreSQL with one short connection every 10 s (`internal/engine/engine.go` `shutdownProbe`, `internal/pg/pool.go` `Pool.Probe`):
 
@@ -199,7 +199,7 @@ The spec `test/e2e/resilience/shutdown_test.go` deletes the Pod of a one-instanc
 | Docker server (`docker version --format '{{.Server.Version}}'`) | 29.2.1 |
 | kind node image | `kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5` (Kubernetes 1.37.0), kind v0.33.0 |
 | CloudNativePG, PostgreSQL | v1.30.1, 18.7 |
-| Code | v0.5.0 with one difference (see the top), for every current result. Runs kept as history, on earlier code: the two 64Mi runs (without and with the pooled map), the earlier 96Mi run, the per-row figures without the pool and with the pool alone, the 182.5 s shutdown without the probe, and the 24.84 s and 25.15 s shutdowns that closed connections by age |
+| Code | v0.5.0 with one difference (see the top), for every current result. Runs kept as history, on earlier code: the two 64Mi runs (without and with the pooled map), the earlier 96Mi run, the per-row figures without and with only the pooled map, the 149 s token Secret wait of an earlier plugin run, the 182.5 s shutdown without the probe, and the 24.84 s and 25.15 s shutdowns that closed connections by age |
 
 ## Reproducing
 

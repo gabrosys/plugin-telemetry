@@ -36,13 +36,11 @@ COLLECTOR_IMAGE ?= otel/opentelemetry-collector:0.165.0@sha256:34b24b740c3c88d34
 E2E_SUITES := admission engine plugin collector-metrics resilience
 KIND_E2E_SUITES := $(filter-out engine,$(E2E_SUITES))
 E2E_TARGETS := $(addprefix e2e-,$(KIND_E2E_SUITES))
-# Ginkgo --timeout of a suite: E2E_TIMEOUT_<suite> when set, else 30m. E2E_PROCS_<suite> sets --procs (default 1).
+# Ginkgo --timeout of a suite: E2E_TIMEOUT_<suite> when set, else 30m.
 E2E_TIMEOUT_plugin := 50m
 E2E_TIMEOUT_engine := 20m
-E2E_TIMEOUT_collector-metrics := 30m
 E2E_TIMEOUT_resilience := 60m
 E2E_TIMEOUT_measure := 4h
-E2E_PROCS_plugin := 3
 # Regex for ginkgo --focus; empty runs every spec.
 E2E_FOCUS ?=
 override E2E_FOCUS := $(value E2E_FOCUS)
@@ -114,9 +112,9 @@ deploy: kind-load $(KUBECTL) ## Build and load the image, then deploy the plugin
 	KUBECTL=$(KUBECTL) KIND_CLUSTER=$(KIND_CLUSTER) BIN=$(BIN) COLLECTOR_IMAGE=$(COLLECTOR_IMAGE) POSTGRES_IMAGE=$(POSTGRES_IMAGE) \
 		hack/deploy.sh "$$(cat $(BIN)/image-ref)"
 
-# ginkgo-run: $(1) names the suite (timeout and procs), $(2) is the package directory.
+# ginkgo-run: $(1) names the suite, which picks its timeout; $(2) is the package directory.
 ginkgo-run = $(GO) run github.com/onsi/ginkgo/v2/ginkgo run --tags e2e -v --fail-on-empty \
-	--procs=$(or $(E2E_PROCS_$(1)),1) --timeout=$(or $(E2E_TIMEOUT_$(1)),30m) $(if $(E2E_FOCUS),--focus="$$E2E_FOCUS") ./$(2)/...
+	--timeout=$(or $(E2E_TIMEOUT_$(1)),30m) $(if $(E2E_FOCUS),--focus="$$E2E_FOCUS") ./$(2)/...
 
 .PHONY: $(E2E_TARGETS)
 $(E2E_TARGETS): e2e-%: deploy
@@ -145,7 +143,7 @@ E2E_MATRIX_SUITES ?= $(KIND_E2E_SUITES)
 .PHONY: e2e-lane
 e2e-lane: $(addprefix e2e-,$(E2E_MATRIX_SUITES))
 
-# One lane per CNPG version, each with its own cluster and BIN; logs in bin/e2e/<v>.log.
+# One lane per CNPG version, each with its own cluster and BIN; logs and reports go to bin/e2e, named with the CNPG version.
 .PHONY: e2e-matrix
 e2e-matrix: image $(KIND) $(KUBECTL) $(CMCTL) ## Run the kind suites on one kind cluster per CNPG version, in parallel
 	mkdir -p $(BIN)/e2e

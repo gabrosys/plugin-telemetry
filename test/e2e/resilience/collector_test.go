@@ -65,35 +65,38 @@ func (s *suite) readyCollector(ctx context.Context) (bool, error) {
 	return len(ready) > 0, err
 }
 
-// awaitPlateau samples the sidecars in plateauWindow windows until, for every pod, the median working set of a
-// window is within plateauTolerance of the previous window's. A sidecar still climbing after plateauMax fails the spec.
+// awaitPlateau samples the sidecars in up to plateauMax/plateauWindow windows until, for every pod, the median
+// working set of a window is within plateauTolerance of the previous window's. A sidecar still climbing after the
+// last window fails the spec. The windows are recorded once, however the wait ends.
 func (s *suite) awaitPlateau(ctx context.Context, pods []types.NamespacedName) {
 	GinkgoHelper()
 
+	var recorded strings.Builder
+	defer func() { AddReportEntry("plateau usage series", recorded.String()) }()
+
 	var prev [][]uint64
-	var plateau strings.Builder
-	deadline := time.Now().Add(plateauMax)
-	for {
+	var moving []string
+	for range int(plateauMax / plateauWindow) {
 		readings, err := framework.SampleUsage(ctx, s.cfg, pods, metadata.SidecarContainerName, usageEvery, plateauWindow)
+		fmt.Fprintf(&recorded, "\nwindow ending %s:%s", time.Now().Format(time.RFC3339), series(readings, len(pods)))
 		Expect(err).NotTo(HaveOccurred())
 		cur, _ := perPod(readings, len(pods))
-		fmt.Fprintf(&plateau, "\nwindow ending %s:%s", time.Now().Format(time.RFC3339), series(readings, len(pods)))
-		AddReportEntry("plateau usage series", plateau.String())
 
-		var moving []string
-		for i, pod := range pods {
-			if prev != nil && !framework.Settled(prev[i], cur[i], plateauTolerance) {
-				moving = append(moving, fmt.Sprintf("%s: median %d then %d bytes", pod.Name,
-					framework.StatOf(prev[i]).Median, framework.StatOf(cur[i]).Median))
+		if prev != nil {
+			moving = moving[:0]
+			for i, pod := range pods {
+				if !framework.Settled(prev[i], cur[i], plateauTolerance) {
+					moving = append(moving, fmt.Sprintf("%s: median %d then %d bytes", pod.Name,
+						framework.StatOf(prev[i]).Median, framework.StatOf(cur[i]).Median))
+				}
+			}
+			if len(moving) == 0 {
+				return
 			}
 		}
-		if prev != nil && len(moving) == 0 {
-			return
-		}
-		Expect(time.Now().Add(plateauWindow).After(deadline)).To(BeFalse(),
-			"sidecar memory still climbing with the collector up after %s: %s", plateauMax, strings.Join(moving, "; "))
 		prev = cur
 	}
+	Expect(moving).To(BeEmpty(), "sidecar memory still climbing with the collector up after %s", plateauMax)
 }
 
 // collectorSpecs adds ENG-05: the collector down for ten minutes.

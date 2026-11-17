@@ -90,7 +90,7 @@ func (m *PluginMetrics) register(meter metric.Meter) error {
 	m.hookCalls = counter(selfmetrics.HookCalls)
 	m.reconciles = counter(selfmetrics.IdentityReconciles)
 	h, err := meter.Float64Histogram(selfmetrics.HookDuration, metric.WithUnit(defs[selfmetrics.HookDuration].Unit),
-		metric.WithDescription(defs[selfmetrics.HookDuration].Description), metric.WithExplicitBucketBoundaries())
+		metric.WithDescription(defs[selfmetrics.HookDuration].Description))
 	if err != nil {
 		errs = append(errs, fmt.Errorf("create histogram %s: %w", selfmetrics.HookDuration, err))
 	}

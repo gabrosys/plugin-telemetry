@@ -465,6 +465,8 @@ cmp -s bin/image-ref bin/image-ref.previous && echo "same reference: nothing to 
    kubectl rollout status deployment/plugin-telemetry -n cnpg-system --timeout=180s
    ```
 
+   `rollout status` can return while the old plugin Pods are still `Terminating`. They keep serving until they stop, so you can go on.
+
 2. Once the Deployment has rolled out, change the plugin Service's annotation. `kubectl annotate --overwrite` prints `annotated` and `kubectl apply --server-side` prints `serverside-applied` even when nothing changed. Only the `resourceVersion` of the Service and the generation of the Deployment (`kubectl get deployment -n cnpg-system plugin-telemetry -o jsonpath='{.metadata.generation}'`) show a change. Annotating with a value the Service already has changes nothing, so CloudNativePG gets no event. If you are finishing an upgrade that was only partly done, check that the Service's `resourceVersion` moved (`kubectl get service -n cnpg-system plugin-telemetry -o jsonpath='{.metadata.resourceVersion}'`). CloudNativePG reads the plugin's capabilities only when it rebuilds its connection, and it rebuilds on an event of the Service. Without this step it can keep calling with the old capability set for up to about 10 hours.
 
    ```bash

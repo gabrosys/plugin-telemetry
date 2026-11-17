@@ -38,7 +38,6 @@ Other facts:
 - The plugin never writes the Cluster. It returns its status to CloudNativePG, which stores it (`internal/operator/status.go` `Status.SetStatusInCluster`). The ClusterRole grants only read on `clusters`.
 - The sidecar's token volume is optional, so the Pod starts before the token exists. The sidecar waits for the token file, polls every 5 s and logs `waiting for the sidecar token` once (`internal/podpatch/podpatch.go` `Apply`, `internal/kubesource/source.go` `Source.waitForToken`).
 - The sidecar sees only its own token. An empty volume hides the Pod's default token from it (`internal/podpatch/podpatch.go` `Apply`, `sidecar`).
-- Release 0.4.0 named these objects `<cluster>-telemetry` (`internal/metadata/metadata.go` `identitySuffix` at tag v0.4.0). The plugin does not remove them. They have an owner reference to their Cluster, so they go when the Cluster goes. Their rights stay until then. To remove them earlier, run `kubectl --context <context> --namespace <namespace> delete serviceaccount/<cluster>-telemetry role/<cluster>-telemetry rolebinding/<cluster>-telemetry secret/<cluster>-telemetry-token`.
 
 ## The plugin's rights
 
@@ -124,3 +123,5 @@ Never shown: header values, the password and key material. `print-config` prints
 - A compromised plugin can write a token Secret for any existing `*.telemetry` account, including one that someone else bound to broader rights, and read the token. The identities policy checks the name of the account, not who owns it.
 - CloudNativePG applies the plugin's Pod patch to every Pod of an opted-in Cluster (`internal/operator/lifecycle.go` `Lifecycle.LifecycleHook`). A compromised plugin controls that patch, so it can run its own code in the PostgreSQL Pods. The policies limit its API writes, not what it puts into the patch.
 - The CloudNativePG instance manager serves an API on `localhost:8010` without authentication (CloudNativePG v1.30.1 `pkg/management/url/url.go`). The Pod's containers share one network namespace, so the sidecar can call it. This is a CloudNativePG property the plugin does not change.
+- The operator's `--server-cert`, `--server-key` and `--client-cert` must name real files. cnpg-i-machinery v0.4.2 serves gRPC without TLS when all three are empty (`pkg/pluginhelper/http/server.go` `Server.isTLSEnabled`), and the operator checks only that the flags are present, not that they have a value (`internal/cli/operator.go`). Only someone who can edit the plugin Deployment's arguments can empty them.
+- The operator's `--server-address` must be set. An empty value makes the server listen on a Unix socket, which CloudNativePG cannot reach (`pkg/pluginhelper/http/server.go` `Server.createListener`). Only someone who can edit the Deployment's arguments can change it.

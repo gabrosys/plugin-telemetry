@@ -154,6 +154,26 @@ Decision 1, allocation: the sidecar's memory target at 64Mi was missed, so the c
 
 Decision 2, batching: pipelined batches are not needed. `skippedRuns` is 0 in `sidecar-v1.30.1.json` (`cnpg_otel_query_runs_total{outcome="skipped"}` delta over the 10 minute window), and the sidecar's mean CPU is 0.6m against the 10m target. At 0.7 us per synthetic row, converting the 24200 rows of a 48417-series collection takes about 17 ms.
 
+## Pod shutdown
+
+The sidecar is a native sidecar, so it stops only after `postgres` has stopped. PostgreSQL's smart shutdown waits for every open session, and CloudNativePG falls back to a fast shutdown only after `smartShutdownTimeout`, 180 s by default (CloudNativePG v1.30.1 `api/v1/cluster_funcs.go` `GetSmartShutdownTimeout`). A sidecar that kept its idle sessions open held that wait to the full timeout: 182.5 s from the smart request to the fast one, against 0.18 s for the same Cluster without the plugin (measured on kind with CloudNativePG v1.30.1 and PostgreSQL 18.7, one instance).
+
+The sidecar keeps its sessions between rounds and probes PostgreSQL with one short connection every 10 s (`internal/engine/engine.go` `shutdownProbe`, `internal/pg/pool.go` `Pool.Probe`):
+
+- On SQLSTATE 57P03 (`cannot_connect_now`), the pool closes its idle sessions, and closes each other session when its run ends. PostgreSQL answers 57P03 while it shuts down, starts up or recovers.
+- A successful dial that began after the refusal ends the drain.
+- Any other refusal leaves the sessions alone. Monitoring continues while PostgreSQL is at `max_connections`.
+
+The hold is therefore about 10 s plus the query in flight, whatever `planInterval` and the query intervals are.
+
+Cost of the probe:
+
+- One short connection every 10 s per instance, outside `spec.postgres.maxConnections`. The monitoring role's connection limit must be at least `maxConnections` + 1.
+- The probe is 8,640 connections a day (86,400 s / 10 s). With `log_connections` and `log_disconnections` on, each one logs up to four lines on PostgreSQL 18 (connection received, authenticated and authorized, then the disconnection), so up to 34,560 lines a day per instance. The authenticated line appears only for authentication methods that log it, and PostgreSQL 17 and earlier log fewer lines per connection. Both settings are off by default and CloudNativePG v1.30.1 does not set them.
+- While the role's connection limit is reached, PostgreSQL logs one FATAL line every 10 s.
+
+The spec `test/e2e/resilience/shutdown_test.go` deletes the Pod of a one-instance Cluster with the plugin and asserts that the `postgres` container stops within 60 s of the delete. Measured at final verification: <filled by the controller>. The earlier design, which closed connections by age, measured 24.84 s and 25.15 s at the M4.6 gate.
+
 ## Environment
 
 | Item | Value |
@@ -177,3 +197,4 @@ Each command needs the kind cluster of its CNPG version (`KIND_CLUSTER=plugin-te
 | Plugin with 1000 Clusters | `make measure CNPG_VERSION=v1.30.1 E2E_FOCUS=plugin` | 1734 s |
 | Watches | `make measure CNPG_VERSION=v1.30.1 E2E_FOCUS=watches` | 4150 s |
 | Per-row cost | `go test -run '^$' -bench '^BenchmarkRowSamples$' -benchmem -count 5 ./internal/queries/` | 24 s |
+| Pod shutdown | `make e2e-resilience CNPG_VERSION=v1.30.1 E2E_FOCUS='smart shutdown'` | <filled by the controller> |

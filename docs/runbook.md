@@ -24,7 +24,7 @@ The plugin runs in `cnpg-system`, and the example collector in `otel`. Those two
 - cert-manager. It is tested with v1.21.3. The plugin's gRPC server uses mutual TLS with certificates from it.
 - Docker, to build the plugin image, and `make`.
 - `kubectl`. `make dev-up` also downloads one to `bin/kubectl-v1.37.2`.
-- An OTLP collector that the instance Pods can reach, over HTTP (4318) or gRPC (4317).
+- An OTLP collector that the instance Pods can reach, over HTTP (4318) or gRPC (4317). HTTP is the default. With gRPC, each sidecar stays on one collector Pod, so set `max_connection_age` on the collector gateway to spread them.
 
 For a local try, `make dev-up` creates a kind cluster with cert-manager and CloudNativePG. The cluster is named `plugin-telemetry-v1-30-1`, and `make dev-up KIND_CLUSTER=<name>` changes the name. Point kubectl at it afterwards.
 
@@ -119,7 +119,7 @@ kubectl annotate service -n cnpg-system plugin-telemetry \
 
 ### The plugin's own metrics (optional)
 
-The plugin exports its own metrics over OTLP/HTTP when it gets `--metrics-endpoint`, a base URL like `exporter.endpoint`, every 30 s by default (`--metrics-interval`). The base manifests leave it unset. To set it, add a patch to the kustomization and apply it again.
+The plugin exports its own metrics over OTLP/HTTP when it gets `--metrics-endpoint`, a base URL like `exporter.endpoint`, every 30 s by default (`--metrics-interval`). The base manifests leave it unset. To set it, add a patch to the kustomization and apply it again. Run the `cat >>` command once: it appends a `patches:` key, and a second run makes the key a duplicate.
 
 ```bash
 cat >> bin/install/kustomization.yaml <<'EOF'
@@ -140,7 +140,7 @@ Use your collector's address instead of `collector.otel.svc:4318`. The metrics a
 
 ## 4. Send a Cluster's metrics
 
-The Cluster and the TelemetryExporter live in the same namespace. Create the namespace and the TelemetryExporter first. `default` is the name a Cluster uses when it sets no `exporter` parameter. One TelemetryExporter serves every Cluster in the namespace.
+The Cluster and the TelemetryExporter live in the same namespace. Create the namespace and the TelemetryExporter first. `default` is the name a Cluster uses when it sets no `exporter` parameter. One TelemetryExporter can serve every Cluster in the namespace.
 
 ```bash
 kubectl create namespace $NS --dry-run=client -o yaml | kubectl apply -f -
@@ -188,7 +188,7 @@ EOF
 
 ### Password mode
 
-Use it on any platform, and on OpenShift, where Pods run with random UIDs and peer authentication fails. You declare a monitoring role with `pg_monitor`, a Secret with its password, and `pg_hba` lines that let the role in only from the loopback addresses and reject it everywhere else. The Secret must be of type `kubernetes.io/basic-auth` with the role's name as `username`, and CloudNativePG wants it labelled `cnpg.io/reload`. The role's `connectionLimit` must be at least `maxConnections` + 1. The default `maxConnections` is 4, so the example uses 5. The sidecar opens one more short connection every 10 s outside that cap, to see whether PostgreSQL is shutting down.
+Use it on any platform, and on OpenShift, where Pods run with random UIDs and peer authentication fails. You declare a monitoring role with `pg_monitor`, a Secret with its password, and `pg_hba` lines that let the role in only from the loopback addresses and reject it everywhere else. The Secret must be of type `kubernetes.io/basic-auth` with the role's name as `username`, and you label it `cnpg.io/reload` so that password changes apply at once. The role's `connectionLimit` must be at least `maxConnections` + 1. `maxConnections` is `spec.metrics.limits.maxConnections` of the TelemetryExporter, and its default is 4. The sidecar opens one more short connection every 10 s outside that cap, to see whether PostgreSQL is shutting down. `instance test` ([section 5](#5-check-that-it-works)) opens its own pool of up to `maxConnections` beside the running sidecar, so the worst case is 2 x `maxConnections` + 1 = 9 connections. The example uses 10. If you raise `maxConnections`, raise the limit to 2 x `maxConnections` + 1 or more.
 
 ```bash
 ROLE=otel_monitor
@@ -212,7 +212,7 @@ spec:
       - name: $ROLE
         ensure: present
         login: true
-        connectionLimit: 5
+        connectionLimit: 10
         inRoles:
           - pg_monitor
         passwordSecret:
@@ -280,7 +280,7 @@ grep '^cnpg_collector_pg_wal' bin/instance-test.out
 sed -n '/^# errors/,$p' bin/instance-test.out
 ```
 
-`validate` prints one line per finding, `error` or `warning`, and nothing when there is none. It exits with 1 only when a line starts with `error`. `test` prints a series per line, then `# skipped` with one line per query it did not run, then `# errors`. Healthy output has `cnpg_collector_pg_wal` series and nothing after `# errors`.
+`validate` prints one line per finding, `error` or `warning`, and nothing when there is none. It exits with 1 only when a line starts with `error`. `test` prints a series per line, then `# skipped` with one line per query it did not run, then `# errors`. Healthy output has `cnpg_collector_pg_wal` series and nothing after `# errors`. `test` opens its own connections, up to `maxConnections` (`internal/cli/instance_tools.go`, `connect`).
 
 Last, check what the collector received. The example collector's `debug` exporter logs every metric it gets. Wait one export interval first.
 
@@ -290,7 +290,7 @@ kubectl logs deployment/collector -n otel | grep -m1 'Name: cnpg_collector_up'
 kubectl logs deployment/collector -n otel | grep 'service.name' | sort -u
 ```
 
-The first `grep` prints `-> Name: cnpg_collector_up`. The second lists `service.name: Str(<cluster>)` for each Cluster that exports. With a collector of your own, look for the same metric name and resource attribute in your backend.
+The first `grep` prints `-> Name: cnpg_collector_up`. The second lists `service.name: Str(<cluster>)` for each Cluster that exports. If nothing prints, wait a minute and run it again. With a collector of your own, look for the same metric name and resource attribute in your backend.
 
 ## 6. Notice a quiet sidecar
 
@@ -305,7 +305,7 @@ The last three arrive only while exports work, so they do not replace the heartb
 
 ## 7. Troubleshooting
 
-The plugin's status is in the Cluster ([section 5](#5-check-that-it-works)). The sidecar's logs are `kubectl logs <instance Pod> -n $NS -c otel-metrics`, as JSON lines. The plugin's logs are `kubectl logs -n cnpg-system -l app.kubernetes.io/name=plugin-telemetry`. To make CloudNativePG reconcile a Cluster and refresh its plugin status, touch it:
+The plugin's status is in the Cluster ([section 5](#5-check-that-it-works)). The sidecar's logs are `kubectl logs <instance Pod> -n $NS -c otel-metrics`, as JSON lines. The plugin's logs are `kubectl logs -n cnpg-system -l app.kubernetes.io/name=plugin-telemetry --tail=-1`. To make CloudNativePG reconcile a Cluster and refresh its plugin status, touch it:
 
 ```bash
 kubectl annotate cluster.postgresql.cnpg.io $CLUSTER -n $NS runbook.telemetry.gabrosys.github.io/touch="$(date +%s)" --overwrite
@@ -325,6 +325,7 @@ kubectl annotate cluster.postgresql.cnpg.io $CLUSTER -n $NS runbook.telemetry.ga
 | Exports fail | `cnpg_otel_exports_total{outcome="error"}` rises. The sidecar logs `export metrics` with an `error.type`: `timeout`, `_OTHER`, `request_too_large`, an HTTP status such as `401` or a gRPC code such as `Unavailable`. A partly accepted export logs `export partially rejected`. The log says `export recovered` once exports work again. | Check from the Cluster's namespace that the endpoint resolves and answers, that no NetworkPolicy blocks it, and that `exporter.endpoint`, protocol and credentials match the collector. |
 | `ImagePullBackOff` after an image change | `kubectl get pods -n $NS` shows `Init:ImagePullBackOff` or `Init:ErrImagePull` on instance Pods. The sidecar is an init container, so the Pod never starts. | The sidecar digest in the `telemetry-sidecar-image` ConfigMap cannot be pulled by that node. Make it pullable, or put the previous digest back ([section 10](#10-upgrade-the-plugin)). Either change rolls the instances again. |
 | The plugin's Pods are not ready | The plugin logs stop at `waiting for the sidecar image` or `waiting for the caches to sync`. `ignoring sidecar image configmap` means the `image` key is not `<repository>@sha256:<64 hex digits>`. | Fix the ConfigMap. A tag is refused. If the log stops at `waiting for the caches to sync`, the plugin cannot reach the API server: look for a NetworkPolicy ([section 9](#9-restrict-the-plugins-network)). |
+| `problems` names a plugin parameter | `unknown plugin parameter "<key>" is ignored`, or `invalid plugin parameters: sidecarCPU "<value>": <parse error>` or `invalid plugin parameters: sidecarMemory "<value>" is below 32Mi` (`10m` for CPU). The sidecar uses its default for an invalid value and logs an error. | Correct the key (`exporter`, `auth`, `passwordSecret`, `sidecarCPU`, `sidecarMemory`) or the value. A change to the resources rolls the instances. |
 | Deleting, draining or restarting an instance takes about 10 s longer | None. The sidecar holds PostgreSQL's smart shutdown open until its next probe, which runs every 10 s. | Nothing. It was 0.18 s without the plugin against 182.5 s before the probe existed. The measurements are in [resources.md](resources.md#pod-shutdown). |
 
 ## 8. Known log lines
@@ -381,7 +382,7 @@ kubectl wait --for=condition=Ready pod -l app.kubernetes.io/name=plugin-telemetr
 kubectl logs -n cnpg-system -l app.kubernetes.io/name=plugin-telemetry --since=5m --tail=-1 | grep -E 'waiting for the caches to sync|sidecar image loaded, serving'
 ```
 
-Then make CloudNativePG reconcile your Cluster, give it 30 s, and read its phase and the operator's log.
+Then make CloudNativePG reconcile your Cluster, give it 30 s, and read its phase and the operator's log. The log command names the CloudNativePG operator Deployment, `cnpg-controller-manager` for the manifest install. Use your own name if you installed it another way.
 
 ```bash
 kubectl annotate cluster.postgresql.cnpg.io $CLUSTER -n $NS runbook.telemetry.gabrosys.github.io/touch="$(date +%s)" --overwrite
@@ -424,7 +425,7 @@ Then build, which overwrites `bin/image-ref`, and read the new reference.
 NEW_REF=$(cat bin/image-ref)
 ```
 
-1. Roll the plugin Deployment. Change only the plugin image in the kustomization. The sidecar image in the ConfigMap stays as it is. No Pod rolls, and no hook call fails, because a stopping replica keeps serving until the endpoint removal has propagated.
+1. Roll the plugin Deployment. Change only the plugin image in the kustomization. The sidecar image in the ConfigMap stays as it is. No instance Pod rolls and no hook call fails, because a stopping replica keeps serving until the endpoint removal has propagated. The exception is a release that changes the Pod patch (step 4).
 
    ```bash
    sed -e "s|^    newName: .*|    newName: ${NEW_REF%@*}|" -e "s|^    digest: .*|    digest: ${NEW_REF#*@}|" \
@@ -439,18 +440,20 @@ NEW_REF=$(cat bin/image-ref)
    kubectl annotate service -n cnpg-system plugin-telemetry "telemetry.gabrosys.github.io/image=$NEW_REF" --overwrite
    ```
 
-3. Check that the new digest is pullable on every node, then change the sidecar image in the ConfigMap. Every opted-in Cluster rolls once. A well-formed digest that cannot be pulled puts every opted-in instance into `Init:ImagePullBackOff`, so do not skip the check. This starts a short-lived Pod on each node in `$NS`, where the instance Pods pull the image.
+3. Check that the new digest is pullable on every node, then change the sidecar image in the ConfigMap. This is the one step that rolls instances: every opted-in Cluster rolls once, so the digest must be one that every node can pull. A well-formed digest that cannot be pulled puts every opted-in instance into `Init:ImagePullBackOff`, so do not skip the check. This starts a short-lived Pod on each node in `$NS`, where the instance Pods pull the image.
 
    ```bash
+   i=0
    for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
-     kubectl run "pull-check-$node" -n $NS --labels=app=pull-check --image="$NEW_REF" --restart=Never \
-       --overrides="{\"spec\":{\"nodeName\":\"$node\"}}" -- version
+     i=$((i + 1))
+     kubectl run "pull-check-$i" -n $NS --labels=app=pull-check --image="$NEW_REF" --restart=Never \
+       --overrides="{\"spec\":{\"nodeName\":\"$node\",\"serviceAccountName\":\"$CLUSTER\"}}" -- version || break
    done
    kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod -l app=pull-check -n $NS --timeout=180s
    kubectl delete pod -l app=pull-check -n $NS
    ```
 
-   When the wait times out, `kubectl get pods -l app=pull-check -n $NS` shows which node cannot pull. Delete those Pods and fix the pull before you go on. Then change the ConfigMap and watch the instances roll.
+   The check Pods run as the ServiceAccount `$CLUSTER`, which is the one the instance Pods use. CloudNativePG adds the Cluster's `spec.imagePullSecrets` to it. With the default ServiceAccount, a registry credential that sits on the Cluster's account would make the check fail where the instances pull fine. To use a secret directly, add `\"imagePullSecrets\":[{\"name\":\"<secret>\"}]` to the `spec` in `--overrides`. When the wait times out, `kubectl get pods -l app=pull-check -n $NS -o wide` shows which node cannot pull. Delete those Pods and fix the pull before you go on. Then change the ConfigMap and watch the instances roll.
 
    ```bash
    sed "s|^      - image=.*|      - image=$NEW_REF|" bin/install/kustomization.yaml > bin/install/kustomization.yaml.new \
@@ -459,7 +462,11 @@ NEW_REF=$(cat bin/image-ref)
    kubectl get pods -n $NS -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.initContainers[?(@.name=="otel-metrics")].image}{"\n"}{end}'
    ```
 
-   To go back, run the same two `sed` commands of steps 1 and 3 with `$(cat bin/image-ref.previous)`. This rolls the instances again.
+   To go back, set `NEW_REF` to the previous reference and repeat steps 1, 2 and 3. This rolls the instances again.
+
+   ```bash
+   NEW_REF=$(cat bin/image-ref.previous)
+   ```
 
 4. A release that changes the Pod patch rolls every opted-in instance on upgrade. Read its release notes before you start.
 
@@ -473,14 +480,23 @@ Remove the `plugins` entry from the Cluster. This is also the emergency exit whe
 kubectl patch cluster.postgresql.cnpg.io $CLUSTER -n $NS --type=json -p '[{"op":"remove","path":"/spec/plugins"}]'
 ```
 
-With other plugins, remove only the entry whose name is `telemetry.gabrosys.github.io`, by its index in `spec.plugins`. Then wait until no instance has the sidecar, and until the Cluster is ready.
+With other plugins, find the index of the `telemetry.gabrosys.github.io` entry and remove only that one. Counting from 0, if it is the second entry:
 
 ```bash
-until [ -z "$(kubectl get pods -n $NS -l cnpg.io/cluster=$CLUSTER -o jsonpath='{.items[*].spec.initContainers[?(@.name=="otel-metrics")].name}')" ]; do sleep 5; done
+kubectl get cluster.postgresql.cnpg.io $CLUSTER -n $NS -o jsonpath='{.spec.plugins[*].name}'; echo
+kubectl patch cluster.postgresql.cnpg.io $CLUSTER -n $NS --type=json -p '[{"op":"remove","path":"/spec/plugins/1"}]'
+```
+
+Then wait until every instance Pod is back without the sidecar, and until the Cluster is ready.
+
+```bash
+INSTANCES=$(kubectl get cluster.postgresql.cnpg.io $CLUSTER -n $NS -o jsonpath='{.spec.instances}')
+until [ "$(kubectl get pods -n $NS -l cnpg.io/cluster=$CLUSTER,cnpg.io/podRole=instance -o name | wc -l)" -ge "$INSTANCES" ] &&
+  [ -z "$(kubectl get pods -n $NS -l cnpg.io/cluster=$CLUSTER,cnpg.io/podRole=instance -o jsonpath='{.items[*].spec.initContainers[?(@.name=="otel-metrics")].name}')" ]; do sleep 5; done
 kubectl wait --for=condition=Ready cluster.postgresql.cnpg.io/$CLUSTER -n $NS --timeout=600s
 ```
 
-The identity controller deletes the four identity objects of a Cluster that no longer has the plugin, with the plugin running. Check that they are gone.
+The identity controller deletes the four identity objects of a Cluster that no longer has the plugin, while the plugin runs. Kubernetes also deletes them with the Cluster, through their owner reference. Check that they are gone.
 
 ```bash
 kubectl get serviceaccount,role,rolebinding,secret -n $NS -l app.kubernetes.io/managed-by=plugin-telemetry

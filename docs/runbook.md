@@ -19,8 +19,8 @@ The plugin runs in `cnpg-system`, and the example collector in `otel`. Those two
 
 ## 1. What you need
 
-- Kubernetes 1.34 or later. The plugin is tested on 1.37, and the 1.34 floor is tested on a 1.34 node.
-- CloudNativePG v1.30.1 or later. CI also runs CloudNativePG `main`.
+- Kubernetes 1.34 to 1.37. The plugin is tested on 1.37 in the e2e workflow, and on a 1.34 node for the admission suite and the peer container of the plugin suite.
+- CloudNativePG v1.30.1 and `main`.
 - cert-manager. It is tested with v1.21.3. The plugin's gRPC server uses mutual TLS with certificates from it.
 - Docker, to build the plugin image, and `make`.
 - `kubectl`. `make dev-up` also downloads one to `bin/kubectl-v1.37.2`.
@@ -35,7 +35,7 @@ make dev-up KIND_CLUSTER=${KIND_CLUSTER:?set KIND_CLUSTER, see section 1} CNPG_V
 kubectl config use-context kind-${KIND_CLUSTER:?set KIND_CLUSTER, see section 1}
 ```
 
-If you have no collector, apply the example one. It receives OTLP and prints a summary of what it gets.
+If you have no collector, apply the example one. It receives OTLP and logs every metric it gets.
 
 ```bash
 kubectl apply -f docs/examples/collector.yaml
@@ -317,7 +317,7 @@ kubectl annotate cluster.postgresql.cnpg.io $CLUSTER -n $NS runbook.telemetry.ga
 | Symptom | What the plugin shows | Fix |
 |---|---|---|
 | The TelemetryExporter does not exist, or the `exporter` parameter names the wrong one | Status `"exporterState":"missing"`, with `exporter` set to the name it looked for. The sidecar logs `no configuration, waiting for one` with `reason` `load settings: no configuration: telemetryexporter "default" does not exist`. A first line right after the sidecar starts has `reason` `load settings: no configuration: cluster "<name>" is not known yet`, which clears at once. The sidecar exports nothing, its own metrics included. | Create the TelemetryExporter in the Cluster's namespace under that name, or correct the parameter. The sidecar starts on its own and no Pod restarts. The status stays `missing` until the Cluster is touched (next rows). |
-| The TelemetryExporter is invalid | Status `"exporterState":"invalid"` and a `message` that starts with `check exporter:` and names the field. The sidecar logs `invalid configuration, waiting for a valid one`, or `invalid configuration, keeping the one in force` when an earlier configuration worked. | Fix the field the message names. The sidecar reloads at once. The plugin does not read Secrets, so a bad key inside the headers, CA, client certificate or `envFrom` Secret still shows `ok`. The sidecar logs it. |
+| The TelemetryExporter is invalid | Status `"exporterState":"invalid"` and a `message` that starts with `check exporter:` and names the field. The sidecar logs `invalid configuration, waiting for a valid one`, or `invalid configuration, keeping the one in force` when an earlier configuration worked. | Fix the field the message names. The sidecar reloads at once. The plugin reads neither the referenced Secrets nor the ConfigMaps, so a bad key in the `envFrom` ConfigMap or Secret, or in the headers, CA or client-certificate object, still shows `ok`. The sidecar logs it. |
 | The Cluster was opted in before its TelemetryExporter, and the status still says `missing` after you created it | Exports and the identity resume at once, but the status changes only when CloudNativePG reconciles the Cluster, and creating the exporter does not trigger that. | Touch the Cluster (above). |
 | `"identity":"pending"` with a line in `problems` that names an object | `Secret/<c>.telemetry-token has type <type>, not kubernetes.io/service-account-token: delete it`, `Secret/<c>.telemetry-token names ServiceAccount "<a>", not "<c>.telemetry": delete it`, `RoleBinding/<c>.telemetry refers to <kind>/<name>, not Role/<c>.telemetry: delete it`, or `<Kind>/<name> is not in the plugin's cache: not created yet, or not the plugin's`. The plugin logs `identity controller` with `"outcome":"in the way"` once. | The plugin never adopts an object it did not create. Delete the object the line names, for example `kubectl delete secret <c>.telemetry-token -n $NS`. The plugin retries every 5 s. `has no data.token yet` clears when Kubernetes fills the token. |
 | No `otel-metrics` container in the instance Pods | `problems` has `auth "<value>" is invalid: no sidecar is injected`. An invalid `auth` also removes the Cluster's identity objects until it is fixed. | Set `auth` to `peer` or `password`, or leave it out for `peer`. The instances roll once to gain the sidecar. |
@@ -327,8 +327,8 @@ kubectl annotate cluster.postgresql.cnpg.io $CLUSTER -n $NS runbook.telemetry.ga
 | `cnpg_otel_query_runs_total` has `outcome="denied"` | `cnpg_otel_check{check="pg_monitor"}` is 0 when the role is not in `pg_monitor`. The sidecar logs `query failed` with `"outcome":"denied"`. PostgreSQL reports it as SQLSTATE 42501. | Put the role in `pg_monitor`. In password mode that is `inRoles` of the managed role. If `pg_monitor` is held, the query reads something `pg_monitor` cannot, so change the query. |
 | Exports fail | `cnpg_otel_exports_total{outcome="error"}` rises. The sidecar logs `export metrics` with an `error.type`: `timeout`, `_OTHER`, `request_too_large`, an HTTP status such as `401` or a gRPC code such as `Unavailable`. A partly accepted export logs `export partially rejected`. The log says `export recovered` once exports work again. | Check from the Cluster's namespace that the endpoint resolves and answers, that no NetworkPolicy blocks it, and that `exporter.endpoint`, protocol and credentials match the collector. |
 | `ImagePullBackOff` after an image change | `kubectl get pods -n $NS` shows `Init:ImagePullBackOff` or `Init:ErrImagePull` on instance Pods. The sidecar is an init container, so the Pod never starts. | The sidecar digest in the `telemetry-sidecar-image` ConfigMap cannot be pulled by that node. Make it pullable, or put the previous digest back ([section 10](#10-upgrade-the-plugin)). Either change rolls the instances again. |
-| The plugin's Pods are not ready | The plugin logs stop at `waiting for the sidecar image` or `waiting for the caches to sync`. `ignoring sidecar image configmap` means the `image` key is not `<repository>@sha256:<64 hex digits>`. | Fix the ConfigMap. A tag is refused. If the log stops at `waiting for the caches to sync`, the plugin cannot reach the API server: look for a NetworkPolicy ([section 9](#9-restrict-the-plugins-network)). |
-| `problems` names a plugin parameter | `unknown plugin parameter "<key>" is ignored`, or `invalid plugin parameters: sidecarCPU "<value>": <parse error>` or `invalid plugin parameters: sidecarMemory "<value>" is below 32Mi` (`10m` for CPU). The sidecar uses its default for an invalid value and logs an error. | Correct the key (`exporter`, `auth`, `passwordSecret`, `sidecarCPU`, `sidecarMemory`) or the value. A change to the resources rolls the instances. |
+| The plugin's Pods are not ready | The log of a replica stops at `waiting for the sidecar image`, with no `ignoring sidecar image configmap` line. The plugin serves only after it logs `sidecar image loaded, serving`. A log that stops at `waiting for the caches to sync` means the caches have not synced. | With no `ignoring` line, the ConfigMap is missing or the replica has no API server access. Check that the `telemetry-sidecar-image` ConfigMap exists in `cnpg-system`, then look for a NetworkPolicy ([section 9](#9-restrict-the-plugins-network)). `ignoring sidecar image configmap` means the `image` value is invalid: it must be `<repository>@sha256:<64 hex digits>`, and a tag is refused. Fix the ConfigMap. |
+| `problems` names a plugin parameter | `unknown plugin parameter "<key>" is ignored`, or `invalid plugin parameters: sidecarCPU "<value>": <parse error>` or `invalid plugin parameters: sidecarMemory "<value>" is below 32Mi` (`10m` for CPU). The plugin logs `invalid sidecar resource, using the default`, and the sidecar gets the default. | Correct the key (`exporter`, `auth`, `passwordSecret`, `sidecarCPU`, `sidecarMemory`) or the value. A change to the resources rolls the instances. |
 | Deleting, draining or restarting an instance takes about 10 s longer | None. The sidecar holds PostgreSQL's smart shutdown open until its next probe, which runs every 10 s. | Nothing. It was 0.18 s without the plugin against 182.5 s before the probe existed. The measurements are in [resources.md](resources.md#pod-shutdown). |
 
 ## 8. Known log lines
@@ -381,7 +381,7 @@ The policy covers the plugin's Pods only. A policy on the instance Pods would al
 
 ### Confirm the plugin still works
 
-Restart one replica and wait until the plugin is ready. The readiness probe is a TCP check on the gRPC port, and the plugin listens only after its caches have synced, so a ready replica reaches the API server.
+Restart one replica and wait until the plugin is ready. The readiness probe is a TCP check on the gRPC port, and the plugin listens only after it has loaded the sidecar image and synced its caches, so a ready replica reaches the API server. A replica blocked from the API server logs `waiting for the sidecar image` and never `sidecar image loaded, serving`.
 
 ```bash
 POD=$(kubectl get pods -n cnpg-system -l app.kubernetes.io/name=plugin-telemetry -o jsonpath='{.items[0].metadata.name}')
@@ -444,7 +444,7 @@ docker push $IMG
 echo "${IMG%:*}@$(docker buildx imagetools inspect $IMG | awk '/^Digest:/ {print $2}')" > bin/image-ref
 ```
 
-Then read the new reference. If it equals the old one, steps 1 to 3 change nothing: the Deployment does not roll and no Service event reaches CloudNativePG. This command says so. If it prints `same reference: nothing to upgrade`, stop here: there is nothing to upgrade. On kind, a rebuild of unchanged code gives the same digest, so an upgrade needs a code change. The later blocks of this section use `NEW_REF`, so keep the same shell.
+Then read the new reference. If it equals the old one, steps 1 to 3 change nothing: the Deployment does not roll and no Service event reaches CloudNativePG. This command says so. If it prints `same reference: nothing to upgrade`, stop here: there is nothing to upgrade. On kind, a rebuild at the same commit with a clean tree gives the same digest, so an upgrade needs a new commit. The later blocks of this section use `NEW_REF`, so keep the same shell.
 
 ```bash
 NEW_REF=$(cat bin/image-ref)
@@ -479,7 +479,7 @@ cmp -s bin/image-ref bin/image-ref.previous && echo "same reference: nothing to 
    kubectl delete pod -l app=pull-check -n $NS
    ```
 
-   The check Pods run as the ServiceAccount `$CLUSTER`, which is the one the instance Pods use unless the Cluster sets `spec.serviceAccountName`. In that case use that name. CloudNativePG adds the Cluster's `spec.imagePullSecrets` to it. With the default ServiceAccount, a registry credential that sits on the Cluster's account would make the check fail where the instances pull fine. To use a secret directly, add `\"imagePullSecrets\":[{\"name\":\"<secret>\"}]` to the `spec` in `--overrides`. When the wait times out, `kubectl get pods -l app=pull-check -n $NS -o wide` shows which node cannot pull. Delete those Pods and fix the pull before you go on. Then change the ConfigMap and watch the instances roll.
+   The check Pods run as the ServiceAccount `$CLUSTER`, which is the one the instance Pods use unless the Cluster sets `spec.serviceAccountName`. In that case use that name. CloudNativePG adds the Cluster's `spec.imagePullSecrets` to it. With the default ServiceAccount, a registry credential that sits on the Cluster's account would make the check fail where the instances pull fine. To use a secret directly, add `\"imagePullSecrets\":[{\"name\":\"<secret>\"}]` to the `spec` in `--overrides`. When the wait times out, `kubectl get pods -l app=pull-check -n $NS -o wide` shows which node cannot pull. Delete those Pods and fix the pull before you go on. Then change the ConfigMap and watch the instances roll. The ConfigMap comes last because every plugin replica reads that one ConfigMap: changing it after the Deployment has rolled makes the instances roll once, onto a sidecar the new plugin already serves. Changed first, the instances would roll onto the new sidecar while old replicas still serve, and the new replicas could then return a different Pod patch and roll them again.
 
    ```bash
    sed "s|^      - image=.*|      - image=$NEW_REF|" bin/install/kustomization.yaml > bin/install/kustomization.yaml.new \

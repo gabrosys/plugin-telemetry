@@ -104,6 +104,8 @@ type Query struct {
 }
 
 // MetricColumn describes one result column: a single entry whose key is the column name.
+// The name must match `^[a-zA-Z_][a-zA-Z0-9_]{0,62}$`: it starts with a letter or underscore and has up to 63
+// letters, digits or underscores.
 //
 // +kubebuilder:validation:MinProperties=1
 // +kubebuilder:validation:MaxProperties=1

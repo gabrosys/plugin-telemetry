@@ -1,7 +1,5 @@
 # Restricts the plugin Pods in cnpg-system to the traffic they need. It needs a CNI that enforces NetworkPolicy.
 # Fill in the API server address, and the collector rule if you set --metrics-endpoint.
-# The plugin runs in the CloudNativePG operator's namespace. If CloudNativePG is not in cnpg-system,
-# change metadata.namespace and the ingress namespaceSelector together.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

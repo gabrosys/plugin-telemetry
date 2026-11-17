@@ -1,12 +1,10 @@
 # Runbook
 
-How to install the plugin, send a Cluster's metrics to your collector, check that it works, notice when the sidecar goes quiet, restrict the plugin's network, upgrade it and remove it.
-
-Run every command from the repository root, and run all blocks in one shell, because later blocks use variables that earlier ones set. Set these two variables once. Every later command uses them.
+Run every command from the repository root, and run all blocks in one shell, because later blocks use variables that earlier ones set. Set these two variables. Set `CLUSTER` again for each Cluster you opt in.
 
 ```bash
 NS=app        # namespace of the Cluster and its TelemetryExporter
-CLUSTER=pg    # the Cluster you opt in; set it again for the next Cluster
+CLUSTER=pg    # the Cluster you opt in
 ```
 
 The commands use your current kubectl context and never pass `--context`. Check it before you start.
@@ -19,14 +17,14 @@ The plugin runs in `cnpg-system`, and the example collector in `otel`. Those two
 
 ## 1. What you need
 
-- Kubernetes 1.34 to 1.37. The plugin is tested on 1.37 in the e2e workflow, and on a 1.34 node for the admission suite and the peer container of the plugin suite.
+- Kubernetes 1.34 to 1.37. The e2e workflow tests 1.37; 1.34 is not tested in CI.
 - CloudNativePG v1.30.1 and `main`.
 - cert-manager. It is tested with v1.21.3. The plugin's gRPC server uses mutual TLS with certificates from it.
 - Docker, to build the plugin image, and `make`.
 - `kubectl`. `make dev-up` also downloads one to `bin/kubectl-v1.37.2`.
-- An OTLP collector that the instance Pods can reach, over HTTP (4318) or gRPC (4317). HTTP is the default. With gRPC, each sidecar stays on one collector Pod, so set `max_connection_age` on the collector gateway to spread them: in the `otlp` receiver, under `grpc`, `keepalive.server_parameters.max_connection_age`.
+- An OTLP collector that the instance Pods can reach, over HTTP (4318) or gRPC (4317). HTTP is the default. With gRPC, each sidecar stays on one collector Pod, so set `max_connection_age` on the collector gateway to spread them: in the `otlp` receiver, under `protocols.grpc`, set `keepalive.server_parameters.max_connection_age`.
 
-For a local try, `make dev-up` creates a kind cluster with cert-manager and CloudNativePG. The cluster is named `plugin-telemetry-v1-30-1` by default. Set `KIND_CLUSTER` to that name once, or to another name if you want a different cluster, and the kind commands below use it. Set `CNPG_VERSION` once too: v1.30.1, or `main`, which is also allowed. Every kind command below passes both. Point kubectl at the cluster afterwards.
+For a local try, `make dev-up` creates a kind cluster with cert-manager and CloudNativePG. Set `KIND_CLUSTER` (default `plugin-telemetry-v1-30-1`) and `CNPG_VERSION` (`v1.30.1` or `main`); the kind commands below pass both. Point kubectl at the cluster afterwards.
 
 ```bash
 KIND_CLUSTER=plugin-telemetry-v1-30-1
@@ -48,7 +46,7 @@ Its endpoints are `http://collector.otel.svc:4318` and `http://collector.otel.sv
 
 The image package on ghcr is private, so you build the image and put it where your nodes can pull it. The plugin and the sidecar are one image. The plugin pins it by digest, and a tag is refused. Both steps below end with the digest reference in `bin/image-ref`. The next section reads it from there.
 
-On kind, `make kind-load` builds the image, loads it into the cluster and writes the reference. It also runs `make dev-up`, which re-applies cert-manager and CloudNativePG onto that cluster at the versions the Makefile pins (cert-manager v1.21.3, CloudNativePG v1.30.1 unless `CNPG_VERSION` says otherwise), and it pre-pulls the collector image on the nodes. Pass the same `KIND_CLUSTER` and `CNPG_VERSION` as for `make dev-up`. kind may print `not yet present on node ... loading` even for an unchanged image. That is harmless.
+On kind, `make kind-load` builds the image, loads it into the cluster and writes the reference. It also runs `make dev-up`, which re-applies cert-manager and CloudNativePG onto that cluster at the versions the Makefile pins (cert-manager v1.21.3, CloudNativePG v1.30.1 unless `CNPG_VERSION` says otherwise), and it pre-pulls the collector image on the nodes. Pass the same `KIND_CLUSTER` and `CNPG_VERSION` as for `make dev-up`. kind may print `not yet present on node ... loading` even for an unchanged image, which is harmless.
 
 ```bash
 make kind-load KIND_CLUSTER=${KIND_CLUSTER:?set KIND_CLUSTER, see section 1} CNPG_VERSION=${CNPG_VERSION:?set CNPG_VERSION, see section 1}
@@ -77,6 +75,12 @@ kubectl apply --server-side -k config/crd
 kubectl wait --for=condition=Established \
   crd/metricquerysets.telemetry.gabrosys.github.io \
   crd/telemetryexporters.telemetry.gabrosys.github.io --timeout=60s
+```
+
+Apply the admission policies next, so they are in place before the plugin starts ([security.md](security.md#the-admission-policies)).
+
+```bash
+kubectl apply --server-side -f config/admission-policy.yaml
 ```
 
 Then write a kustomization that points at `config/`, pins the plugin image, and sets the image that the plugin injects as the sidecar. The `bin/` directory is not tracked by git.
@@ -139,7 +143,7 @@ kubectl apply --server-side -k bin/install
 kubectl rollout status deployment/plugin-telemetry -n cnpg-system --timeout=180s
 ```
 
-Use your collector's address instead of `collector.otel.svc:4318`. The metrics are the "Plugin" table in [self-metrics.md](self-metrics.md). They are hook and identity counters, so they reach the collector only after the plugin has served CloudNativePG calls. With no opted-in Cluster nothing arrives, and that is not an error.
+Use your collector's address instead of `collector.otel.svc:4318`. The metrics are the "Plugin" table in [self-metrics.md](self-metrics.md). They are hook and identity counters that arrive after the plugin has reconciled a Cluster or served a hook call, so in a Kubernetes cluster with no CloudNativePG Cluster nothing arrives, and that is not an error.
 
 ## 4. Send a Cluster's metrics
 
@@ -324,7 +328,7 @@ kubectl annotate cluster.postgresql.cnpg.io $CLUSTER -n $NS runbook.telemetry.ga
 | The Cluster was opted in before its TelemetryExporter, and the status still says `missing` after you created it | Exports and the identity resume at once, but the status changes only when CloudNativePG reconciles the Cluster, and creating the exporter does not trigger that. | Touch the Cluster (above). |
 | `"identity":"pending"` with a line in `problems` that names an object | `Secret/<c>.telemetry-token has type <type>, not kubernetes.io/service-account-token: delete it`, `Secret/<c>.telemetry-token names ServiceAccount "<a>", not "<c>.telemetry": delete it`, `RoleBinding/<c>.telemetry refers to <kind>/<name>, not Role/<c>.telemetry: delete it`, or `<Kind>/<name> is not in the plugin's cache: not created yet, or not the plugin's`. The plugin logs `identity controller` with `"outcome":"in the way"` once. | The plugin never adopts an object it did not create. Delete the object the line names, for example `kubectl delete secret <c>.telemetry-token -n $NS`. The plugin retries every 5 s. `has no data.token yet` clears when Kubernetes fills the token. |
 | No `otel-metrics` container in the instance Pods | `problems` has `auth "<value>" is invalid: no sidecar is injected`. An invalid `auth` also removes the Cluster's identity objects until it is fixed. | Set `auth` to `peer` or `password`, or leave it out for `peer`. The instances roll once to gain the sidecar. |
-| Peer mode: `peer mode needs the pg_ident line "cnpg_metrics_exporter nobody cnpg_metrics_exporter"` | The status shows the problem at once. The sidecar keeps the connections it has open, so it logs `"msg":"gather facts"` with `FATAL: Peer authentication failed for user "cnpg_metrics_exporter" (SQLSTATE 28000)` in `error`, and `cnpg_collector_up` is 0, only when it opens a new connection, for example after a Pod restart. | Add the line to `spec.postgresql.pg_ident`. PostgreSQL reloads and no Pod restarts. The sidecar retries after 1 s, 2 s, 4 s and so on, at most every plan interval (30 s by default), so it logs `gathered facts again` within one interval of PostgreSQL loading the line. In the upgrade run the sidecar had been failing for about 2 minutes, so the wait was at the 30 s cap, and it recovered about 30 s after the patch. |
+| Peer mode: `peer mode needs the pg_ident line "cnpg_metrics_exporter nobody cnpg_metrics_exporter"` | The status shows the problem at once. The sidecar keeps the connections it has open, so it logs `"msg":"gather facts"` with `FATAL: Peer authentication failed for user "cnpg_metrics_exporter" (SQLSTATE 28000)` in `error`, and `cnpg_collector_up` is 0, only when it opens a new connection, for example after a Pod restart. | Add the line to `spec.postgresql.pg_ident`. PostgreSQL reloads and no Pod restarts. The sidecar retries after 1 s, 2 s, 4 s and so on, at most every plan interval (30 s by default), so it logs `gathered facts again` within one interval of PostgreSQL loading the line. In a test, the sidecar had been failing for about 2 minutes, so the wait was at the 30 s cap, and it recovered about 30 s after the patch. |
 | Password mode: `password mode needs the passwordSecret parameter`, `no managed role uses passwordSecret "<name>" with login and pg_monitor`, `pg_hba has no line for role "<role>" from 127.0.0.1/32` (or `::1/128`), or `pg_hba has no reject line for role "<role>"` | The status is the only place these appear. They list what the Cluster spec lacks. | Add the parameter, the managed role (with `login: true` and `pg_monitor` in `inRoles`) or the `pg_hba` lines from [section 4](#password-mode). |
 | `cnpg_otel_check{check="superuser"}` is 1 | `cnpg_collector_up` is not reported, and no query runs. The sidecar logs `query failed` with `"query":"facts"`, `"outcome":"denied"` and the error `the session role is a superuser: <role>; no query runs until the role is not a superuser`. | The sidecar must log in as a role that is not a superuser. In password mode, check the `username` in the Secret that `passwordSecret` names, and the managed role ([section 4](#password-mode)). |
 | `cnpg_otel_query_runs_total` has `outcome="denied"` | `cnpg_otel_check{check="pg_monitor"}` is 0 when the role is not in `pg_monitor`. The sidecar logs `query failed` with `"outcome":"denied"`. PostgreSQL reports it as SQLSTATE 42501. | Put the role in `pg_monitor`. In password mode that is `inRoles` of the managed role. If `pg_monitor` is held, the query reads something `pg_monitor` cannot, so change the query. |
@@ -332,17 +336,19 @@ kubectl annotate cluster.postgresql.cnpg.io $CLUSTER -n $NS runbook.telemetry.ga
 | `ImagePullBackOff` after an image change | `kubectl get pods -n $NS` shows `Init:ImagePullBackOff` or `Init:ErrImagePull` on instance Pods. The sidecar is an init container, so the Pod never starts. | The sidecar digest in the `telemetry-sidecar-image` ConfigMap cannot be pulled by that node. Make it pullable, or put the previous digest back ([section 10](#10-upgrade-the-plugin)). Either change rolls the instances again, and each Cluster needs a touch ([section 10](#10-upgrade-the-plugin) step 3). |
 | The plugin's Pods are not ready | The log of a replica stops at `waiting for the sidecar image`, with no `ignoring sidecar image configmap` line. The plugin serves only after it logs `sidecar image loaded, serving`. A log that stops at `waiting for the caches to sync` means the caches have not synced. | With no `ignoring` line, the ConfigMap is missing or the replica has no API server access. Check that the `telemetry-sidecar-image` ConfigMap exists in `cnpg-system`, then look for a NetworkPolicy ([section 9](#9-restrict-the-plugins-network)). `ignoring sidecar image configmap` means the `image` value is invalid: it must be `<repository>@sha256:<64 hex digits>`, and a tag is refused. Fix the ConfigMap. |
 | `problems` names a plugin parameter | `unknown plugin parameter "<key>" is ignored`, or `invalid plugin parameters: sidecarCPU "<value>": <parse error>` or `invalid plugin parameters: sidecarMemory "<value>" is below 32Mi` (`10m` for CPU). The plugin logs `invalid sidecar resource, using the default`, and the sidecar gets the default. | Correct the key (`exporter`, `auth`, `passwordSecret`, `sidecarCPU`, `sidecarMemory`) or the value. A change to the resources rolls the instances. |
-| Deleting, draining or restarting an instance takes about 10 s longer | None. The sidecar holds PostgreSQL's smart shutdown open until its next probe, which runs every 10 s. | Nothing. It was 0.18 s without the plugin against 182.5 s before the probe existed. The measurements are in [resources.md](resources.md#pod-shutdown). |
+| Deleting, draining or restarting an instance takes about 10 s longer | None. The sidecar holds PostgreSQL's smart shutdown open until its next probe, which runs every 10 s. | Nothing. The stop takes 0.18 s without the plugin. Without the probe, idle sessions held the smart shutdown to the full 180 s (182.5 s measured). The measurements are in [resources.md](resources.md#pod-shutdown). |
 
 ## 8. Known log lines
 
-On every clean stop of a plugin Pod, cnpg-i-machinery v0.4.2 logs an error-level line with the message `While terminating server` (`pkg/pluginhelper/http/server.go:222`). It logs it whenever the gRPC server's `Serve` returns something other than a closed-listener error, and a clean stop returns nil. It is harmless. Ignore it in alerts on error-level logs from the plugin.
+On every clean stop of a plugin Pod, cnpg-i-machinery v0.4.2 logs an error-level line with the message `While terminating server` (`pkg/pluginhelper/http/server.go:222`). It logs it whenever the gRPC server's `Serve` returns something other than a closed-listener error, and a clean stop returns nil. The line is harmless; ignore it in alerts on error-level logs from the plugin.
 
-Every instance start can log an error-level `gather facts` line in the sidecar whose `error` contains `dial unix /controller/run/.s.PGSQL.5432: connect: no such file or directory`, followed about a second later by `gathered facts again`. PostgreSQL is not accepting connections yet, so the first facts round fails and the retry succeeds. It is harmless. A `gather facts` error that is not followed by `gathered facts again` is a real failure ([section 7](#7-troubleshooting)).
+Every instance start can log an error-level `gather facts` line in the sidecar whose `error` contains `dial unix /controller/run/.s.PGSQL.5432: connect: no such file or directory`, followed about a second later by `gathered facts again`. PostgreSQL is not accepting connections yet, so the first facts round fails and the retry succeeds, which is harmless. A `gather facts` error that is not followed by `gathered facts again` is a real failure ([section 7](#7-troubleshooting)).
 
 ## 9. Restrict the plugin's network
 
-`docs/examples/networkpolicy.yaml` limits the plugin's Pods to what they need: ingress on TCP 9090 from the CloudNativePG operator, and egress to DNS, to the API server and, if you enable it, to the collector for the plugin's own metrics. A replica that cannot sync its caches never serves CloudNativePG. If no replica serves, every Cluster that opted in stops reconciling, failover included. So read this section before you apply the policy.
+Read this section before you apply the policy. A replica that cannot sync its caches never serves CloudNativePG, and if no replica serves, every Cluster that opted in stops reconciling, failover included.
+
+`docs/examples/networkpolicy.yaml` limits the plugin's Pods to what they need: ingress on TCP 9090 from the CloudNativePG operator, and egress to DNS, to the API server and, if you enable it, to the collector for the plugin's own metrics.
 
 It needs a CNI that enforces NetworkPolicy. kind's default CNI, kindnet, does.
 
@@ -370,7 +376,7 @@ sed -e "s|192.0.2.10/32|$API_IP/32|" -e "s|port: 6443|port: $API_PORT|" \
   docs/examples/networkpolicy.yaml | kubectl apply -f -
 ```
 
-With `--metrics-endpoint`, the plugin's metrics export also needs a rule. Without it, the export times out and the plugin logs `export metrics` with `"error.type":"timeout"`. With the rule, the metrics arrive only after the plugin has served CloudNativePG calls, so with no opted-in Cluster none arrive. That is not an error. The example has the rule commented out, for a collector in `otel` with the label `app.kubernetes.io/name: collector` on port 4318. Change those to match yours and uncomment it. For the example collector, apply the policy like this instead of the first variant:
+With `--metrics-endpoint`, the plugin's metrics export also needs a rule. Without it, the export times out and the plugin logs `export metrics` with `"error.type":"timeout"`. The example has the rule commented out, for a collector in `otel` with the label `app.kubernetes.io/name: collector` on port 4318. Change those to match yours and uncomment it. For the example collector, apply the policy like this instead of the first variant:
 
 ```bash
 sed -e "s|192.0.2.10/32|$API_IP/32|" -e "s|port: 6443|port: $API_PORT|" \
@@ -378,15 +384,13 @@ sed -e "s|192.0.2.10/32|$API_IP/32|" -e "s|port: 6443|port: $API_PORT|" \
   docs/examples/networkpolicy.yaml | kubectl apply -f -
 ```
 
-DNS is needed only to resolve the `--metrics-endpoint` host, because the plugin reaches the API server by IP. The example's `kube-dns` selector does not cover NodeLocal DNSCache or other DNS setups, so adjust it to yours. The plugin runs in the CloudNativePG operator's namespace. If that is not `cnpg-system`, change the policy's `metadata.namespace` and the ingress `namespaceSelector` together.
-
-The readiness probe is a TCP check on port 9090 from the kubelet. Kubernetes allows node traffic to Pods, but some CNIs differ. The restart check below covers it: a replica that never becomes ready may be blocked by the policy.
+DNS is needed only to resolve the `--metrics-endpoint` host, because the plugin reaches the API server by IP. The example's `kube-dns` selector does not cover NodeLocal DNSCache or other DNS setups, so adjust it to yours.
 
 The policy covers the plugin's Pods only. A policy on the instance Pods would also govern PostgreSQL's own traffic, so none is given. The sidecar's export path, from the Cluster's namespace to the collector, is not covered. If you restrict instance Pods yourself, the sidecar needs the API server and the collector.
 
 ### Confirm the plugin still works
 
-Restart one replica and wait until the plugin is ready. The readiness probe is a TCP check on the gRPC port, and the plugin listens only after it has loaded the sidecar image and synced its caches, so a ready replica reaches the API server. A replica blocked from the API server logs `waiting for the sidecar image` and never `sidecar image loaded, serving`.
+Restart one replica and wait until the plugin is ready. The readiness probe is a TCP check on the gRPC port, and the plugin listens only after it has loaded the sidecar image and synced its caches, so a ready replica reaches the API server. A replica blocked from the API server logs `waiting for the sidecar image` and never `sidecar image loaded, serving`. Kubernetes allows node traffic to Pods, but some CNIs differ, so a replica that never becomes ready may also have its probe blocked by the policy.
 
 ```bash
 POD=$(kubectl get pods -n cnpg-system -l app.kubernetes.io/name=plugin-telemetry -o jsonpath='{.items[0].metadata.name}')
@@ -438,8 +442,6 @@ Then build the new image as in [section 2](#2-build-the-image), which overwrites
 make kind-load KIND_CLUSTER=${KIND_CLUSTER:?set KIND_CLUSTER, see section 1} CNPG_VERSION=${CNPG_VERSION:?set CNPG_VERSION, see section 1}
 ```
 
-kind may print `not yet present on node ... loading` here too, even for an unchanged image. It is harmless.
-
 On any other cluster, use the same registry path as in section 2. Use a new tag for each release.
 
 ```bash
@@ -449,7 +451,7 @@ docker push $IMG
 echo "${IMG%:*}@$(docker buildx imagetools inspect $IMG | awk '/^Digest:/ {print $2}')" > bin/image-ref
 ```
 
-Then read the new reference. If it equals the old one, steps 1 to 3 change nothing: the Deployment does not roll and no Service event reaches CloudNativePG. This command says so. If it prints `same reference: nothing to upgrade`, stop here: there is nothing to upgrade. On kind, a rebuild at the same commit with a clean tree can give the same digest, so an upgrade needs a new commit. The later blocks of this section use `NEW_REF`, so keep the same shell.
+Then read the new reference. If it equals the old one, steps 1 to 3 change nothing: the Deployment does not roll and no Service event reaches CloudNativePG. If the command below prints `same reference: nothing to upgrade`, stop. On kind, a rebuild at the same commit with a clean tree can give the same digest, so an upgrade needs a new commit. The later blocks of this section use `NEW_REF`, so keep the same shell.
 
 ```bash
 NEW_REF=$(cat bin/image-ref)
@@ -467,13 +469,13 @@ cmp -s bin/image-ref bin/image-ref.previous && echo "same reference: nothing to 
 
    `rollout status` can return while the old plugin Pods are still `Terminating`. They keep serving until they stop, so you can go on.
 
-2. Once the Deployment has rolled out, change the plugin Service's annotation. `kubectl annotate --overwrite` prints `annotated` and `kubectl apply --server-side` prints `serverside-applied` even when nothing changed. Only the `resourceVersion` of the Service and the generation of the Deployment (`kubectl get deployment -n cnpg-system plugin-telemetry -o jsonpath='{.metadata.generation}'`) show a change. Annotating with a value the Service already has changes nothing, so CloudNativePG gets no event. If you are finishing an upgrade that was only partly done, check that the Service's `resourceVersion` moved (`kubectl get service -n cnpg-system plugin-telemetry -o jsonpath='{.metadata.resourceVersion}'`). CloudNativePG reads the plugin's capabilities only when it rebuilds its connection, and it rebuilds on an event of the Service. Without this step it can keep calling with the old capability set for up to about 10 hours.
+2. Once the Deployment has rolled out, change the plugin Service's annotation. `kubectl annotate --overwrite` prints `annotated` and `kubectl apply --server-side` prints `serverside-applied` even when nothing changed. Only the `resourceVersion` of the Service and the generation of the Deployment (`kubectl get deployment -n cnpg-system plugin-telemetry -o jsonpath='{.metadata.generation}'`) show a change. Annotating with a value the Service already has changes nothing, so CloudNativePG gets no event. If you are finishing an upgrade that was only partly done, check that the Service's `resourceVersion` moved (`kubectl get service -n cnpg-system plugin-telemetry -o jsonpath='{.metadata.resourceVersion}'`). [Section 3](#3-install-the-plugin) explains why CloudNativePG needs this event.
 
    ```bash
    kubectl annotate service -n cnpg-system plugin-telemetry "telemetry.gabrosys.github.io/image=$NEW_REF" --overwrite
    ```
 
-3. Check that the new digest is pullable on every node, then change the sidecar image in the ConfigMap. This is the step that rolls the instances: the touch in this step rolls them, once per opted-in Cluster, so the digest must be one that every node can pull. A well-formed digest that cannot be pulled puts every opted-in instance into `Init:ImagePullBackOff`, so do not skip the check. This starts a short-lived Pod on each node in `$NS`, where the instance Pods pull the image.
+3. Check that the new digest is pullable on every node, then change the sidecar image in the ConfigMap. The touch in this step rolls every opted-in Cluster, so every node must be able to pull the digest. A well-formed digest that cannot be pulled puts every opted-in instance into `Init:ImagePullBackOff`, so do not skip the check. This starts a short-lived Pod on each node in `$NS`, where the instance Pods pull the image.
 
    ```bash
    i=0
@@ -494,7 +496,7 @@ cmp -s bin/image-ref bin/image-ref.previous && echo "same reference: nothing to 
    kubectl apply --server-side -k bin/install
    ```
 
-   The plugin logs `sidecar image updated` at once, but that does not roll a Cluster. CloudNativePG rolls a Cluster when it next reconciles it, and nothing makes a healthy Cluster reconcile on a ConfigMap change. In the upgrade run no instance rolled for 6 minutes. Touch every opted-in Cluster, with the annotation from [section 7](#7-troubleshooting). This lists the Clusters in all namespaces whose `spec.plugins` names the plugin, then touches each one.
+   The plugin logs `sidecar image updated` at once, but that does not roll a Cluster. CloudNativePG rolls a Cluster when it next reconciles it, and nothing makes a healthy Cluster reconcile on a ConfigMap change. In a test, no instance rolled for 6 minutes. Touch every opted-in Cluster, with the annotation from [section 7](#7-troubleshooting). This lists the Clusters in all namespaces whose `spec.plugins` names the plugin, then touches each one.
 
    ```bash
    CLUSTERS=$(kubectl get cluster.postgresql.cnpg.io -A \

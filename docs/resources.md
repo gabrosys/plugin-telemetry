@@ -199,7 +199,7 @@ The spec `test/e2e/resilience/shutdown_test.go` deletes the Pod of a one-instanc
 | Docker server (`docker version --format '{{.Server.Version}}'`) | 29.2.1 |
 | kind node image | `kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5` (Kubernetes 1.37.0), kind v0.33.0 |
 | CloudNativePG, PostgreSQL | v1.30.1, 18.7 |
-| Code | v0.5.0 with one difference (see the top), for every current result. Runs kept as history, on earlier code: the two 64Mi runs (without and with the pooled map), the earlier 96Mi run, the per-row figures without and with only the pooled map, the 149 s token Secret wait of an earlier plugin run, the 182.5 s shutdown without the probe, and the 24.84 s and 25.15 s shutdowns that closed connections by age |
+| Code | v0.5.0 with one difference (see the top), for every current result. Runs kept as history, on earlier code: the two 64Mi runs (without and with the pooled map), the earlier 96Mi run, the per-row figures without the pooled map and with it alone, the 149 s token Secret wait of an earlier plugin run, the 182.5 s shutdown without the probe, and the 24.84 s and 25.15 s shutdowns that closed connections by age |
 
 ## Reproducing
 

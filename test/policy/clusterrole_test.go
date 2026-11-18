@@ -3,7 +3,6 @@ package policy_test
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"io"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -53,7 +52,7 @@ type manifest struct {
 	} `yaml:"subjects"`
 }
 
-func readManifests(file string) ([]manifest, error) {
+func readManifests(file string) []manifest {
 	GinkgoHelper()
 
 	var out []manifest
@@ -62,11 +61,9 @@ func readManifests(file string) ([]manifest, error) {
 		var m manifest
 		err := dec.Decode(&m)
 		if errors.Is(err, io.EOF) {
-			return out, nil
+			return out
 		}
-		if err != nil {
-			return nil, fmt.Errorf("parse %s: %w", file, err)
-		}
+		Expect(err).NotTo(HaveOccurred(), "parse %s", file)
 		out = append(out, m)
 	}
 }
@@ -114,8 +111,7 @@ var _ = Describe("the plugin ClusterRole", func() {
 	)
 
 	BeforeEach(func() {
-		rbac, err := readManifests(rbacFile)
-		Expect(err).NotTo(HaveOccurred())
+		rbac := readManifests(rbacFile)
 		role = find(rbac, "ClusterRole")
 		binding = find(rbac, "ClusterRoleBinding")
 	})
@@ -150,8 +146,7 @@ var _ = Describe("the plugin ClusterRole", func() {
 	})
 
 	It("holds one ClusterRole, and none grants serviceaccounts/token, escalate, bind or *", func() {
-		rbac, err := readManifests(rbacFile)
-		Expect(err).NotTo(HaveOccurred())
+		rbac := readManifests(rbacFile)
 
 		roles := findAll(rbac, "ClusterRole")
 		Expect(roles).To(HaveLen(1))
@@ -164,8 +159,7 @@ var _ = Describe("the plugin ClusterRole", func() {
 	})
 
 	It("is bound to the plugin ServiceAccount", func() {
-		rbac, err := readManifests(rbacFile)
-		Expect(err).NotTo(HaveOccurred())
+		rbac := readManifests(rbacFile)
 		account := find(rbac, "ServiceAccount").Metadata.Name
 
 		Expect(binding.Metadata.Name).To(Equal("plugin-telemetry"))

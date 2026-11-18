@@ -134,14 +134,10 @@ func findWorkflow(name string) (workflowFile, bool) {
 	return workflowFile{}, false
 }
 
-func readJSON(name string, v any) error {
+func readJSON(name string, v any) {
 	GinkgoHelper()
 
-	if err := json.Unmarshal(readRepoFile(name), v); err != nil {
-		return fmt.Errorf("parse %s: %w", name, err)
-	}
-
-	return nil
+	Expect(json.Unmarshal(readRepoFile(name), v)).To(Succeed(), "parse %s", name)
 }
 
 func sortedJobs(wf workflow) []string {
@@ -295,7 +291,7 @@ var _ = Describe("the release workflow", func() {
 				BumpMinorPreMajor bool   `json:"bump-minor-pre-major"`
 			} `json:"packages"`
 		}
-		Expect(readJSON(releaseConfig, &cfg)).To(Succeed())
+		readJSON(releaseConfig, &cfg)
 		Expect(cfg.Packages).To(HaveKey("."))
 		Expect(cfg.Packages["."].ReleaseType).To(Equal("go"))
 		Expect(cfg.Packages["."].InitialVersion).To(Equal("0.1.0"))
@@ -304,7 +300,7 @@ var _ = Describe("the release workflow", func() {
 
 	It("keeps the manifest empty until the first release, then semver", func() {
 		var manifest map[string]string
-		Expect(readJSON(releaseManifest, &manifest)).To(Succeed())
+		readJSON(releaseManifest, &manifest)
 		if len(manifest) > 0 {
 			Expect(manifest).To(HaveKeyWithValue(".", MatchRegexp(semver.String())))
 			Expect(manifest["."]).NotTo(Equal("0.0.0"))

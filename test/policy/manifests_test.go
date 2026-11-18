@@ -27,8 +27,7 @@ var _ = Describe("the config manifests", func() {
 		Expect(files).NotTo(BeEmpty())
 
 		for _, file := range files {
-			manifests, err := readManifests(file)
-			Expect(err).NotTo(HaveOccurred())
+			manifests := readManifests(file)
 
 			for _, m := range manifests {
 				where := fmt.Sprintf("%s %s %s", filepath.Base(file), m.Kind, m.Metadata.Name)

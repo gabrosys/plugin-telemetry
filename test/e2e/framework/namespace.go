@@ -97,7 +97,7 @@ func DeleteNamespace(ctx context.Context, c client.Client, name string, poll tim
 	return nil
 }
 
-// waitError wraps err with what was left and, if a read failed, the last failed read.
+// waitError wraps err with what was left, if a poll recorded it, and the last failed read, if a read failed.
 func waitError(what string, err error, left string, lastErr error) error {
 	err = fmt.Errorf("wait for %s to go: %w", what, err)
 	if left != "" {

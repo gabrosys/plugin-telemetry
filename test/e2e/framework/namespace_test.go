@@ -189,6 +189,7 @@ var _ = Describe("DeleteNamespace", func() {
 			{Type: corev1.NamespaceContentRemaining, Status: corev1.ConditionTrue, Message: "Some resources are remaining: pods. has 1 resource instances"},
 			{Type: corev1.NamespaceFinalizersRemaining, Status: corev1.ConditionTrue, Message: "Some content in the namespace has finalizers remaining: test.example/hold in 1 resource instances"},
 			{Type: corev1.NamespaceDeletionDiscoveryFailure, Status: corev1.ConditionFalse, Message: "All resources successfully discovered"},
+			{Type: corev1.NamespaceDeletionContentFailure, Status: corev1.ConditionTrue, Message: "content deletion failed"},
 		}
 		c := newClient(interceptor.Funcs{}, namespace)
 
@@ -198,6 +199,7 @@ var _ = Describe("DeleteNamespace", func() {
 		Expect(err).To(MatchError(context.DeadlineExceeded))
 		Expect(err).To(MatchError(ContainSubstring("Some resources are remaining: pods. has 1 resource instances")))
 		Expect(err).To(MatchError(ContainSubstring("finalizers remaining: test.example/hold in 1 resource instances")))
+		Expect(err).NotTo(MatchError(ContainSubstring("content deletion failed")))
 		Expect(err).NotTo(MatchError(ContainSubstring("successfully discovered")))
 	}, SpecTimeout(10*time.Second))
 })

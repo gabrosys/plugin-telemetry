@@ -635,8 +635,10 @@ var _ = Describe("Exporter", func() {
 		// Watch the channel: the SDK serializes exports, so a second export would wait out the first one's retry.
 		// grpc reconnects BaseDelay after the failure: half an interval (500 ms) here; 1 s with a full interval or with
 		// grpc's default BaseDelay.
+		window := 800*time.Millisecond - time.Since(failedAt)
+		Expect(window).To(BeNumerically(">", 0), "the server started after the reconnect window")
 		Eventually(func() connectivity.State { return export.GRPCState(e) }).
-			WithTimeout(800*time.Millisecond - time.Since(failedAt)).WithPolling(10 * time.Millisecond).Should(Equal(connectivity.Ready))
+			WithTimeout(window).WithPolling(10 * time.Millisecond).Should(Equal(connectivity.Ready))
 		Eventually(first).WithTimeout(time.Second).Should(Receive())
 		Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
 	})

@@ -42,7 +42,7 @@ var _ = Describe("smart shutdown", func() {
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func(ctx SpecContext) {
 			Expect(framework.DeleteNamespace(ctx, c, namespace.Name, statePoll)).To(Succeed())
-		}, NodeTimeout(3*time.Minute))
+		}, NodeTimeout(4*time.Minute))
 		Expect(c.Create(ctx, framework.ExporterFor(namespace.Name, podpatch.DefaultExporter))).To(Succeed())
 
 		cluster := framework.PeerCluster(namespace.Name, shutdownCluster, env.PostgresImage)

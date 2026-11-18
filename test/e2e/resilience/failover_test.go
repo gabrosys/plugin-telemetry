@@ -108,7 +108,8 @@ func (s *suite) failover(
 	return oldPrimary, newPrimary, took
 }
 
-// failoverSpecs adds a failover with both plugin replicas up, then failovers with one replica deleted or hard-killed.
+// failoverSpecs adds the specs that measure a failover with both plugin replicas up, then with one replica deleted or
+// hard-killed.
 func failoverSpecs(s *suite) {
 	var baseline time.Duration
 

@@ -859,7 +859,7 @@ func describeMode(m mode) {
 			noRollout(ctx)
 		}, SpecTimeout(8*time.Minute))
 
-		It("after the TelemetryExporter is valid, metrics from both instances reach the collector with the service.*, k8s.* and allowlisted-label resource attributes and no rollout",
+		It("after the TelemetryExporter is valid, metrics from both instances reach the collector with the service.*, k8s.*, allowlisted-label and configured resource attributes and no rollout",
 			func(ctx SpecContext) {
 				// The exporter exists since the previous spec, invalid; this makes it valid.
 				var current v1alpha1.TelemetryExporter

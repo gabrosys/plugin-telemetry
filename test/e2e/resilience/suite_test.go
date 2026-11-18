@@ -59,7 +59,7 @@ func (s *suite) setUp(ctx SpecContext) {
 	s.ns = namespace.Name
 	DeferCleanup(func(ctx SpecContext) {
 		Expect(framework.DeleteNamespace(ctx, s.c, s.ns, statePoll)).To(Succeed())
-	}, NodeTimeout(3*time.Minute))
+	}, NodeTimeout(4*time.Minute))
 	s.cluster = client.ObjectKey{Namespace: s.ns, Name: clusterName}
 
 	var queries corev1.ConfigMap

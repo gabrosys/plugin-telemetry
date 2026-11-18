@@ -36,7 +36,7 @@ const (
 	hookTimeout  = 2 * time.Minute
 )
 
-// The restart spec rolls the plugin out; Serial runs this container after every parallel one, on process 1.
+// Serial: the restart spec rolls the plugin out, so no other spec may run beside it.
 var _ = Describe("the plugin environment", Ordered, Serial, ContinueOnFailure, func() {
 	var (
 		env    framework.Env

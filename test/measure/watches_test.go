@@ -31,7 +31,7 @@ const (
 	kubeletWatches  = 1 // the kubelet's watch on the token Secret volume (watch is its default Secret detection strategy)
 	watchWindow     = 30 * time.Minute
 	watchOpenWithin = 5.0
-	// A reflector's watch timeout is random in [5 min, 10 min] (client-go tools/cache/reflector.go:56-57).
+	// A reflector's watch timeout is random in [5 min, 10 min] (client-go v0.37.2 tools/cache/reflector.go:55-58).
 	watchMeanRenewal = 7*time.Minute + 30*time.Second
 	watchQueries     = "measure-queries"
 	watchSet         = "measure-set"

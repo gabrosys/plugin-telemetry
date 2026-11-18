@@ -86,7 +86,8 @@ var _ = func() bool {
 	return true
 }()
 
-// instance is what must not change on an instance Pod: its identity, its Pod spec and the sidecar's restarts.
+// instance is what must not change on an instance Pod: its identity, its Pod spec, the sidecar's restarts and
+// whether it is being deleted.
 type instance struct {
 	UID      types.UID
 	PodSpec  string
@@ -273,7 +274,6 @@ func clustersEverywhere(ctx context.Context, c client.Client) (string, error) {
 	return strings.Join(out, "\n"), nil
 }
 
-//nolint:maintidx // one Ordered container per mode; the specs share its state
 func describeMode(m mode) {
 	Describe(m.name, Ordered, Serial, func() {
 		var (
@@ -509,7 +509,7 @@ func describeMode(m mode) {
 			} {
 				err := c.Get(ctx, key(probe.name), probe.obj)
 				if err == nil {
-					return fmt.Errorf("%T %s is still there", probe.obj, probe.name) //nolint:err113 // a polled condition
+					return fmt.Errorf("%T %s is still there", probe.obj, probe.name)
 				}
 				if !apierrors.IsNotFound(err) {
 					return fmt.Errorf("get %T %s: %w", probe.obj, probe.name, err)
@@ -1290,7 +1290,7 @@ func describeMode(m mode) {
 					ContainSubstring("invalid configuration, keeping the one in force"), pod.Name)
 			}
 
-			// The configuration was valid before, so it stays in force: the sidecars keep exporting every 10 s.
+			// The configuration was valid before, so it stays in force: the sidecars keep exporting.
 			Eventually(func(g Gomega, ctx SpecContext) {
 				g.Expect(podsExporting(lines(g, ctx, invalidAt.Add(2*exportInterval)), "cnpg_e2e_base_one")).
 					To(ConsistOf(instanceNames(g, ctx)))

@@ -42,7 +42,7 @@ type sidecarMeasurement struct {
 }
 
 var _ = Describe("the sidecar with CNPG's default queries", Ordered, func() {
-	It("keeps the sidecar's working set at most 40 MiB and its CPU at most 10m with CNPG's default queries", func(ctx SpecContext) {
+	It("keeps the sidecar's working set at most 40 MiB and its mean CPU at most 10m with CNPG's default queries", func(ctx SpecContext) {
 		env, out, c, cfg := measureEnv(ctx)
 
 		ns, err := framework.CreateNamespace(ctx, c, "measure-sidecar")

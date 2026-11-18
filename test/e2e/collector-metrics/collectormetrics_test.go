@@ -56,7 +56,7 @@ const (
 	fencedFrozen = "fenced-frozen"
 	// primaryOnlyOnStandby: CNPG sets sync_replicas{observed} and the backup timestamps only on a primary
 	// (v1.30.1 pkg/management/postgres/webserver/metricserver/pg_collector.go:445-457) and
-	// manual_switchover_required only on the current primary (internal/management/controller/instance_controller.go:1012-1018).
+	// manual_switchover_required only on the current primary (internal/management/controller/instance_controller.go:1014-1020).
 	primaryOnlyOnStandby = "primary-only-on-standby"
 )
 
@@ -84,7 +84,7 @@ var tallied = slices.Concat([]string{
 }, backupTimestamps, selfMeasuring)
 
 // frozenMetrics are the PostgreSQL-derived metrics CNPG keeps at their last value on a fenced instance
-// (pg_collector.go:402-409 at v1.30.1); sync_replicas{observed} is the fifth, by series.
+// (pg_collector.go:402-409 at v1.30.1); sync_replicas{observed} is checked by series (observedSeries).
 var frozenMetrics = []string{
 	"up", "pg_wal", "pg_wal_archive_status", "wal_records", "wal_fpi", "wal_bytes", "wal_buffers_full",
 	"postgres_version", "lo_pages",

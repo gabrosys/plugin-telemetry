@@ -65,10 +65,15 @@ var backupTimestamps = []string{
 	"first_recoverability_point", "last_available_backup_timestamp", "last_failed_backup_timestamp",
 }
 
-// selfMeasuring are CNPG's metrics that measure its collector (pg_collector.go:112-141 at v1.30.1).
-var selfMeasuring = []string{
-	"collections_total", "collection_errors_total", "last_collection_error", "collection_duration_seconds",
-}
+// selfMeasuring is parity.SelfMeasuring without the cnpg_collector_ prefix.
+var selfMeasuring = func() []string {
+	out := make([]string, 0, len(parity.SelfMeasuring))
+	for _, m := range parity.SelfMeasuring {
+		out = append(out, strings.TrimPrefix(m, builtinPrefix))
+	}
+
+	return out
+}()
 
 // tallied is CNPG's list of built-in series on PostgreSQL 18 (pg_collector.go:112-272, 320-393 and wal.go:36-61,
 // 151-222 at v1.30.1), by metric without the cnpg_collector_ prefix and, for the three metrics with a value label,

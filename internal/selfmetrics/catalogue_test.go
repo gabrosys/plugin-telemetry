@@ -107,7 +107,7 @@ var _ = Describe("Catalogue", func() {
 		for _, m := range selfmetrics.ByComponent(selfmetrics.ComponentEngine) {
 			help[m.Name] = m.Description
 		}
-		// pg_collector.go:112-141 at v1.30.1.
+		// pg_collector.go:112-129,136-141 at v1.30.1.
 		Expect(help).To(HaveKeyWithValue("cnpg_collector_collections_total", "Total number of times PostgreSQL was accessed for metrics."))
 		Expect(help).To(HaveKeyWithValue("cnpg_collector_collection_errors_total", "Total errors occurred accessing PostgreSQL for metrics."))
 		Expect(help).To(HaveKeyWithValue("cnpg_collector_last_collection_error", "1 if the last collection ended with error, 0 otherwise."))

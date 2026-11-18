@@ -43,8 +43,8 @@ const (
 	ruleOursOnly = "ours-only"
 )
 
-// selfMeasuring are CNPG's metrics that measure its collector (pg_collector.go:112-141 at v1.30.1).
-var selfMeasuring = []string{
+// SelfMeasuring are CNPG's metrics that measure its collector (pg_collector.go:112-129,136-141 at v1.30.1).
+var SelfMeasuring = []string{
 	"cnpg_collector_collections_total", "cnpg_collector_collection_errors_total",
 	"cnpg_collector_last_collection_error", "cnpg_collector_collection_duration_seconds",
 }
@@ -109,7 +109,7 @@ func Bracket(before, after, ours []Series, o Options) []Check {
 		}
 		switch {
 		case len(series) == 0:
-		case slices.Contains(selfMeasuring, metric):
+		case slices.Contains(SelfMeasuring, metric):
 			checks = append(checks, s.selfMeasuring(metric, series))
 		case expectedRule(metric) != "":
 			checks = append(checks, s.expected(metric, series))

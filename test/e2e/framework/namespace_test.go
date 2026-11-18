@@ -162,4 +162,42 @@ var _ = Describe("DeleteNamespace", func() {
 			Expect(calls).To(BeEmpty())
 			Expect(c.Get(ctx, client.ObjectKey{Name: ns}, &corev1.Namespace{})).To(Succeed())
 		}, SpecTimeout(10*time.Second))
+
+	It("returns the last failed read when every Pod list fails", func(ctx SpecContext) {
+		injected := errors.New("injected")
+		c := newClient(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*corev1.PodList); ok {
+					return injected
+				}
+
+				return c.List(ctx, list, opts...)
+			},
+		}, namespace)
+
+		short, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+		defer cancel()
+		err := framework.DeleteNamespace(short, c, ns, poll)
+		Expect(err).To(MatchError(context.DeadlineExceeded))
+		Expect(err).To(MatchError(injected))
+		Expect(err).To(MatchError(ContainSubstring("last error: list pods: injected")))
+		Expect(err).NotTo(MatchError(ContainSubstring("left:")))
+	}, SpecTimeout(10*time.Second))
+
+	It("reports the namespace's remaining content and finalizers when it does not go", func(ctx SpecContext) {
+		namespace.Status.Conditions = []corev1.NamespaceCondition{
+			{Type: corev1.NamespaceContentRemaining, Status: corev1.ConditionTrue, Message: "Some resources are remaining: pods. has 1 resource instances"},
+			{Type: corev1.NamespaceFinalizersRemaining, Status: corev1.ConditionTrue, Message: "Some content in the namespace has finalizers remaining: test.example/hold in 1 resource instances"},
+			{Type: corev1.NamespaceDeletionDiscoveryFailure, Status: corev1.ConditionFalse, Message: "All resources successfully discovered"},
+		}
+		c := newClient(interceptor.Funcs{}, namespace)
+
+		short, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+		defer cancel()
+		err := framework.DeleteNamespace(short, c, ns, poll)
+		Expect(err).To(MatchError(context.DeadlineExceeded))
+		Expect(err).To(MatchError(ContainSubstring("Some resources are remaining: pods. has 1 resource instances")))
+		Expect(err).To(MatchError(ContainSubstring("finalizers remaining: test.example/hold in 1 resource instances")))
+		Expect(err).NotTo(MatchError(ContainSubstring("successfully discovered")))
+	}, SpecTimeout(10*time.Second))
 })

@@ -81,6 +81,12 @@ func DeleteNamespace(ctx context.Context, c client.Client, name string, poll tim
 			return false, nil
 		}
 		left = fmt.Sprintf("namespace in phase %s", got.Status.Phase)
+		for _, cond := range got.Status.Conditions {
+			if cond.Status == corev1.ConditionTrue &&
+				(cond.Type == corev1.NamespaceContentRemaining || cond.Type == corev1.NamespaceFinalizersRemaining) {
+				left += "; " + cond.Message
+			}
+		}
 
 		return false, nil
 	})
@@ -91,9 +97,12 @@ func DeleteNamespace(ctx context.Context, c client.Client, name string, poll tim
 	return nil
 }
 
-// waitError says what was left when the wait for what ended, and the last failed read if there was one.
+// waitError wraps err with what was left and, if a read failed, the last failed read.
 func waitError(what string, err error, left string, lastErr error) error {
-	err = fmt.Errorf("wait for %s to go: %w (left: %s)", what, err, left)
+	err = fmt.Errorf("wait for %s to go: %w", what, err)
+	if left != "" {
+		err = fmt.Errorf("%w (left: %s)", err, left)
+	}
 	if lastErr != nil {
 		return fmt.Errorf("%w (last error: %w)", err, lastErr)
 	}

@@ -71,7 +71,7 @@ test: ## Run unit tests with the race detector
 	$(GO) test -race -count=1 ./...
 
 .PHONY: test-integration
-test-integration: ## Run the tests that need Docker (PostgreSQL in a container)
+test-integration: ## Run unit and integration tests with the race detector (needs Docker)
 	POSTGRES_IMAGE=$(POSTGRES_IMAGE) $(GO) test -race -count=1 -tags integration ./...
 
 .PHONY: generate

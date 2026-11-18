@@ -60,13 +60,12 @@ generatorOptions:
   disableNameSuffixHash: true
 YAML
 
-# --force-conflicts takes back fields a hand edit took over.
+# Every apply uses --force-conflicts to take back fields a hand edit took over, such as the sidecar image ConfigMap.
 kctl apply --server-side --force-conflicts -k "$root/config/crd"
 kctl wait --for=condition=Established \
 	crd/metricquerysets.telemetry.gabrosys.github.io crd/telemetryexporters.telemetry.gabrosys.github.io --timeout=60s
 # The admission policies are in place before the plugin starts.
 kctl apply --server-side --force-conflicts -f "$root/config/admission-policy.yaml"
-# --force-conflicts takes back fields a hand edit took over, such as the sidecar image ConfigMap.
 kctl apply --server-side --force-conflicts -k "$dir"
 kctl wait --for=condition=Ready certificate --all -n cnpg-system --timeout=120s
 kctl rollout status deployment/plugin-telemetry -n cnpg-system --timeout=180s

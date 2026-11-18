@@ -1,7 +1,6 @@
 package queries_test
 
 import (
-	"os"
 	"strings"
 	"time"
 
@@ -31,12 +30,7 @@ var _ = Describe("Define", func() {
 
 			got := marshalSummary(defs)
 			golden := "defaults-" + ref + ".golden.json"
-			if os.Getenv("UPDATE_GOLDEN") != "" {
-				Expect(fixture.Open(GinkgoTB(), "testdata").WriteFile(golden, got, 0o600)).To(Succeed())
-			}
-
-			want := fixture.Read(GinkgoTB(), "testdata", golden)
-			Expect(string(got)).To(Equal(string(want)))
+			Expect(string(got)).To(Equal(string(fixture.Golden(GinkgoTB(), "testdata", golden, got))))
 		},
 		Entry("v1.30.1", "v1.30.1"),
 		Entry("main", "main"),

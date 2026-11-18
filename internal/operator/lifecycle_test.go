@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"os"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	"github.com/cloudnative-pg/cnpg-i/pkg/lifecycle"
@@ -40,19 +39,15 @@ const (
 // fixturePod reads an input shared with the podpatch goldens.
 func fixturePod(name string) []byte { return fixture.Read(GinkgoTB(), podpatchData, name+".json") }
 
-// matchGolden compares a Pod with a golden in internal/operator/testdata; UPDATE_GOLDEN=1 rewrites it.
+// matchGolden compares a Pod with its golden in internal/operator/testdata through fixture.Golden.
 func matchGolden(name string, pod []byte) {
 	GinkgoHelper()
 
-	if os.Getenv("UPDATE_GOLDEN") != "" {
-		var out bytes.Buffer
-		Expect(json.Indent(&out, canonical(pod), "", "  ")).To(Succeed())
-		out.WriteByte('\n')
+	var out bytes.Buffer
+	Expect(json.Indent(&out, canonical(pod), "", "  ")).To(Succeed())
+	out.WriteByte('\n')
 
-		Expect(fixture.Open(GinkgoTB(), operatorData).WriteFile(name+".json", out.Bytes(), 0o600)).To(Succeed())
-	}
-
-	Expect(canonical(pod)).To(MatchJSON(fixture.Read(GinkgoTB(), operatorData, name+".json")))
+	Expect(canonical(pod)).To(MatchJSON(fixture.Golden(GinkgoTB(), operatorData, name+".json", out.Bytes())))
 }
 
 func initContainerNames(raw []byte) []string {

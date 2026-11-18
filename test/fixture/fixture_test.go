@@ -69,3 +69,29 @@ func TestReadStaysInsideDir(t *testing.T) {
 		t.Fatal("Read of a path outside dir did not call Fatalf")
 	}
 }
+
+func TestGoldenWritesAndReturnsGotWithUpdateGolden(t *testing.T) {
+	t.Setenv("UPDATE_GOLDEN", "1")
+	dir := t.TempDir()
+
+	if got := string(fixture.Golden(t, dir, "g.golden", []byte("new\n"))); got != "new\n" {
+		t.Fatalf("got %q, want %q", got, "new\n")
+	}
+	if got := string(fixture.Read(t, dir, "g.golden")); got != "new\n" {
+		t.Fatalf("file holds %q, want %q", got, "new\n")
+	}
+}
+
+func TestGoldenReturnsTheFileWithoutUpdateGolden(t *testing.T) {
+	t.Setenv("UPDATE_GOLDEN", "")
+	if got := string(fixture.Golden(t, "testdata", "hello.txt", []byte("other\n"))); got != "hello\n" {
+		t.Fatalf("got %q, want %q", got, "hello\n")
+	}
+}
+
+func TestGoldenFailsOnAMissingFile(t *testing.T) {
+	t.Setenv("UPDATE_GOLDEN", "")
+	if fatalOf(t, func(tb testing.TB) { fixture.Golden(tb, "testdata", "absent.golden", nil) }) == "" {
+		t.Fatal("Golden of a missing file did not call Fatalf")
+	}
+}

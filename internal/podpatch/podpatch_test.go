@@ -2,7 +2,6 @@ package podpatch_test
 
 import (
 	"encoding/json"
-	"os"
 	"slices"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -214,15 +213,9 @@ var _ = Describe("Apply", func() {
 				It("matches the golden Pod in "+string(mode)+" mode", func() {
 					Expect(podpatch.Apply(pod, cluster, params(mode), image)).To(Succeed())
 
-					root := fixture.Open(GinkgoTB(), "testdata")
 					golden := input + "." + string(mode) + ".golden.json"
-					if os.Getenv("UPDATE_GOLDEN") != "" {
-						Expect(root.WriteFile(golden, marshal(pod), 0o600)).To(Succeed())
-					}
-
-					want, err := root.ReadFile(golden)
-					Expect(err).NotTo(HaveOccurred())
-					Expect(string(marshal(pod))).To(Equal(string(want)))
+					got := marshal(pod)
+					Expect(string(got)).To(Equal(string(fixture.Golden(GinkgoTB(), "testdata", golden, got))))
 				})
 			}
 		})

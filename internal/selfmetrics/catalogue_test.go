@@ -2,7 +2,6 @@ package selfmetrics_test
 
 import (
 	"bytes"
-	"os"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -136,11 +135,7 @@ var _ = Describe("Catalogue", func() {
 		var buf bytes.Buffer
 		Expect(selfmetrics.Render(&buf, selfmetrics.Catalogue())).To(Succeed())
 
-		if os.Getenv("UPDATE_GOLDEN") != "" {
-			Expect(fixture.Open(GinkgoTB(), goldenDir).WriteFile(goldenName, buf.Bytes(), 0o600)).To(Succeed())
-		}
-
-		Expect(buf.String()).To(Equal(string(fixture.Read(GinkgoTB(), goldenDir, goldenName))))
+		Expect(buf.String()).To(Equal(string(fixture.Golden(GinkgoTB(), goldenDir, goldenName, buf.Bytes()))))
 	})
 })
 

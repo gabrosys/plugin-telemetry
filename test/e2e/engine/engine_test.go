@@ -4,7 +4,6 @@ package engine_test
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -119,13 +118,7 @@ var _ = Describe("the engine", Ordered, ContinueOnFailure, func() {
 		shapes, err := otlp.Shapes(lines, engineScope)
 		Expect(err).NotTo(HaveOccurred())
 		got := marshalShapes(shapes)
-		root := fixture.Open(GinkgoTB(), "testdata")
-		if os.Getenv("UPDATE_GOLDEN") != "" {
-			Expect(root.WriteFile(goldenFile, got, 0o600)).To(Succeed())
-		}
-		want, err := root.ReadFile(goldenFile)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(string(got)).To(Equal(string(want)))
+		Expect(string(got)).To(Equal(string(fixture.Golden(GinkgoTB(), "testdata", goldenFile, got))))
 	}, SpecTimeout(2*time.Minute))
 
 	It("sets exactly the service.*, k8s.* and configured resource attributes", func(ctx SpecContext) {

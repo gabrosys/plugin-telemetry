@@ -2,7 +2,6 @@ package identity_test
 
 import (
 	"encoding/json"
-	"os"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -27,15 +26,7 @@ var _ = Describe("Desired", func() {
 		Expect(err).NotTo(HaveOccurred())
 		got = append(got, '\n')
 
-		root := fixture.Open(GinkgoTB(), "testdata")
-
-		if os.Getenv("UPDATE_GOLDEN") != "" {
-			Expect(root.WriteFile(goldenFile, got, 0o600)).To(Succeed())
-		}
-
-		want, err := root.ReadFile(goldenFile)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(string(got)).To(Equal(string(want)))
+		Expect(string(got)).To(Equal(string(fixture.Golden(GinkgoTB(), "testdata", goldenFile, got))))
 	})
 
 	It("never emits a rule with empty resourceNames, and omits kinds with no names", func() {

@@ -34,3 +34,22 @@ func Read(tb testing.TB, dir, name string) []byte {
 
 	return data
 }
+
+// Golden returns the file name inside dir. With UPDATE_GOLDEN set it first writes got there. It fails the test if the
+// file can't be written or read.
+func Golden(tb testing.TB, dir, name string, got []byte) []byte {
+	tb.Helper()
+
+	root := Open(tb, dir)
+	if os.Getenv("UPDATE_GOLDEN") != "" {
+		if err := root.WriteFile(name, got, 0o600); err != nil {
+			tb.Fatalf("write %s: %v", name, err)
+		}
+	}
+	want, err := root.ReadFile(name)
+	if err != nil {
+		tb.Fatalf("read %s: %v", name, err)
+	}
+
+	return want
+}

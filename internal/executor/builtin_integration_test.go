@@ -5,7 +5,6 @@ package executor_test
 import (
 	"encoding/json"
 	"math"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -314,12 +313,7 @@ var _ = Describe("SQL built-ins", func() {
 			encoded, err := json.MarshalIndent(golden, "", "  ")
 			Expect(err).NotTo(HaveOccurred())
 			encoded = append(encoded, '\n')
-			root := fixture.Open(GinkgoTB(), "testdata")
-			if os.Getenv("UPDATE_GOLDEN") != "" {
-				Expect(root.WriteFile("builtin-pg18.golden.json", encoded, 0o600)).To(Succeed())
-			}
-			want18, err := root.ReadFile("builtin-pg18.golden.json")
-			Expect(err).NotTo(HaveOccurred())
+			want18 := fixture.Golden(GinkgoTB(), "testdata", "builtin-pg18.golden.json", encoded)
 			Expect(strings.TrimSpace(string(encoded))).To(Equal(strings.TrimSpace(string(want18))))
 		}, SpecTimeout(time.Minute))
 

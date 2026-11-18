@@ -3,7 +3,6 @@ package queries_test
 import (
 	"bytes"
 	"encoding/json"
-	"os"
 	"sort"
 
 	"github.com/Masterminds/semver/v3"
@@ -71,10 +70,7 @@ var _ = Describe("Builtin", func() {
 		}
 
 		got := marshalSummary(defs)
-		if os.Getenv("UPDATE_GOLDEN") != "" {
-			Expect(fixture.Open(GinkgoTB(), "testdata").WriteFile("builtin.golden.json", got, 0o600)).To(Succeed())
-		}
-		Expect(string(got)).To(Equal(string(fixture.Read(GinkgoTB(), "testdata", "builtin.golden.json"))))
+		Expect(string(got)).To(Equal(string(fixture.Golden(GinkgoTB(), "testdata", "builtin.golden.json", got))))
 	})
 
 	It("names every metric cnpg_collector_<column> and carries CNPG's help", func() {
@@ -123,10 +119,7 @@ var _ = Describe("Builtin", func() {
 		enc.SetEscapeHTML(false)
 		enc.SetIndent("", "  ")
 		Expect(enc.Encode(got)).To(Succeed())
-		if os.Getenv("UPDATE_GOLDEN") != "" {
-			Expect(fixture.Open(GinkgoTB(), "testdata").WriteFile("builtin-sql.golden.json", out.Bytes(), 0o600)).To(Succeed())
-		}
-		Expect(out.String()).To(Equal(string(fixture.Read(GinkgoTB(), "testdata", "builtin-sql.golden.json"))))
+		Expect(out.String()).To(Equal(string(fixture.Golden(GinkgoTB(), "testdata", "builtin-sql.golden.json", out.Bytes()))))
 	})
 
 	It("makes only collector_sync_replicas primary-only", func() {

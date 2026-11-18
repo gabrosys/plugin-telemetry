@@ -167,11 +167,6 @@ var _ = Describe("Load", func() {
 		Expect(err).To(MatchError(ContainSubstring("retries")))
 	})
 
-	It("fails on a missing file", func() {
-		_, err := load("absent.yaml")
-		Expect(err).To(MatchError(os.ErrNotExist))
-	})
-
 	It("fails on a malformed duration", func() {
 		p := writeConfig("cluster: c\nplanInterval: soon\nexporter:\n  endpoint: http://x\n")
 		_, err := loadFile(p)

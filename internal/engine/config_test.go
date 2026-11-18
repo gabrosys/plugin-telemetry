@@ -14,6 +14,7 @@ import (
 	"maps"
 	"math/big"
 	mathrand "math/rand/v2"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -619,6 +620,13 @@ func matches(attrs, want map[string]string) bool {
 	}
 	return true
 }
+
+var _ = Describe("FileConfig", func() {
+	It("fails with fs.ErrNotExist when the settings file is missing", func() {
+		_, _, err := engine.FileConfig(filepath.Join(GinkgoT().TempDir(), "absent.yaml")).Settings()
+		Expect(err).To(MatchError(fs.ErrNotExist))
+	})
+})
 
 var _ = Describe("An engine on an in-memory Config", func() {
 	It("hands a new idle timeout to the kept pool", func(ctx SpecContext) {

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Usage: deploy.sh IMAGE_REF
 # Environment: KUBECTL, KIND_CLUSTER, BIN, COLLECTOR_IMAGE, POSTGRES_IMAGE.
-# Applies the CRDs, then config/ with the image pinned to IMAGE_REF (REPO@DIGEST), the sidecar image set to IMAGE_REF and
-# the plugin exporting its self-metrics to the e2e collector (hack/collector.yaml, whose reader container runs POSTGRES_IMAGE),
-# waits for both rollouts and annotates the plugin Service so CloudNativePG rebuilds its connection and reloads the capabilities.
+# Applies the CRDs, the admission policies, then config/ with the image pinned to IMAGE_REF (REPO@DIGEST), the sidecar
+# image set to IMAGE_REF and the plugin exporting its self-metrics to the e2e collector (hack/collector.yaml, whose reader
+# container runs POSTGRES_IMAGE), waits for both rollouts and annotates the plugin Service so CloudNativePG rebuilds its
+# connection and reloads the capabilities.
 # The overlay sets --log-level=debug on the plugin: framework.HookCalls reads the debug-level "lifecycle hook" line.
 set -euo pipefail
 
@@ -59,10 +60,12 @@ generatorOptions:
   disableNameSuffixHash: true
 YAML
 
-# --force-conflicts takes back fields a hand edit took over, such as the sidecar image ConfigMap.
+# --force-conflicts takes back fields a hand edit took over.
 kctl apply --server-side --force-conflicts -k "$root/config/crd"
 kctl wait --for=condition=Established \
 	crd/metricquerysets.telemetry.gabrosys.github.io crd/telemetryexporters.telemetry.gabrosys.github.io --timeout=60s
+# The admission policies are in place before the plugin starts.
+kctl apply --server-side --force-conflicts -f "$root/config/admission-policy.yaml"
 # --force-conflicts takes back fields a hand edit took over, such as the sidecar image ConfigMap.
 kctl apply --server-side --force-conflicts -k "$dir"
 kctl wait --for=condition=Ready certificate --all -n cnpg-system --timeout=120s

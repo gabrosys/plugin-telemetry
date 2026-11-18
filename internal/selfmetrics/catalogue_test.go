@@ -17,7 +17,7 @@ const (
 )
 
 var _ = Describe("Catalogue", func() {
-	It("has the designed rows", func() {
+	It("lists every self-metric with its instrument, unit and attributes", func() {
 		type row struct {
 			name, instrument, unit string
 			attributes             []string

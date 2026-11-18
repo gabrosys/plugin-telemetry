@@ -38,6 +38,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/framework"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/otlp"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 const (
@@ -85,7 +86,8 @@ var _ = func() bool {
 	return true
 }()
 
-// instance is what must not change on an instance Pod: its identity, its Pod spec and the sidecar's restarts.
+// instance is what must not change on an instance Pod: its identity, its Pod spec, the sidecar's restarts and
+// whether it is being deleted.
 type instance struct {
 	UID      types.UID
 	PodSpec  string
@@ -107,24 +109,11 @@ func touchCluster(ctx context.Context, c client.Client, key client.ObjectKey, va
 	return rv
 }
 
-func readTestdata(name string) []byte {
-	GinkgoHelper()
-
-	root, err := os.OpenRoot("testdata")
-	Expect(err).NotTo(HaveOccurred())
-	DeferCleanup(root.Close)
-
-	data, err := root.ReadFile(name)
-	Expect(err).NotTo(HaveOccurred())
-
-	return data
-}
-
 func configMap(ns, file string) *corev1.ConfigMap {
 	GinkgoHelper()
 
 	var cm corev1.ConfigMap
-	Expect(yaml.UnmarshalStrict(readTestdata(file), &cm)).To(Succeed())
+	Expect(yaml.UnmarshalStrict(fixture.Read(GinkgoTB(), "testdata", file), &cm)).To(Succeed())
 	cm.Namespace = ns
 
 	return &cm
@@ -134,7 +123,7 @@ func querySet(ns, file string) *v1alpha1.MetricQuerySet {
 	GinkgoHelper()
 
 	var set v1alpha1.MetricQuerySet
-	Expect(yaml.UnmarshalStrict(readTestdata(file), &set)).To(Succeed())
+	Expect(yaml.UnmarshalStrict(fixture.Read(GinkgoTB(), "testdata", file), &set)).To(Succeed())
 	set.Namespace = ns
 
 	return &set
@@ -285,7 +274,6 @@ func clustersEverywhere(ctx context.Context, c client.Client) (string, error) {
 	return strings.Join(out, "\n"), nil
 }
 
-//nolint:maintidx // one Ordered container per mode; the specs share its state
 func describeMode(m mode) {
 	Describe(m.name, Ordered, Serial, func() {
 		var (
@@ -302,7 +290,7 @@ func describeMode(m mode) {
 			cname = "plugin-" + m.name
 
 			clusterCreated  time.Time
-			exporterCreated time.Time
+			exporterValidAt time.Time
 			statusOKAfter   time.Duration
 		)
 
@@ -521,7 +509,7 @@ func describeMode(m mode) {
 			} {
 				err := c.Get(ctx, key(probe.name), probe.obj)
 				if err == nil {
-					return fmt.Errorf("%T %s is still there", probe.obj, probe.name) //nolint:err113 // a polled condition
+					return fmt.Errorf("%T %s is still there", probe.obj, probe.name)
 				}
 				if !apierrors.IsNotFound(err) {
 					return fmt.Errorf("get %T %s: %w", probe.obj, probe.name, err)
@@ -545,10 +533,10 @@ func describeMode(m mode) {
 
 			namespace, err := framework.CreateNamespace(ctx, c, "plugin-"+m.name)
 			Expect(err).NotTo(HaveOccurred())
-			DeferCleanup(func(ctx SpecContext) {
-				Expect(client.IgnoreNotFound(c.Delete(ctx, namespace))).To(Succeed())
-			})
 			ns = namespace.Name
+			DeferCleanup(func(ctx SpecContext) {
+				Expect(framework.DeleteNamespace(ctx, c, ns, specPoll)).To(Succeed())
+			}, NodeTimeout(4*time.Minute))
 
 			headerSentinel := "sentinel-" + rand.Text()
 			sentinels = []string{headerSentinel}
@@ -584,13 +572,6 @@ func describeMode(m mode) {
 			}
 			clusterCreated = time.Now()
 			Expect(c.Create(ctx, cluster)).To(Succeed())
-			// Runs before the namespace's cleanup: a namespace deleted around a live Cluster stays Terminating.
-			DeferCleanup(func(ctx SpecContext) {
-				Expect(client.IgnoreNotFound(c.Delete(ctx, cluster))).To(Succeed())
-				Eventually(func(ctx SpecContext) bool {
-					return apierrors.IsNotFound(c.Get(ctx, key(cname), &apiv1.Cluster{}))
-				}).WithContext(ctx).WithTimeout(3 * time.Minute).WithPolling(specPoll).Should(BeTrue())
-			}, NodeTimeout(4*time.Minute))
 
 			Eventually(func(ctx context.Context) (bool, error) {
 				return framework.ClusterReady(ctx, c, key(cname))
@@ -617,7 +598,7 @@ func describeMode(m mode) {
 			}
 		}, NodeTimeout(time.Minute))
 
-		It("AC5: a Cluster whose TelemetryExporter doesn't exist yet gets its sidecar, reports exporterState missing, and exports nothing",
+		It("a Cluster whose TelemetryExporter doesn't exist yet gets its sidecar, reports exporterState missing, and exports nothing",
 			func(ctx SpecContext) {
 				for _, pod := range pods(Default, ctx) {
 					i := slices.IndexFunc(pod.Status.InitContainerStatuses, func(s corev1.ContainerStatus) bool {
@@ -650,7 +631,7 @@ func describeMode(m mode) {
 				noRollout(ctx)
 			}, SpecTimeout(8*time.Minute))
 
-		It("AC2: the ServiceAccount, Role, RoleBinding and token exist, owned by the Cluster, and the Role names exactly the referenced objects",
+		It("the ServiceAccount, Role, RoleBinding and token exist, owned by the Cluster, and the Role names exactly the referenced objects",
 			func(ctx SpecContext) {
 				owner := getCluster(Default, ctx)
 				objects, err := framework.Identity(ctx, c, ns, cname)
@@ -696,7 +677,7 @@ func describeMode(m mode) {
 				}
 			}, SpecTimeout(2*time.Minute))
 
-		It("M1 AC1: the sidecar is injected into every instance with the designed container", func(ctx SpecContext) {
+		It("the sidecar is injected into every instance with the expected container", func(ctx SpecContext) {
 			image, err := framework.SidecarImage(ctx, c)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -725,7 +706,7 @@ func describeMode(m mode) {
 			}
 		}, SpecTimeout(2*time.Minute))
 
-		It("M1 AC4: the sidecar identity reads what it needs, nothing else, and has no Pod token", func(ctx SpecContext) {
+		It("the sidecar identity reads what it needs, nothing else, and has no Pod token", func(ctx SpecContext) {
 			owner := getCluster(Default, ctx)
 			readable := []authorizationv1.ResourceAttributes{
 				{Namespace: ns, Group: cnpgGroup, Resource: "clusters", Name: cname},
@@ -769,7 +750,7 @@ func describeMode(m mode) {
 		}, SpecTimeout(3*time.Minute))
 
 		if !m.password {
-			It("M1 AC2: the sidecar connects as cnpg_metrics_exporter through the read-only socket mount", func(ctx SpecContext) {
+			It("the sidecar connects as cnpg_metrics_exporter through the read-only socket mount", func(ctx SpecContext) {
 				rep, err := framework.Preflight(ctx, cfg, primary(ctx))
 				Expect(err).NotTo(HaveOccurred())
 
@@ -785,7 +766,7 @@ func describeMode(m mode) {
 		}
 
 		if m.password {
-			It("M1 AC3: the sidecar connects as the dedicated role over 127.0.0.1", func(ctx SpecContext) {
+			It("the sidecar connects as the dedicated role over 127.0.0.1", func(ctx SpecContext) {
 				pod := primary(ctx)
 				var rep preflight.Report
 				Eventually(func(g Gomega, ctx context.Context) {
@@ -800,7 +781,7 @@ func describeMode(m mode) {
 				Expect(rep.Postgres.Host).To(Equal("127.0.0.1"))
 			}, SpecTimeout(3*time.Minute))
 
-			It("M1 AC3: refused from another Pod", func(ctx SpecContext) {
+			It("the dedicated role is refused from another Pod", func(ctx SpecContext) {
 				image, err := framework.SidecarImage(ctx, c)
 				Expect(err).NotTo(HaveOccurred())
 				pod := &corev1.Pod{
@@ -845,7 +826,7 @@ func describeMode(m mode) {
 			}, SpecTimeout(3*time.Minute))
 		}
 
-		It("AC5: an exporter that is invalid from the start leaves the sidecar idle", func(ctx SpecContext) {
+		It("an exporter that is invalid from the start leaves the sidecar idle", func(ctx SpecContext) {
 			// The CRD doesn't check glob syntax, so a bad exclude pattern fails Build.
 			exporter := desiredExporter(ns)
 			exporter.Spec.Metrics.Exclude.Queries = []string{badGlob}
@@ -878,7 +859,7 @@ func describeMode(m mode) {
 			noRollout(ctx)
 		}, SpecTimeout(8*time.Minute))
 
-		It("AC3: after the TelemetryExporter is valid, metrics from both instances reach the collector with the design 6.6 resource attributes and no rollout",
+		It("after the TelemetryExporter is valid, metrics from both instances reach the collector with the service.*, k8s.*, allowlisted-label and configured resource attributes and no rollout",
 			func(ctx SpecContext) {
 				// The exporter exists since the previous spec, invalid; this makes it valid.
 				var current v1alpha1.TelemetryExporter
@@ -886,24 +867,24 @@ func describeMode(m mode) {
 				patch := client.MergeFrom(current.DeepCopy())
 				current.Spec = desiredExporter(ns).Spec
 
-				exporterCreated = time.Now()
+				exporterValidAt = time.Now()
 				Expect(c.Patch(ctx, &current, patch)).To(Succeed())
 
 				Eventually(func(g Gomega, ctx SpecContext) {
 					g.Expect(status(g, ctx).ExporterState).To(Equal("ok"))
 				}).WithContext(ctx).WithTimeout(3 * time.Minute).WithPolling(time.Second).Should(Succeed())
-				statusOKAfter = time.Since(exporterCreated)
+				statusOKAfter = time.Since(exporterValidAt)
 
 				cl := getCluster(Default, ctx)
 				Eventually(func(g Gomega, ctx SpecContext) {
-					ls := lines(g, ctx, exporterCreated)
+					ls := lines(g, ctx, exporterValidAt)
 					g.Expect(podsExporting(ls, "cnpg_e2e_base_one")).To(ConsistOf(instanceNames(g, ctx)))
 
 					// The primary-only query runs on the primary and nowhere else, as seen in one export.
 					g.Expect(podsExporting(ls, "cnpg_e2e_primary_one")).To(ConsistOf(cl.Status.CurrentPrimary))
 				}).WithContext(ctx).WithTimeout(3 * time.Minute).WithPolling(specPoll).Should(Succeed())
 
-				ls, err := reader.Since(ctx, exporterCreated)
+				ls, err := reader.Since(ctx, exporterValidAt)
 				Expect(err).NotTo(HaveOccurred())
 				byPod := map[string]otlp.Export{}
 				for _, e := range exports(ls) {
@@ -945,8 +926,8 @@ func describeMode(m mode) {
 				noRollout(ctx)
 			}, SpecTimeout(8*time.Minute))
 
-		It("AC5: the status turns ok within 30 s of the TelemetryExporter's creation", func(ctx SpecContext) {
-			Expect(exporterCreated).NotTo(BeZero(), "the exporter was not created")
+		It("the status turns ok within 30 s of the TelemetryExporter becoming valid", func(ctx SpecContext) {
+			Expect(exporterValidAt).NotTo(BeZero(), "the exporter was not made valid")
 			Expect(statusOKAfter).To(BeNumerically("<=", 30*time.Second))
 
 			Eventually(func(g Gomega, ctx SpecContext) {
@@ -958,7 +939,7 @@ func describeMode(m mode) {
 			}).WithContext(ctx).WithTimeout(time.Minute).WithPolling(specPoll).Should(Succeed())
 		}, SpecTimeout(2*time.Minute))
 
-		It("AC2: adding a ConfigMap to spec.monitoring grants it and its metrics arrive", func(ctx SpecContext) {
+		It("adding a ConfigMap to spec.monitoring grants it and its metrics arrive", func(ctx SpecContext) {
 			cl := getCluster(Default, ctx)
 			patch := client.MergeFrom(cl.DeepCopy())
 			cl.Spec.Monitoring.CustomQueriesConfigMap = append(cl.Spec.Monitoring.CustomQueriesConfigMap, apiv1.ConfigMapKeySelector{
@@ -984,7 +965,7 @@ func describeMode(m mode) {
 			noRollout(ctx)
 		}, SpecTimeout(5*time.Minute))
 
-		It("AC2: adding a query set to the TelemetryExporter grants it without a Cluster edit, and its metrics arrive", func(ctx SpecContext) {
+		It("adding a query set to the TelemetryExporter grants it without a Cluster edit, and its metrics arrive", func(ctx SpecContext) {
 			Expect(c.Create(ctx, querySet(ns, "metricqueryset.yaml"))).To(Succeed())
 			generation := getCluster(Default, ctx).Generation
 
@@ -1019,7 +1000,7 @@ func describeMode(m mode) {
 			noRollout(ctx)
 		}, SpecTimeout(5*time.Minute))
 
-		It("AC4: editing the ConfigMap exports the new metric within 60 s, with no restart and no rollout", func(ctx SpecContext) {
+		It("editing the ConfigMap exports the new metric within 60 s, with no restart and no rollout", func(ctx SpecContext) {
 			var cm corev1.ConfigMap
 			Expect(c.Get(ctx, key(baseQueries), &cm)).To(Succeed())
 			patch := client.MergeFrom(cm.DeepCopy())
@@ -1032,7 +1013,7 @@ func describeMode(m mode) {
 			noRollout(ctx)
 		}, SpecTimeout(3*time.Minute))
 
-		It("item 2: ten annotation edits and the Cluster's own status updates keep cnpg_otel_config_info's generation and every series",
+		It("ten annotation edits and the Cluster's own status updates keep cnpg_otel_config_info's generation and every series",
 			func(ctx SpecContext) {
 				// latest returns, per pod, the last export since the time, with the config_info point it holds.
 				latest := func(g Gomega, ctx SpecContext, since time.Time) map[string]otlp.Export {
@@ -1083,7 +1064,7 @@ func describeMode(m mode) {
 					if clustersErr != nil {
 						clustersAfter = clustersErr.Error()
 					}
-					AddReportEntry("item 2 identity reconciles at baseline", baseline)
+					AddReportEntry("identity reconciles at baseline", baseline)
 					end := "not read"
 					if reconcilesAfter != nil {
 						end = reconcilesAfter.String()
@@ -1091,10 +1072,10 @@ func describeMode(m mode) {
 					if clustersBefore == "" {
 						clustersBefore = "not reached"
 					}
-					AddReportEntry("item 2 identity reconciles at the end", end)
-					AddReportEntry("item 2 Cluster-owned objects in "+ns+" that changed", changes)
-					AddReportEntry("item 2 Clusters at baseline", clustersBefore)
-					AddReportEntry("item 2 Clusters at the end", clustersAfter)
+					AddReportEntry("identity reconciles at the end", end)
+					AddReportEntry("Cluster-owned objects in "+ns+" that changed", changes)
+					AddReportEntry("Clusters at baseline", clustersBefore)
+					AddReportEntry("Clusters at the end", clustersAfter)
 				}()
 
 				var before map[string]otlp.Export
@@ -1185,7 +1166,7 @@ func describeMode(m mode) {
 				noRollout(ctx)
 			}, SpecTimeout(2*time.Minute))
 
-		It("AC2: removing a ConfigMap and a query set revokes them, stops their metrics and ignores later edits", func(ctx SpecContext) {
+		It("removing a ConfigMap and a query set revokes them, stops their metrics and ignores later edits", func(ctx SpecContext) {
 			var exporter v1alpha1.TelemetryExporter
 			Expect(c.Get(ctx, key(exporterName), &exporter)).To(Succeed())
 			exporterPatch := client.MergeFrom(exporter.DeepCopy())
@@ -1285,7 +1266,7 @@ func describeMode(m mode) {
 			}
 		}, SpecTimeout(3*time.Minute))
 
-		It("AC5: an invalid TelemetryExporter is reported, and the sidecars keep the configuration in force", func(ctx SpecContext) {
+		It("an invalid TelemetryExporter is reported, and the sidecars keep the configuration in force", func(ctx SpecContext) {
 			// The CRD doesn't check glob syntax, so a bad exclude pattern fails Build.
 			var exporter v1alpha1.TelemetryExporter
 			Expect(c.Get(ctx, key(exporterName), &exporter)).To(Succeed())
@@ -1309,7 +1290,7 @@ func describeMode(m mode) {
 					ContainSubstring("invalid configuration, keeping the one in force"), pod.Name)
 			}
 
-			// The configuration was valid before, so it stays in force: the sidecars keep exporting every 10 s.
+			// The configuration was valid before, so it stays in force: the sidecars keep exporting.
 			Eventually(func(g Gomega, ctx SpecContext) {
 				g.Expect(podsExporting(lines(g, ctx, invalidAt.Add(2*exportInterval)), "cnpg_e2e_base_one")).
 					To(ConsistOf(instanceNames(g, ctx)))
@@ -1337,7 +1318,7 @@ func describeMode(m mode) {
 			return parityTarget{env: env, c: c, cfg: cfg, reader: reader, ns: ns, cluster: cname, mode: m.name, sentinels: sentinels}
 		})
 
-		It("AC5: deleting the TelemetryExporter stops exports, and the status says missing after the next reconcile", func(ctx SpecContext) {
+		It("deleting the TelemetryExporter stops exports, and the status says missing after the next reconcile", func(ctx SpecContext) {
 			deleted := time.Now()
 			Expect(c.Delete(ctx, framework.ExporterFor(ns, exporterName))).To(Succeed())
 
@@ -1378,7 +1359,7 @@ func describeMode(m mode) {
 			}
 		}, SpecTimeout(3*time.Minute))
 
-		It("AC2: deleting the Cluster deletes the four objects", func(ctx SpecContext) {
+		It("deleting the Cluster deletes the four objects", func(ctx SpecContext) {
 			Expect(identityGone(ctx)).NotTo(Succeed(), "the identity is gone before the Cluster is deleted")
 
 			Expect(c.Delete(ctx, getCluster(Default, ctx))).To(Succeed())

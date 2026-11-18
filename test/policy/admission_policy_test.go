@@ -10,8 +10,7 @@ import (
 
 var _ = Describe("the admission policies", func() {
 	It("never repeat a policy name in a validation message, which the API server prefixes already", func() {
-		manifests, err := readManifests("config/admission-policy.yaml")
-		Expect(err).NotTo(HaveOccurred())
+		manifests := readManifests("config/admission-policy.yaml")
 
 		checked := 0
 		for _, m := range manifests {
@@ -32,8 +31,7 @@ var _ = Describe("the admission policies", func() {
 
 var _ = Describe("the policies' match conditions", func() {
 	It("find the plugin by account name in any namespace, as CNPG decides where the plugin runs", func() {
-		manifests, err := readManifests("config/admission-policy.yaml")
-		Expect(err).NotTo(HaveOccurred())
+		manifests := readManifests("config/admission-policy.yaml")
 
 		checked := 0
 		for _, m := range manifests {

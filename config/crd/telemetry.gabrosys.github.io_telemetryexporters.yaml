@@ -94,7 +94,7 @@ spec:
                 - message: set at least one of configMap or secret
                   rule: has(self.configMap) || has(self.secret)
               exporter:
-                description: Exporter is the OTLP connection every signal shares.
+                description: Exporter is the OTLP connection.
                 properties:
                   compression:
                     description: Compression is gzip or none. When empty, the COMPRESSION

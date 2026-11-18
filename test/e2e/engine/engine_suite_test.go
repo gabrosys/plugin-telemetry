@@ -24,6 +24,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/gabrosys/plugin-telemetry/test/e2e/otlp"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 	"github.com/gabrosys/plugin-telemetry/test/pgtest"
 )
 
@@ -79,9 +80,7 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 	configRoot, err = os.OpenRoot(configDir)
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(configRoot.Close)
-	queries, err := os.ReadFile(filepath.Join("testdata", "default-queries.yaml"))
-	Expect(err).NotTo(HaveOccurred())
-	writeFile("default-queries.yaml", string(queries))
+	writeFile("default-queries.yaml", string(fixture.Read(GinkgoTB(), "testdata", "default-queries.yaml")))
 	writeFile("extra.yaml", "")
 	writeFile("engine.yaml", renderEngineConfig(engineConfig{
 		PostgresHost: pgServer.Host,

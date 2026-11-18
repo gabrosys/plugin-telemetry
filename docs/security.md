@@ -1,7 +1,5 @@
 # Security
 
-What the plugin writes in your cluster, which rights it holds, what the admission policies enforce, and what stays open.
-
 ## What the plugin writes
 
 For each Cluster that enables the plugin, the plugin writes four objects in the Cluster's namespace:
@@ -25,7 +23,7 @@ How the plugin writes them:
 - An object that the cache holds and that differs from the wanted state is updated with a server-side apply pinned to the cached uid and resourceVersion. If the stored copy changed since the cache read, the apply fails with a conflict and nothing is overwritten (`Ensurer.Ensure`, `steps`).
 - A token Secret of any type other than `kubernetes.io/service-account-token` (an empty type too) is never written or deleted (`Ensurer.Ensure`, `Ensurer.Remove`, `wrongType`). A cached token Secret that names another account, or a cached RoleBinding that refers to another role, is never written either (`inTheWay`).
 
-An object that is "in the way" (already there but not in the cache, a wrong-typed token, a token for another account, a RoleBinding that refers to another role, or a changed stored copy) is not written. The controller logs `identity controller` with `outcome` set to `in the way` once, retries every 5 s, and logs `in the way cleared` once when a pass succeeds (`internal/operator/controller.go` `IdentityController.Reconcile`, `requeueInTheWay`). The Cluster status shows `identity: pending` with one line in `problems` for each reason (`internal/operator/status.go` `ClusterStatus`, `internal/identity/ensure.go` `Ensurer.Pending`):
+An object that is "in the way" (already there but not in the cache, a wrong-typed token, a token for another account, a RoleBinding that refers to another role, or a changed stored copy) is not written. The controller logs `identity controller` with `outcome` set to `in the way` once, retries every 5 s, and logs `identity controller` with `outcome` `in the way cleared` once when a pass succeeds (`internal/operator/controller.go` `IdentityController.Reconcile`, `requeueInTheWay`). The Cluster status shows `identity: pending` with one line in `problems` for each reason, except a changed stored copy, which leaves `identity: ready` with no line and clears on the next pass (`internal/operator/status.go` `ClusterStatus`, `internal/identity/ensure.go` `Ensurer.Pending`). The lines are:
 
 - `<Kind>/<name> is not in the plugin's cache: not created yet, or not the plugin's`
 - `Secret/<name> has type <type>, not kubernetes.io/service-account-token: delete it`
@@ -41,7 +39,7 @@ Other facts:
 
 ## The plugin's rights
 
-The plugin runs as ServiceAccount `plugin-telemetry` in the namespace of the CloudNativePG operator, `cnpg-system` by default: CloudNativePG finds plugins only there (CloudNativePG v1.30.1 `internal/controller/plugin_predicates.go` `isPluginService`). It is bound to one ClusterRole (`config/rbac.yaml`):
+The plugin runs as ServiceAccount `plugin-telemetry` in `cnpg-system`, the CloudNativePG operator's namespace. CloudNativePG finds plugins only in its own namespace (CloudNativePG v1.30.1 `internal/controller/plugin_predicates.go` `isPluginService`). It is bound to one ClusterRole (`config/rbac.yaml`):
 
 | API group | Resources | Verbs |
 |---|---|---|
@@ -58,11 +56,11 @@ Each sidecar runs with its own ServiceAccount. Its own rights are the read rules
 
 ## The admission policies
 
-`config/admission-policy.yaml` defines three ValidatingAdmissionPolicies (ValidatingAdmissionPolicy v1), each with a binding that denies. All three have `failurePolicy: Fail` and bind every namespace. They ship in the default manifest (`config/kustomization.yaml`) and need Kubernetes 1.34 or later, the project's floor. Where they are not installed or not enforced, the ClusterRole table above is the only limit on the plugin.
+`config/admission-policy.yaml` defines three ValidatingAdmissionPolicies, each with a binding that denies. All three have `failurePolicy: Fail` and bind every namespace. They ship in the default manifest (`config/kustomization.yaml`) and use ValidatingAdmissionPolicy v1, which Kubernetes serves from 1.30, so every supported version enforces them. Where they are not installed or not enforced, the ClusterRole table above is the only limit on the plugin.
 
-On a first install, the default render lists the policies and their bindings after the Deployment, so the API server may not enforce them yet when the plugin Pods start. The Pods wait for the cert-manager Secrets of `config/certificates.yaml`, which the render lists last, and the plugin then syncs its caches before it writes, so the gap is seconds. To close it, apply the policies first: `kubectl --context <context> apply -f config/admission-policy.yaml`, then the rest.
+On a first install, the default render lists the policies and their bindings after the Deployment, so the API server may not enforce them yet when the plugin Pods start. The Pods wait for the cert-manager Secrets of `config/certificates.yaml`, which the render lists last, and the plugin then syncs its caches before it writes, so the gap is seconds. To close it, apply the policies first, as section 3 of the [runbook](runbook.md#3-install-the-plugin) does.
 
-Two of them match a request only when the user is a ServiceAccount whose name is `plugin-telemetry` or ends in `.telemetry`, in any namespace (`system:serviceaccount:*:plugin-telemetry` and `system:serviceaccount:*:*.telemetry`, match condition `plugin-or-identity-account`). No namespace is named, so the policies follow the plugin when CloudNativePG runs outside `cnpg-system`. They bind the plugin, the sidecar accounts and any other ServiceAccount with one of these names, and no other user.
+Two of them match a request only when the user is a ServiceAccount whose name is `plugin-telemetry` or ends in `.telemetry`, in any namespace (`system:serviceaccount:*:plugin-telemetry` and `system:serviceaccount:*:*.telemetry`, match condition `plugin-or-identity-account`). They bind the plugin, the sidecar accounts and any other ServiceAccount with one of these names, and no other user.
 
 `plugin-telemetry-identities` covers Secrets and ServiceAccounts (create, update, delete) and TokenRequest (create on `serviceaccounts/token`):
 
@@ -106,13 +104,13 @@ Whoever may write a Cluster chooses Secrets as well. The plugin parameter `passw
 
 Where a value of `spec.exporter`, `envFrom` or the password Secret appears:
 
-- `print-config` shows the endpoint as written (`internal/cli/instance_tools.go` `describe`); that is safe because `Validate` refuses user info, a query and a fragment (`internal/settings/settings.go` `CheckEndpoint`, `internal/clusterconfig/otlpenv.go` `otlpEnv.endpoint`), and `print-config` prints nothing when `Validate` fails. `RedactEndpoint` still replaces user info, query and fragment with `xxxxx` in the error messages that quote a rejected endpoint: `Settings.Validate` (the `invalid settings` error of `internal/clusterconfig/clusterconfig.go`, which reaches the Cluster status message) and `internal/export/exporter.go` `NewExporter`. Credentials belong in the headers or the password, never in the endpoint or its path.
+- `print-config` shows the endpoint as written (`internal/cli/instance_tools.go` `describe`); that is safe because `Validate` refuses user info, a query and a fragment (`internal/settings/settings.go` `CheckEndpoint`, `internal/clusterconfig/otlpenv.go` `otlpEnv.endpoint`), and `print-config` prints nothing when `Validate` fails. `RedactEndpoint` still replaces user info, query and fragment with `xxxxx` in the error messages that quote a rejected endpoint: `Settings.Validate` (the `invalid settings` error of `internal/clusterconfig/clusterconfig.go`, which reaches the Cluster status message) and `internal/export/exporter.go` `NewExporter`.
 - The endpoint's host and port are attributes `server.address` and `server.port` on the sidecar's export self-metrics, which go to the same endpoint (`internal/export/exporter.go` `NewExporter`, `internal/selfmetrics/stats.go` `exportAttrs`, `docs/self-metrics.md`).
 - `OTEL_RESOURCE_ATTRIBUTES` from the `envFrom` ConfigMap or Secret, `spec.resourceAttributes` and the allowed Cluster labels are resource attributes on every export (`internal/clusterconfig/clusterconfig.go` `resourceAttributes`, `internal/export/resource.go` `Resource`). They also show in `print-config`.
 - The `username` key of the password Secret is `postgres.user` in `print-config` (`internal/clusterconfig/clusterconfig.go` `applyAuth`).
 - Protocol, compression and timeout from `envFrom` show in `print-config` as `exporter.*` settings (`internal/clusterconfig/otlpenv.go` `otlpEnv.apply`).
 
-Never shown: header values, the password and key material. `print-config` prints only the `exporter.headersFile` setting, `secret/<name>/<key>` for the headers Secret and for `OTEL_EXPORTER_OTLP_HEADERS` from the `envFrom` Secret alike (`internal/clusterconfig/clusterconfig.go`, `internal/clusterconfig/otlpenv.go` `otlpEnv.headersFile`). It never reads that file, so it lists neither header values nor header keys (`internal/cli/instance_tools.go` `describe` marshals the settings and the source statuses only). The password and key material show only as file paths. A header in the `envFrom` ConfigMap is an error, because headers are credentials and belong in the Secret (`internal/clusterconfig/otlpenv.go` `otlpEnv.unsupported`). So put credentials in the headers Secret or the password Secret, not in the endpoint, a ConfigMap or the resource attributes.
+Never shown: header values, the password and key material. `print-config` prints only the `exporter.headersFile` setting, `secret/<name>/<key>` for the headers Secret and for `OTEL_EXPORTER_OTLP_HEADERS` from the `envFrom` Secret alike (`internal/clusterconfig/clusterconfig.go`, `internal/clusterconfig/otlpenv.go` `otlpEnv.headersFile`). It never reads that file, so it lists neither header values nor header keys (`internal/cli/instance_tools.go` `describe` marshals the settings and the source statuses only). The password and key material show only as file paths. A header in the `envFrom` ConfigMap is an error, because headers are credentials and belong in the Secret (`internal/clusterconfig/otlpenv.go` `otlpEnv.unsupported`). Put credentials in the headers Secret or the password Secret, not in the endpoint or its path, a ConfigMap or the resource attributes.
 
 ## What stays open
 

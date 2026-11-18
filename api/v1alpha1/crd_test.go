@@ -30,6 +30,7 @@ import (
 
 	"github.com/gabrosys/plugin-telemetry/api/v1alpha1"
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 const (
@@ -47,19 +48,6 @@ type crd struct {
 	cel        *cel.Validator
 }
 
-func readFile(dir, name string) []byte {
-	GinkgoHelper()
-
-	root, err := os.OpenRoot(dir)
-	Expect(err).NotTo(HaveOccurred())
-	DeferCleanup(root.Close)
-
-	data, err := root.ReadFile(name)
-	Expect(err).NotTo(HaveOccurred())
-
-	return data
-}
-
 func loadCRD(name string) *crd {
 	GinkgoHelper()
 
@@ -67,7 +55,7 @@ func loadCRD(name string) *crd {
 	apiextensionsinstall.Install(scheme)
 
 	var external apiextensionsv1.CustomResourceDefinition
-	Expect(yaml.UnmarshalStrict(readFile(crdDir, name), &external)).To(Succeed())
+	Expect(yaml.UnmarshalStrict(fixture.Read(GinkgoTB(), crdDir, name), &external)).To(Succeed())
 	scheme.Default(&external)
 
 	var internal apiextensions.CustomResourceDefinition
@@ -176,7 +164,7 @@ var _ = Describe("the generated CRDs", func() {
 
 	DescribeTable("accepts every valid fixture",
 		func(file string) {
-			object := readFile("testdata", file)
+			object := fixture.Read(GinkgoTB(), "testdata", file)
 
 			Expect(loadCRD(crdFor(kindOf(object))).create(object)).To(BeEmpty())
 		},
@@ -192,7 +180,7 @@ var _ = Describe("the generated CRDs", func() {
 
 	DescribeTable("rejects every invalid fixture with its message",
 		func(file string) {
-			object := readFile("testdata", file)
+			object := fixture.Read(GinkgoTB(), "testdata", file)
 
 			problems := loadCRD(crdFor(kindOf(object))).create(object)
 			Expect(problems).To(HaveExactElements(ContainSubstring(wantOf(object))))
@@ -212,7 +200,7 @@ var _ = Describe("the generated CRDs", func() {
 	})
 
 	It("reports a rejected endpoint at spec.exporter.endpoint without its value", func() {
-		problems := loadCRD(exporterCRD).create(readFile("testdata/invalid", "exporter-endpoint-user-info.yaml"))
+		problems := loadCRD(exporterCRD).create(fixture.Read(GinkgoTB(), "testdata/invalid", "exporter-endpoint-user-info.yaml"))
 
 		Expect(problems).To(ContainElement(HavePrefix("spec.exporter.endpoint: ")))
 		Expect(strings.Join(problems, "\n")).NotTo(ContainSubstring("secret"))
@@ -223,7 +211,7 @@ var _ = Describe("the generated CRDs", func() {
 			var configMap struct {
 				Data map[string]string `json:"data"`
 			}
-			Expect(yaml.Unmarshal(readFile(cnpgQueryData, "default-monitoring-"+version+".yaml"), &configMap)).To(Succeed())
+			Expect(yaml.Unmarshal(fixture.Read(GinkgoTB(), cnpgQueryData, "default-monitoring-"+version+".yaml"), &configMap)).To(Succeed())
 			cnpgYAML := configMap.Data["queries"]
 			Expect(cnpgYAML).NotTo(BeEmpty())
 
@@ -251,7 +239,7 @@ var _ = Describe("the generated CRDs", func() {
 	)
 
 	It("round-trips a TelemetryExporter through JSON without losing fields", func() {
-		original := readFile("testdata/valid", "exporter-full.yaml")
+		original := fixture.Read(GinkgoTB(), "testdata/valid", "exporter-full.yaml")
 
 		var typed v1alpha1.TelemetryExporter
 		Expect(yaml.UnmarshalStrict(original, &typed)).To(Succeed())
@@ -267,7 +255,7 @@ var _ = Describe("the generated CRDs", func() {
 				Queries map[string]any `json:"queries"`
 			} `json:"spec"`
 		}
-		Expect(yaml.Unmarshal(readFile("testdata", "valid/query-set-metrics-mapping.yaml"), &object)).To(Succeed())
+		Expect(yaml.Unmarshal(fixture.Read(GinkgoTB(), "testdata", "valid/query-set-metrics-mapping.yaml"), &object)).To(Succeed())
 		original, err := yaml.Marshal(object.Spec.Queries)
 		Expect(err).NotTo(HaveOccurred())
 
@@ -288,7 +276,7 @@ var _ = Describe("the generated CRDs", func() {
 		var missing []string
 		for _, name := range files {
 			var external apiextensionsv1.CustomResourceDefinition
-			Expect(yaml.UnmarshalStrict(readFile(crdDir, name), &external)).To(Succeed())
+			Expect(yaml.UnmarshalStrict(fixture.Read(GinkgoTB(), crdDir, name), &external)).To(Succeed())
 
 			for _, version := range external.Spec.Versions {
 				Expect(version.Schema).NotTo(BeNil(), "%s %s has no schema", name, version.Name)

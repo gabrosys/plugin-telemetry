@@ -11,8 +11,8 @@ import (
 // ErrInvalidResourceAttributes is returned for an OTEL_RESOURCE_ATTRIBUTES value that does not parse.
 var ErrInvalidResourceAttributes = errors.New("invalid OTEL_RESOURCE_ATTRIBUTES")
 
-// ParseResourceAttributes parses OTEL_RESOURCE_ATTRIBUTES per spec v1.62.0 resource/sdk.md:311-320:
-// "k=v,k2=v2", keys and values percent-decoded, the whole value rejected on any error.
+// ParseResourceAttributes parses OTEL_RESOURCE_ATTRIBUTES per the OpenTelemetry specification v1.62.0,
+// resource/sdk.md: "k=v,k2=v2", keys and values percent-decoded, the whole value rejected on any error.
 // Errors give the entry's position, never its content.
 func ParseResourceAttributes(s string) (map[string]string, error) {
 	out := map[string]string{}

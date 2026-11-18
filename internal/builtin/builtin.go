@@ -35,7 +35,7 @@ type Facts struct {
 
 // Samples returns the built-ins computed outside SQL, sorted: those of c for pod (none when c is nil), and
 // postgres_version{full, cluster}. f is nil while the newest facts round failed.
-// Ported from CloudNativePG v1.30.1 (identical on main bc0889a): metricserver/pg_collector.go, wal.go,
+// Ported from CloudNativePG v1.30.1 (the ported code is unchanged on main bc0889a): metricserver/pg_collector.go, wal.go,
 // controller/instance_controller.go reconcileMetrics, replication/legacy.go.
 func Samples(c *apiv1.Cluster, pod, cluster string, f *Facts) []queries.Sample {
 	var out []queries.Sample
@@ -43,9 +43,10 @@ func Samples(c *apiv1.Cluster, pod, cluster string, f *Facts) []queries.Sample {
 		out = clusterSamples(c, pod, f)
 	}
 	if f != nil {
-		full := fmt.Sprintf("%d.%d", f.Version.Major(), f.Version.Patch())
-		// Both parts are integers, so the parse cannot fail.
-		v, _ := strconv.ParseFloat(full, 64)
+		major, patch := f.Version.Major(), f.Version.Patch()
+		full := fmt.Sprintf("%d.%d", major, patch)
+		scale := math.Pow10(len(strconv.FormatUint(patch, 10)))
+		v := (float64(major)*scale + float64(patch)) / scale
 		out = append(out, gauge("postgres_version", "Postgres version", v, label("full", full), label("cluster", cluster)))
 	}
 
@@ -176,7 +177,7 @@ func timestamp(value string) float64 {
 	return float64(t.Unix())
 }
 
-// walVolumeSize ports getWalVolumeSize (wal.go:225-239): 0 without walStorage or a usable size.
+// walVolumeSize ports getWalVolumeSize (wal.go:227-239): 0 without walStorage or a usable size.
 func walVolumeSize(c *apiv1.Cluster) float64 {
 	ws := c.Spec.WalStorage
 	if ws == nil {
@@ -225,7 +226,7 @@ func expectedSyncReplicas(c *apiv1.Cluster) int {
 	return n
 }
 
-// electableReplicas ports getElectableSyncReplicas (legacy.go:127-169).
+// electableReplicas ports getElectableSyncReplicas and getSortedNonPrimaryHealthyInstanceNames (legacy.go:105-169).
 func electableReplicas(c *apiv1.Cluster) []string {
 	var others []string
 	for _, name := range c.Status.InstancesStatus[apiv1.PodHealthy] {

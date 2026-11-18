@@ -49,7 +49,7 @@ type IdentityController struct {
 const requeueInTheWay = 5 * time.Second
 
 // Reconcile ensures the identity of a Cluster that enables the plugin and removes it from one that does not.
-// An object in the way requeues after 5 s; any other error goes to the workqueue's back-off.
+// An object in the way requeues after requeueInTheWay; any other error goes to the workqueue's back-off.
 func (c *IdentityController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	err := c.reconcile(ctx, req)
 	c.Metrics.IdentityReconcile(ctx, err)

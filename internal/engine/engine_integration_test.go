@@ -25,6 +25,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
+	testfixture "github.com/gabrosys/plugin-telemetry/test/fixture"
 	"github.com/gabrosys/plugin-telemetry/test/otlptest"
 	"github.com/gabrosys/plugin-telemetry/test/pgtest"
 )
@@ -78,9 +79,7 @@ func defaultQueries() string {
 	var cm struct {
 		Data map[string]string `yaml:"data"`
 	}
-	raw, err := os.ReadFile("../queries/testdata/default-monitoring-v1.30.1.yaml")
-	Expect(err).NotTo(HaveOccurred())
-	Expect(yaml.Unmarshal(raw, &cm)).To(Succeed())
+	Expect(yaml.Unmarshal(testfixture.Read(GinkgoTB(), "../queries/testdata", "default-monitoring-v1.30.1.yaml"), &cm)).To(Succeed())
 	Expect(cm.Data).To(HaveKey("queries"))
 	return cm.Data["queries"]
 }

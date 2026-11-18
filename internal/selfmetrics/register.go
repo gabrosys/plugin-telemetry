@@ -97,8 +97,7 @@ func register(m metric.Meter, s *Stats, ms []Metric) error {
 				return fmt.Errorf("histogram %s: no recorder", def.Name)
 			}
 			h, err := m.Float64Histogram(def.Name,
-				metric.WithUnit(def.Unit), metric.WithDescription(def.Description),
-				metric.WithExplicitBucketBoundaries())
+				metric.WithUnit(def.Unit), metric.WithDescription(def.Description))
 			if err != nil {
 				return fmt.Errorf("create histogram %s: %w", def.Name, err)
 			}

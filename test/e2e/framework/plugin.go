@@ -205,8 +205,8 @@ func HookCalls(ctx context.Context, cfg *rest.Config, pod string, since time.Tim
 	return calls, nil
 }
 
-// ParseHookCalls returns the "lifecycle hook" lines of logs logged after
-// since. Lines that are not JSON objects are skipped.
+// ParseHookCalls returns the "lifecycle hook" lines of logs logged after since. Lines not starting with { are
+// skipped; a malformed JSON line is ErrInvalidHookLine.
 func ParseHookCalls(logs string, since time.Time) ([]HookCall, error) {
 	var calls []HookCall
 	for line := range strings.Lines(logs) {

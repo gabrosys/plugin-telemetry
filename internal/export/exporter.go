@@ -119,11 +119,13 @@ func (e *Exporter) initHTTP(ctx context.Context, m material) error {
 
 	exp, err := otlpmetrichttp.New(ctx,
 		otlpmetrichttp.WithEndpointURL(e.s.Endpoint),
+		// WithHTTPClient supplies the transport and the per-attempt timeout. WithTLSClientConfig still replaces
+		// any TLS config read from OTEL_EXPORTER_OTLP_*, which otlpmetrichttp v1.47.0 rejects on an http://
+		// endpoint (client.go:65-67).
 		otlpmetrichttp.WithHTTPClient(client),
 		otlpmetrichttp.WithTLSClientConfig(tlsCfg),
 		otlpmetrichttp.WithHeaders(m.headers),
 		otlpmetrichttp.WithCompression(compression),
-		otlpmetrichttp.WithTimeout(e.s.Timeout),
 		otlpmetrichttp.WithRetry(otlpmetrichttp.RetryConfig{
 			Enabled: true, InitialInterval: initial, MaxInterval: maxInterval, MaxElapsedTime: maxElapsed,
 		}),
@@ -139,7 +141,8 @@ func (e *Exporter) initHTTP(ctx context.Context, m material) error {
 	return nil
 }
 
-// connectParams are grpc-go's defaults with the reconnect delay capped at half an interval.
+// connectParams are grpc-go's backoff defaults with MaxDelay capped at half an interval and BaseDelay
+// at MaxDelay, and MinConnectTimeout set to the per-attempt Timeout instead of grpc's 20s.
 func (e *Exporter) connectParams() grpc.ConnectParams {
 	maxDelay := min(e.s.Interval/2, 120*time.Second)
 	return grpc.ConnectParams{

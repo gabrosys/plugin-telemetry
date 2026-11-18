@@ -105,7 +105,7 @@ func content(k key, dataKey string, obj *unstructured.Unstructured) ([]byte, err
 // objectData returns the data of a ConfigMap, or the decoded data of a Secret; nil for a missing object.
 func objectData(k key, obj *unstructured.Unstructured) (map[string][]byte, error) {
 	if obj == nil {
-		return nil, nil //nolint:nilnil // a missing object has no data, and that is not an error
+		return nil, nil
 	}
 	raw, _, err := unstructured.NestedMap(obj.Object, "data")
 	if err != nil {

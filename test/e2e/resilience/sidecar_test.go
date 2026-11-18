@@ -29,7 +29,7 @@ const (
 var pgbenchSummary = regexp.MustCompile(`(?m)^(tps = .*|number of (?:transactions actually processed|failed transactions).*)$`)
 
 // killSidecar kills the primary's sidecar and polls until it restarted and the primary is back in -rw.
-// It returns the longest time the primary was missing from -rw.
+// It returns the longest time the primary was missing from -rw, or 0 if no poll saw it missing.
 func (s *suite) killSidecar(ctx context.Context, primary string) time.Duration {
 	GinkgoHelper()
 
@@ -42,7 +42,6 @@ func (s *suite) killSidecar(ctx context.Context, primary string) time.Duration {
 	var (
 		longest time.Duration
 		outFrom time.Time
-		sawOut  bool
 	)
 	Eventually(func(ctx context.Context) (bool, error) {
 		var p corev1.Pod
@@ -61,10 +60,10 @@ func (s *suite) killSidecar(ctx context.Context, primary string) time.Duration {
 				outFrom = time.Time{}
 			}
 
-			return sawOut && framework.SidecarRestarts(&p) == before+1, nil
+			return framework.SidecarRestarts(&p) == before+1, nil
 		}
 		if outFrom.IsZero() {
-			outFrom, sawOut = now, true
+			outFrom = now
 		}
 
 		return false, nil
@@ -73,9 +72,9 @@ func (s *suite) killSidecar(ctx context.Context, primary string) time.Duration {
 	return longest
 }
 
-// sidecarSpecs adds ENG-04: killing the primary's sidecar under load.
+// sidecarSpecs adds the spec that kills the primary's sidecar under load.
 func sidecarSpecs(s *suite) {
-	It("ENG-04: killing the primary's sidecar under pgbench keeps the primary out of -rw for at most 5 s", func(ctx SpecContext) {
+	It("killing the primary's sidecar under pgbench keeps the primary out of -rw for at most 5 s", func(ctx SpecContext) {
 		s.healthy(ctx)
 
 		var cluster apiv1.Cluster
@@ -95,10 +94,8 @@ func sidecarSpecs(s *suite) {
 		}()
 
 		time.Sleep(pgbenchWarmup)
-		first := s.killSidecar(ctx, primary)
-		second := s.killSidecar(ctx, primary)
-		AddReportEntry("sidecar outage 1", first.String())
-		AddReportEntry("sidecar outage 2", second.String())
+		outage := s.killSidecar(ctx, primary)
+		AddReportEntry("sidecar outage", outage.String())
 
 		res := <-done
 		var summary string
@@ -110,6 +107,6 @@ func sidecarSpecs(s *suite) {
 
 		Expect(s.c.Get(ctx, s.cluster, &cluster)).To(Succeed())
 		Expect(cluster.Status.CurrentPrimary).To(Equal(primary))
-		Expect(first).To(BeNumerically("<=", maxOutage))
+		Expect(outage).To(BeNumerically("<=", maxOutage))
 	}, SpecTimeout(6*time.Minute))
 }

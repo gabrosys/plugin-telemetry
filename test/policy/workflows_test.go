@@ -16,7 +16,6 @@ import (
 
 const (
 	workflowDir     = "../../.github/workflows"
-	makefile        = "../../Makefile"
 	repoRoot        = "../.."
 	releaseConfig   = "release-please-config.json"
 	releaseManifest = ".release-please-manifest.json"
@@ -135,16 +134,10 @@ func findWorkflow(name string) (workflowFile, bool) {
 	return workflowFile{}, false
 }
 
-func readJSON(name string, v any) error {
-	raw, err := fs.ReadFile(os.DirFS(repoRoot), name)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", name, err)
-	}
-	if err := json.Unmarshal(raw, v); err != nil {
-		return fmt.Errorf("parse %s: %w", name, err)
-	}
+func readJSON(name string, v any) {
+	GinkgoHelper()
 
-	return nil
+	Expect(json.Unmarshal(readRepoFile(name), v)).To(Succeed(), "parse %s", name)
 }
 
 func sortedJobs(wf workflow) []string {
@@ -170,12 +163,6 @@ var _ = Describe("CI workflows", func() {
 			names = append(names, wf.name)
 		}
 		Expect(names).To(ContainElements("ci.yml", releaseWorkflow))
-	})
-
-	It("are not pushed from the Makefile", func() {
-		raw, err := os.ReadFile(makefile)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(pushPattern.FindAllString(string(raw), -1)).To(BeEmpty())
 	})
 
 	for _, wf := range workflows {
@@ -304,7 +291,7 @@ var _ = Describe("the release workflow", func() {
 				BumpMinorPreMajor bool   `json:"bump-minor-pre-major"`
 			} `json:"packages"`
 		}
-		Expect(readJSON(releaseConfig, &cfg)).To(Succeed())
+		readJSON(releaseConfig, &cfg)
 		Expect(cfg.Packages).To(HaveKey("."))
 		Expect(cfg.Packages["."].ReleaseType).To(Equal("go"))
 		Expect(cfg.Packages["."].InitialVersion).To(Equal("0.1.0"))
@@ -313,7 +300,7 @@ var _ = Describe("the release workflow", func() {
 
 	It("keeps the manifest empty until the first release, then semver", func() {
 		var manifest map[string]string
-		Expect(readJSON(releaseManifest, &manifest)).To(Succeed())
+		readJSON(releaseManifest, &manifest)
 		if len(manifest) > 0 {
 			Expect(manifest).To(HaveKeyWithValue(".", MatchRegexp(semver.String())))
 			Expect(manifest["."]).NotTo(Equal("0.0.0"))
@@ -346,12 +333,16 @@ var _ = DescribeTable("the secrets pattern",
 
 const e2eWorkflow = "e2e.yml"
 
-var e2eSuites = regexp.MustCompile(`(?m)^E2E_SUITES\s*:?=\s*(.*)$`)
+var (
+	e2eSuites     = regexp.MustCompile(`(?m)^E2E_SUITES\s*:?=\s*(.*)$`)
+	e2eMatrixCNPG = regexp.MustCompile(`(?m)^E2E_MATRIX_CNPG\s*\??=\s*(.*)$`)
+	cnpgVersion   = regexp.MustCompile(`(?m)^CNPG_VERSION\s*\??=\s*(.*)$`)
+	// cnpgMatrix is the JSON array after the last || of the matrix expression.
+	cnpgMatrix = regexp.MustCompile(`'(\[[^']*\])'\)\s*\}\}$`)
+)
 
 var _ = It("offers every Makefile e2e suite in e2e.yml", func() {
-	raw, err := os.ReadFile(makefile)
-	Expect(err).NotTo(HaveOccurred())
-	match := e2eSuites.FindStringSubmatch(string(raw))
+	match := e2eSuites.FindStringSubmatch(string(readRepoFile("Makefile")))
 	Expect(match).NotTo(BeNil())
 
 	wf, ok := findWorkflow(e2eWorkflow)
@@ -369,4 +360,40 @@ var _ = It("offers every Makefile e2e suite in e2e.yml", func() {
 
 	Expect(doc.On.Dispatch.Inputs).To(HaveKey("suite"))
 	Expect(doc.On.Dispatch.Inputs["suite"].Options).To(ConsistOf(strings.Fields(match[1])))
+})
+
+var _ = Describe("the Makefile", func() {
+	It("pushes no image", func() {
+		Expect(pushPattern.FindAllString(string(readRepoFile("Makefile")), -1)).To(BeEmpty())
+	})
+})
+
+var _ = It("runs e2e.yml on the Makefile's E2E_MATRIX_CNPG", func() {
+	makefile := string(readRepoFile("Makefile"))
+	matrix := e2eMatrixCNPG.FindStringSubmatch(makefile)
+	Expect(matrix).NotTo(BeNil())
+	version := cnpgVersion.FindStringSubmatch(makefile)
+	Expect(version).NotTo(BeNil())
+
+	wf, ok := findWorkflow(e2eWorkflow)
+	Expect(ok).To(BeTrue())
+	var doc struct {
+		Jobs struct {
+			E2E struct {
+				Strategy struct {
+					Matrix struct {
+						CNPG string `yaml:"cnpg"`
+					} `yaml:"matrix"`
+				} `yaml:"strategy"`
+			} `yaml:"e2e"`
+		} `yaml:"jobs"`
+	}
+	Expect(yaml.Unmarshal([]byte(wf.raw), &doc)).To(Succeed())
+	array := cnpgMatrix.FindStringSubmatch(doc.Jobs.E2E.Strategy.Matrix.CNPG)
+	Expect(array).NotTo(BeNil(), doc.Jobs.E2E.Strategy.Matrix.CNPG)
+
+	var cnpg []string
+	Expect(json.Unmarshal([]byte(array[1]), &cnpg)).To(Succeed())
+	Expect(cnpg).To(Equal(strings.Fields(matrix[1])))
+	Expect(cnpg).To(ContainElement(strings.TrimSpace(version[1])))
 })

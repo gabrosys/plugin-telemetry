@@ -53,9 +53,9 @@ func readCert(ctx context.Context, c client.Client, name string) (certID, error)
 	return certID{Serial: cert.SerialNumber.String(), PubKey: cert.RawSubjectPublicKeyInfo}, nil
 }
 
-// renewalSpecs adds PLG-02: the renewal of the plugin's CA and leaf certificates under traffic.
+// renewalSpecs adds the spec that renews the plugin's CA and leaf certificates under traffic.
 func renewalSpecs(s *suite) {
-	It("PLG-02: renewing the CA, server and client certificates causes no failed hook call", func(ctx SpecContext) {
+	It("renewing the CA, server and client certificates causes no failed hook call", func(ctx SpecContext) {
 		s.healthy(ctx)
 
 		names := []string{caCert, serverCert, clientCert}
@@ -81,7 +81,7 @@ func renewalSpecs(s *suite) {
 		Expect(framework.WaitUntil(ctx, renewed.Add(afterRenewal))).To(Succeed())
 		stop()
 
-		s.expectNoFailedHookCall(ctx, "PLG-02", start)
+		s.expectNoFailedHookCall(ctx, "certificate renewal", start)
 		for _, name := range names {
 			after, err := readCert(ctx, s.c, name)
 			Expect(err).NotTo(HaveOccurred())

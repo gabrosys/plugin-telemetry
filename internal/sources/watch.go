@@ -23,9 +23,9 @@ var errEventsClosed = errors.New("the watcher's event channel closed")
 
 // Watch watches the directories of files(), not the files, because editors and Kubernetes replace
 // files by rename or symlink swap. It calls notify once it is watching, then after each change in
-// those directories. It re-reads files() after each notify and every 5 s, adds and removes directories
+// those directories. It re-reads files() after each notify and every watchRetry, adds and removes directories
 // itself and notifies once after its set grows. A failure to create the watcher or add a
-// directory, and an fsnotify error, is retried every 5 s; each kind (the watcher, fsnotify errors, each
+// directory, and an fsnotify error, is retried every watchRetry; each kind (the watcher, fsnotify errors, each
 // directory) is logged once when it starts and once when it recovers. An fsnotify error is followed by
 // a notify. It returns nil when ctx ends.
 func Watch(ctx context.Context, files func() []string, notify func()) error {

@@ -146,7 +146,8 @@ func (o otlpEnv) apply(e *settings.Exporter, spec v1alpha1.OTLPExporter) (warnin
 }
 
 // endpoint resolves OTEL_EXPORTER_OTLP_METRICS_ENDPOINT, used as is, else OTEL_EXPORTER_OTLP_ENDPOINT,
-// which gets the signal path for http/protobuf (spec v1.62.0 protocol/exporter.md:108-171).
+// which gets the signal path for http/protobuf (OpenTelemetry specification v1.62.0,
+// protocol/exporter.md).
 func (o otlpEnv) endpoint(protocol string) (string, error) {
 	if v, ok := o.get(envMetricsPrefix + "ENDPOINT"); ok {
 		if err := settings.CheckEndpoint(v.value); err != nil {

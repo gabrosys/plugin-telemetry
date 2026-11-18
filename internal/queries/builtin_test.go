@@ -3,7 +3,6 @@ package queries_test
 import (
 	"bytes"
 	"encoding/json"
-	"os"
 	"sort"
 
 	"github.com/Masterminds/semver/v3"
@@ -11,9 +10,10 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
-// builtinHelp is the Help text of each metric in CNPG v1.30.1 pg_collector.go:160-180,217-272.
+// builtinHelp is the Help text of each metric in CNPG v1.30.1 pg_collector.go:148-153,160-166,173-180,217-272.
 var builtinHelp = map[string]string{
 	"cnpg_collector_pg_wal": "Total size in bytes of WAL segments in the '/var/lib/postgresql/data/pgdata/pg_wal' directory " +
 		" computed as (wal_segment_size * count)",
@@ -70,10 +70,7 @@ var _ = Describe("Builtin", func() {
 		}
 
 		got := marshalSummary(defs)
-		if os.Getenv("UPDATE_GOLDEN") != "" {
-			Expect(testdata().WriteFile("builtin.golden.json", got, 0o600)).To(Succeed())
-		}
-		Expect(string(got)).To(Equal(string(readTestdata("builtin.golden.json"))))
+		Expect(string(got)).To(Equal(string(fixture.Golden(GinkgoTB(), "testdata", "builtin.golden.json", got))))
 	})
 
 	It("names every metric cnpg_collector_<column> and carries CNPG's help", func() {
@@ -122,10 +119,7 @@ var _ = Describe("Builtin", func() {
 		enc.SetEscapeHTML(false)
 		enc.SetIndent("", "  ")
 		Expect(enc.Encode(got)).To(Succeed())
-		if os.Getenv("UPDATE_GOLDEN") != "" {
-			Expect(testdata().WriteFile("builtin-sql.golden.json", out.Bytes(), 0o600)).To(Succeed())
-		}
-		Expect(out.String()).To(Equal(string(readTestdata("builtin-sql.golden.json"))))
+		Expect(out.String()).To(Equal(string(fixture.Golden(GinkgoTB(), "testdata", "builtin-sql.golden.json", out.Bytes()))))
 	})
 
 	It("makes only collector_sync_replicas primary-only", func() {

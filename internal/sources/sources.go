@@ -58,7 +58,7 @@ type Result struct {
 	Hash    string   // hex sha256 of the merged entries
 }
 
-// Loader loads the builtin query and the files, remembering each file's last good version.
+// Loader loads the built-in queries and the files, remembering each file's last good version.
 type Loader struct {
 	read      ReadFile
 	files     []string
@@ -68,14 +68,14 @@ type Loader struct {
 	previous map[string]queries.UserQueries
 }
 
-// NewLoader returns a Loader that reads files with read, in order after the builtin query. A parse
+// NewLoader returns a Loader that reads files with read, in order after the built-in queries. A parse
 // error of a source for which sensitive returns true names the source and the line, and quotes none of
 // its content; a nil sensitive marks none.
 func NewLoader(read ReadFile, files []string, sensitive func(name string) bool) *Loader {
 	return &Loader{read: read, files: slices.Clone(files), sensitive: sensitive, previous: map[string]queries.UserQueries{}}
 }
 
-// SetFiles makes files the sources, in order after the builtin query. A file that stays listed keeps its
+// SetFiles makes files the sources, in order after the built-in queries. A file that stays listed keeps its
 // last good version; one that is dropped forgets it.
 func (l *Loader) SetFiles(files []string) {
 	l.mu.Lock()
@@ -89,7 +89,7 @@ func (l *Loader) SetFiles(files []string) {
 	}
 }
 
-// Load reads the builtin query, then each file in order. A later source overwrites an earlier key.
+// Load reads the built-in queries, then each file in order. A later source overwrites an earlier key.
 // A missing file, or one that has never parsed or been readable, is skipped; one that stops parsing or
 // becomes unreadable keeps its last good version. A file that goes missing keeps its last good version
 // too: it serves again if the file comes back invalid.

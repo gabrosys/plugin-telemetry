@@ -20,6 +20,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/kubesource"
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 // fakeKube is a Kubernetes source over the settings of a testdata file, with virtual file names.
@@ -104,13 +105,6 @@ func setKubeEnv() {
 	GinkgoT().Setenv("CLUSTER_NAME", "demo")
 	GinkgoT().Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
 	GinkgoT().Setenv("KUBERNETES_SERVICE_PORT", "443")
-}
-
-func readTestdata(name string) []byte {
-	GinkgoHelper()
-	raw, err := os.ReadFile(testdata(name))
-	Expect(err).NotTo(HaveOccurred())
-	return raw
 }
 
 var _ = Describe("instance in Kubernetes mode", func() {
@@ -276,8 +270,8 @@ var _ = Describe("instance tools in Kubernetes mode", func() {
 	}
 	virtualFiles := func() map[string][]byte {
 		return map[string][]byte{
-			"configmap/queries/probe.yaml": readTestdata("queries-warn.yaml"),
-			"metricqueryset/extra":         readTestdata("queries-warn.yaml"),
+			"configmap/queries/probe.yaml": fixture.Read(GinkgoTB(), "testdata", "queries-warn.yaml"),
+			"metricqueryset/extra":         fixture.Read(GinkgoTB(), "testdata", "queries-warn.yaml"),
 			"secret/otlp/headers":          []byte("authorization=s3cr3t-token,x-tenant=acme-secret"),
 		}
 	}

@@ -12,6 +12,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/gabrosys/plugin-telemetry/internal/builtin"
+	"github.com/gabrosys/plugin-telemetry/internal/planner"
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
 )
 
@@ -58,7 +59,7 @@ func absent(samples []queries.Sample, name string, kv ...string) {
 	Expect(ok).To(BeFalse(), "unexpected sample %s %v", name, kv)
 }
 
-// legacyCluster is CNPG's createFakeCluster (pkg/postgres/replication/suite_test.go:37-53, v1.30.1).
+// legacyCluster is CNPG's createFakeCluster (pkg/postgres/replication/suite_test.go:37-53, v1.30.1) without cluster.Default(), which the api module lacks.
 func legacyCluster(name string) *apiv1.Cluster {
 	primary := fmt.Sprintf("%s-1", name)
 	c := &apiv1.Cluster{}
@@ -95,6 +96,21 @@ var _ = Describe("Samples", func() {
 		}))
 	})
 
+	DescribeTable("postgres_version is major.patch",
+		func(serverVersionNum, full string, want float64) {
+			version, err := planner.ParseVersionNum(serverVersionNum)
+			Expect(err).NotTo(HaveOccurred())
+			samples := builtin.Samples(nil, podName, clusterName, &builtin.Facts{Version: version})
+
+			Expect(value(samples, "postgres_version", "cluster", clusterName, "full", full)).To(Equal(want))
+		},
+		Entry("18.0.7", "180007", "18.7", 18.7),
+		Entry("17.0.10", "170010", "17.10", 17.1),
+		Entry("9.6.24", "90624", "9.24", 9.24),
+		Entry("16.0.0", "160000", "16.0", 16.0),
+		Entry("18.0.99", "180099", "18.99", 18.99),
+	)
+
 	It("returns nothing without a Cluster and without facts", func() {
 		Expect(builtin.Samples(nil, podName, clusterName, nil)).To(BeEmpty())
 	})
@@ -104,7 +120,6 @@ var _ = Describe("Samples", func() {
 		c.Spec.WalStorage = &apiv1.StorageConfiguration{Size: "1Gi"}
 		samples := builtin.Samples(c, podName, clusterName, nil)
 
-		absent(samples, "postgres_version", "cluster", "c", "full", "18.7")
 		absent(samples, "pg_wal", "value", "volume_size")
 		absent(samples, "pg_wal", "value", "volume_max")
 		for _, name := range []string{"first_recoverability_point", "last_available_backup_timestamp", "last_failed_backup_timestamp"} {

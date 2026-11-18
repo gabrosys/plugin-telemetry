@@ -1,22 +1,19 @@
 package queries_test
 
 import (
-	"os"
 	"testing"
 
 	"go.yaml.in/yaml/v4"
 
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 // benchDefault defines one query of CNPG's v1.30.1 default monitoring ConfigMap.
 func benchDefault(b *testing.B, key string) queries.Definition {
 	b.Helper()
 
-	data, err := os.ReadFile("testdata/default-monitoring-v1.30.1.yaml")
-	if err != nil {
-		b.Fatalf("read the default queries: %v", err)
-	}
+	data := fixture.Read(b, "testdata", "default-monitoring-v1.30.1.yaml")
 	var cm struct {
 		Data map[string]string `yaml:"data"`
 	}

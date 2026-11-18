@@ -51,7 +51,7 @@ type Scheduler struct {
 	rnd     *rand.Rand
 	jobs    map[jobKey]*entry
 	workers map[string]*worker
-	ctx     context.Context //nolint:containedctx // set by Run and used to start workers from Update
+	ctx     context.Context // set by Run and used to start workers from Update
 	started bool
 	stopped bool
 }

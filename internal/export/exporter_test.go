@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/status"
 
 	"github.com/gabrosys/plugin-telemetry/internal/export"
@@ -604,13 +605,13 @@ var _ = Describe("Exporter", func() {
 		Entry("grpc", settings.ProtocolGRPC),
 	)
 
-	It("reconnects within half an interval after the first failed connection attempt", func(ctx SpecContext) {
+	It("reconnects half an interval after the first failed connection attempt", func(ctx SpecContext) {
 		var lc net.ListenConfig
 		lis, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
 		Expect(err).NotTo(HaveOccurred())
 		addr := lis.Addr().String()
 		s := exporterSettings(settings.ProtocolGRPC, "http://"+addr)
-		s.Interval, s.Timeout = time.Second, 400*time.Millisecond
+		s.Interval, s.Timeout = time.Second, 500*time.Millisecond
 		e := newExporter(s)
 
 		refused := make(chan error, 1)
@@ -622,16 +623,24 @@ var _ = Describe("Exporter", func() {
 			}
 			refused <- errors.Join(conn.Close(), lis.Close())
 		}()
-		first := make(chan error, 1) // the first export fails and only starts the connection
+		first := make(chan error, 1) // the first export starts the connection
 		go func() { first <- e.Export(ctx, batch(1, 1)) }()
 		Eventually(refused).WithTimeout(10 * time.Second).Should(Receive(BeNil()))
+		failedAt := time.Now()
 		srv, err := otlptest.NewGRPCAt(addr, nil)
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(srv.Close)
 		DeferCleanup(func() { Expect(srv.Err()).NotTo(HaveOccurred()) })
 
-		Eventually(func() error { return e.Export(ctx, batch(1, 1)) }).
-			WithTimeout(800 * time.Millisecond).WithPolling(20 * time.Millisecond).Should(Succeed())
+		// Watch the channel: the SDK serializes exports, so a second export would wait out the first one's retry.
+		// grpc reconnects BaseDelay after the failure: half an interval (500 ms) here; 1 s with a full interval or with
+		// grpc's default BaseDelay.
+		window := 800*time.Millisecond - time.Since(failedAt)
+		Expect(window).To(BeNumerically(">", 0), "the server started after the reconnect window")
+		Eventually(func() connectivity.State { return export.GRPCState(e) }).
+			WithTimeout(window).WithPolling(10 * time.Millisecond).Should(Equal(connectivity.Ready))
+		Eventually(first).WithTimeout(time.Second).Should(Receive())
+		Expect(e.Export(ctx, batch(1, 1))).To(Succeed())
 	})
 
 	It("waits for an export in flight when it shuts down", func(ctx SpecContext) {

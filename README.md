@@ -19,7 +19,7 @@ CNPG operator --> plugin --> sidecar in each instance pod --> OTLP --> your coll
 ## Compatibility
 
 - CNPG v1.30.1 and `main`.
-- Kubernetes 1.34 to 1.37. Tested on 1.37 in the e2e workflow, and on a 1.34 node for the `admission` suite and the `peer` container of the `plugin` suite.
+- Kubernetes 1.34 to 1.37. The e2e workflow tests 1.37 only; 1.34 to 1.36 are not tested in CI.
 - PostgreSQL 18.
 - Connection modes `peer` and `password`.
 - OpenShift through `password` mode. Untested.
@@ -70,7 +70,7 @@ Run `make help` to list the targets.
 
 - `build`: build `bin/plugin-telemetry` and compile every package.
 - `test`: run unit tests with the race detector.
-- `test-integration`: run the tests that need Docker (PostgreSQL in a container).
+- `test-integration`: run unit and integration tests with the race detector (needs Docker).
 - `lint`: run linters and the vulnerability scan.
 - `generate`: regenerate `docs/self-metrics.md`, `docs/crd-reference.md`, the deepcopy code and the CRDs.
 - `dev-up`: create the kind environment (`CNPG_VERSION=v1.30.1|main`).

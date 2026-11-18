@@ -49,9 +49,9 @@ type parityTarget struct {
 	sentinels []string // the values seeded in the mode's Secrets
 }
 
-// itParity adds AC7 to the mode's Ordered container; target is called when the spec runs.
+// itParity adds the parity spec to the mode's Ordered container; target is called when the spec runs.
 func itParity(target func() parityTarget) {
-	It("AC7: the parity report is produced", func(ctx SpecContext) {
+	It("the parity report is produced", func(ctx SpecContext) {
 		t := target()
 
 		var cl apiv1.Cluster

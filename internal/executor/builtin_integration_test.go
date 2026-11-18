@@ -314,10 +314,12 @@ var _ = Describe("SQL built-ins", func() {
 			encoded, err := json.MarshalIndent(golden, "", "  ")
 			Expect(err).NotTo(HaveOccurred())
 			encoded = append(encoded, '\n')
+			root := fixture.Open(GinkgoTB(), "testdata")
 			if os.Getenv("UPDATE_GOLDEN") != "" {
-				Expect(os.WriteFile("testdata/builtin-pg18.golden.json", encoded, 0o600)).To(Succeed())
+				Expect(root.WriteFile("builtin-pg18.golden.json", encoded, 0o600)).To(Succeed())
 			}
-			want18 := fixture.Read(GinkgoTB(), "testdata", "builtin-pg18.golden.json")
+			want18, err := root.ReadFile("builtin-pg18.golden.json")
+			Expect(err).NotTo(HaveOccurred())
 			Expect(strings.TrimSpace(string(encoded))).To(Equal(strings.TrimSpace(string(want18))))
 		}, SpecTimeout(time.Minute))
 

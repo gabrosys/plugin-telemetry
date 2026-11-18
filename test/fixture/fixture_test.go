@@ -9,15 +9,18 @@ import (
 	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
-// fatalTB keeps its cleanups and records Fatalf, stopping the calling goroutine as testing.T does.
+// fatalTB keeps its cleanups and records Errorf and Fatalf; Fatalf stops the calling goroutine as testing.T does.
 type fatalTB struct {
 	testing.TB
 	fatal    string
+	errs     []string
 	cleanups []func()
 }
 
 func (f *fatalTB) Helper()           {}
 func (f *fatalTB) Cleanup(fn func()) { f.cleanups = append(f.cleanups, fn) }
+
+func (f *fatalTB) Errorf(format string, _ ...any) { f.errs = append(f.errs, format) }
 
 func (f *fatalTB) Fatalf(format string, _ ...any) {
 	f.fatal = format

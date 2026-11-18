@@ -6,6 +6,7 @@ import (
 	"net/url"
 
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"google.golang.org/grpc/connectivity"
 )
 
 // HTTPProxy returns the Proxy of the HTTP exporter's transport.
@@ -25,3 +26,6 @@ func (e *Exporter) Export(ctx context.Context, rm *metricdata.ResourceMetrics) e
 	_, err := e.export(ctx, rm)
 	return err
 }
+
+// GRPCState returns the state of the gRPC exporter's connection.
+func GRPCState(e *Exporter) connectivity.State { return e.conn.GetState() }

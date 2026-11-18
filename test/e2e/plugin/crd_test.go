@@ -73,10 +73,9 @@ var _ = Describe("the CRDs", Ordered, func() {
 
 	DescribeTable("the API server accepts every valid fixture",
 		func(ctx SpecContext, file string) {
-			raw, err := fs.ReadFile(os.DirFS(fixturesDir), file)
-			Expect(err).NotTo(HaveOccurred())
+			raw := fixture.Read(GinkgoTB(), fixturesDir, file)
 
-			_, err = dryRun(ctx, ns, raw)
+			_, err := dryRun(ctx, ns, raw)
 			Expect(err).NotTo(HaveOccurred())
 		},
 		func() []TableEntry {
@@ -88,12 +87,11 @@ var _ = Describe("the CRDs", Ordered, func() {
 
 	DescribeTable("the API server rejects every invalid fixture with its message",
 		func(ctx SpecContext, file string) {
-			raw, err := fs.ReadFile(os.DirFS(fixturesDir), file)
-			Expect(err).NotTo(HaveOccurred())
+			raw := fixture.Read(GinkgoTB(), fixturesDir, file)
 			first, _, _ := strings.Cut(string(raw), "\n")
 			Expect(first).To(HavePrefix(wantPrefix), "an invalid fixture starts with a want line")
 
-			_, err = dryRun(ctx, ns, raw)
+			_, err := dryRun(ctx, ns, raw)
 			Expect(err).To(MatchError(ContainSubstring(strings.TrimPrefix(first, wantPrefix))))
 		},
 		func() []TableEntry {
@@ -104,10 +102,9 @@ var _ = Describe("the CRDs", Ordered, func() {
 	)
 
 	It("reports a rejected endpoint at spec.exporter.endpoint without its value", func(ctx SpecContext) {
-		raw, err := fs.ReadFile(os.DirFS(fixturesDir), "invalid/exporter-endpoint-user-info.yaml")
-		Expect(err).NotTo(HaveOccurred())
+		raw := fixture.Read(GinkgoTB(), fixturesDir, "invalid/exporter-endpoint-user-info.yaml")
 
-		_, err = dryRun(ctx, ns, raw)
+		_, err := dryRun(ctx, ns, raw)
 		Expect(err).To(MatchError(ContainSubstring("spec.exporter.endpoint: ")))
 		Expect(err.Error()).NotTo(ContainSubstring("secret"))
 	}, SpecTimeout(time.Minute))

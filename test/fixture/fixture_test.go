@@ -9,37 +9,26 @@ import (
 	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
-// fatalTB keeps its cleanups and records Errorf and Fatalf; Fatalf stops the calling goroutine as testing.T does.
+// fatalTB is t with a Fatalf that records its format and stops the calling goroutine, as testing.T does.
 type fatalTB struct {
-	testing.TB
-	fatal    string
-	errs     []string
-	cleanups []func()
+	*testing.T
+	fatal string
 }
-
-func (f *fatalTB) Helper()           {}
-func (f *fatalTB) Cleanup(fn func()) { f.cleanups = append(f.cleanups, fn) }
-
-func (f *fatalTB) Errorf(format string, _ ...any) { f.errs = append(f.errs, format) }
 
 func (f *fatalTB) Fatalf(format string, _ ...any) {
 	f.fatal = format
 	runtime.Goexit()
 }
 
-// fatalOf runs fn on a fatalTB in its own goroutine, then its cleanups in reverse order, and returns the Fatalf
-// format, or "".
-func fatalOf(fn func(tb testing.TB)) string {
-	tb := &fatalTB{}
+// fatalOf runs fn on a fatalTB over t in its own goroutine and returns the Fatalf format, or "".
+func fatalOf(t *testing.T, fn func(tb testing.TB)) string {
+	tb := &fatalTB{T: t}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		fn(tb)
 	}()
 	<-done
-	for i := len(tb.cleanups) - 1; i >= 0; i-- {
-		tb.cleanups[i]()
-	}
 	return tb.fatal
 }
 
@@ -58,7 +47,7 @@ func TestOpenClosesTheRootAtCleanup(t *testing.T) {
 }
 
 func TestOpenFailsOnAMissingDir(t *testing.T) {
-	if fatalOf(func(tb testing.TB) { fixture.Open(tb, "absent") }) == "" {
+	if fatalOf(t, func(tb testing.TB) { fixture.Open(tb, "absent") }) == "" {
 		t.Fatal("Open of a missing dir did not call Fatalf")
 	}
 }
@@ -70,13 +59,13 @@ func TestReadReturnsTheFile(t *testing.T) {
 }
 
 func TestReadFailsOnAMissingFile(t *testing.T) {
-	if fatalOf(func(tb testing.TB) { fixture.Read(tb, "testdata", "absent.txt") }) == "" {
+	if fatalOf(t, func(tb testing.TB) { fixture.Read(tb, "testdata", "absent.txt") }) == "" {
 		t.Fatal("Read of a missing file did not call Fatalf")
 	}
 }
 
 func TestReadStaysInsideDir(t *testing.T) {
-	if fatalOf(func(tb testing.TB) { fixture.Read(tb, "testdata", "../fixture_test.go") }) == "" {
+	if fatalOf(t, func(tb testing.TB) { fixture.Read(tb, "testdata", "../fixture_test.go") }) == "" {
 		t.Fatal("Read of a path outside dir did not call Fatalf")
 	}
 }

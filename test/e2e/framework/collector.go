@@ -57,7 +57,7 @@ func CollectorReady(ctx context.Context, c client.Client) error {
 // ScaleCollector sets the replicas of the collector Deployment.
 func ScaleCollector(ctx context.Context, c client.Client, replicas int32) error {
 	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: collectorNamespace, Name: collectorName}}
-	patch := client.RawPatch(types.MergePatchType, []byte(fmt.Sprintf(`{"spec":{"replicas":%d}}`, replicas)))
+	patch := client.RawPatch(types.MergePatchType, fmt.Appendf(nil, `{"spec":{"replicas":%d}}`, replicas))
 	if err := c.Patch(ctx, deploy, patch); err != nil {
 		return fmt.Errorf("scale deployment %s/%s to %d: %w", collectorNamespace, collectorName, replicas, err)
 	}

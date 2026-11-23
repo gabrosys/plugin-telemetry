@@ -297,3 +297,39 @@ func RunJobWhileRefused(ctx context.Context) (connections int, err error) {
 	e.runJob(ctx, planner.Job{Query: "backends", Database: "app", Fingerprint: "f"})
 	return int(accepted.Load()), e.mp.Shutdown(ctx)
 }
+
+// EarlyFactsAfterRefusal records a run that found a superuser role, takes its early facts request as the
+// control goroutine does, records a second such run, and then runs the early facts round, which refuses.
+// It reports how many early facts requests are still pending and whether the planned facts timer is armed.
+func EarlyFactsAfterRefusal(ctx context.Context) (pending int, timerArmed bool, err error) {
+	gather := func(context.Context, settings.Settings) (planner.Facts, error) {
+		return planner.Facts{Checks: map[string]bool{"superuser": true}}, planner.ErrSuperuser
+	}
+	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, gather)
+	if err != nil {
+		return 0, false, err
+	}
+	s := settings.Settings{
+		Postgres:     settings.Postgres{Host: "127.0.0.1", Port: 1, User: "u", Database: "app", MaxConnections: 2},
+		Limits:       settings.Limits{QueryTimeout: time.Second, LockTimeout: time.Second},
+		PlanInterval: time.Minute,
+	}
+	e.swapPool(ctx, s)
+	defer e.teardown()
+	e.plan.current = &configuration{settings: s}
+	first := planner.Job{Query: "a", Database: "app", Fingerprint: "f"}
+	second := planner.Job{Query: "b", Database: "app", Fingerprint: "f"}
+	e.plan.planned = map[snapshot.Key]string{
+		{Query: first.Query, Database: first.Database}:   first.Fingerprint,
+		{Query: second.Query, Database: second.Database}: second.Fingerprint,
+	}
+	refused := func(job planner.Job) executor.Result {
+		return executor.Result{Job: job, Outcome: selfmetrics.OutcomeSkipped, Err: planner.ErrSuperuser}
+	}
+
+	e.record(ctx, refused(first))
+	<-e.early
+	e.record(ctx, refused(second))
+	e.onEarlyFacts(ctx)
+	return len(e.early), e.factsTimer != nil, e.mp.Shutdown(ctx)
+}

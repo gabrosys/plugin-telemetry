@@ -760,6 +760,13 @@ var _ = Describe("A superuser session role", func() {
 		Expect(got).To(Equal(1.0))
 	})
 
+	It("drops the early facts request of a second run that found the role when the refusal starts", func(ctx SpecContext) {
+		pending, timerArmed, err := engine.EarlyFactsAfterRefusal(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(pending).To(BeZero(), "no second facts round follows the refusal")
+		Expect(timerArmed).To(BeTrue(), "the planned facts round still comes, so NOSUPERUSER resumes")
+	})
+
 	It("runs no query that was dispatched before the refusal", func(ctx SpecContext) {
 		connections, err := engine.RunJobWhileRefused(ctx)
 		Expect(err).NotTo(HaveOccurred())

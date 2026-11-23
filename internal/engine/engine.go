@@ -716,8 +716,9 @@ func (e *engine) gatherRound(ctx context.Context, timed bool) {
 
 // refuse handles a facts round that found a superuser session role: cnpg_collector_up is unreported and
 // checks (the superuser one) are exported, then, when the refusal starts, the runner stops running jobs, the
-// plan is empty and the pool is new (the old one closes at once). No facts are kept. The next round comes
-// after a planning cycle, with no backoff.
+// plan is empty, the pool is new (the old one closes at once) and an early facts request from a run that
+// found the role is dropped, since this round answers it. No facts are kept. The next round comes after a
+// planning cycle, with no backoff.
 func (e *engine) refuse(ctx context.Context, cur *configuration, checks map[string]bool) {
 	s := cur.settings
 	logger := log.FromContext(ctx).GetLogger()
@@ -726,6 +727,10 @@ func (e *engine) refuse(ctx context.Context, cur *configuration, checks map[stri
 	if !e.setRefused(true) {
 		e.plan.refuse(ctx)
 		e.swapPool(ctx, s)
+		select {
+		case <-e.early:
+		default:
+		}
 	}
 	e.factsFailures = 0
 	e.setFactsTimer(s.PlanInterval)

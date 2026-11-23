@@ -654,9 +654,9 @@ func (e *engine) factsRound(ctx context.Context, timed bool) {
 }
 
 // gatherRound gathers the facts (a panic in gather fails the round), records the collection, keeps the
-// facts for the built-ins, sets upMetric, replans when the facts changed
-// and schedules the next round: a planning cycle after a success, sooner with backoff after a failure
-// of a round the timer drove (timed). A failed early round leaves the timer as it is.
+// facts for the built-ins, sets upMetric, replans when the facts changed and schedules the next round: a
+// planning cycle after a success, sooner with backoff after a failure of a round the timer drove (timed). A
+// failed early round leaves the timer as it is.
 func (e *engine) gatherRound(ctx context.Context, timed bool) {
 	stopTimer(&e.earlyTimer)
 	cur := e.plan.current

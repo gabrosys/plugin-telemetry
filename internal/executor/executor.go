@@ -112,11 +112,12 @@ func (e *Executor) Run(ctx context.Context, job planner.Job) (res Result) {
 	return res
 }
 
-// RunTimeout is the deadline of one run, which starts when the run has a pool slot.
+// RunTimeout is the deadline of one run, which starts when the run has its connection.
 func RunTimeout(l settings.Limits) time.Duration { return l.QueryTimeout + deadlineGrace }
 
-// run waits for a pool slot for at most the job's interval (the query timeout without one), then runs the job under a deadline that starts at the slot.
-// pastDeadline reports that this deadline had passed when run returned.
+// run waits for a pool slot for at most the job's interval (the query timeout without one), then runs the job
+// under a deadline that starts when the run has its connection. pastDeadline reports that this deadline had
+// passed when run returned.
 func (e *Executor) run(ctx context.Context, job planner.Job, res *Result) (pastDeadline bool, err error) {
 	maxWait := job.Interval
 	if maxWait <= 0 {

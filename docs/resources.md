@@ -171,23 +171,17 @@ Pipelined batches are not needed. `skippedRuns` is 0 in `sidecar-v1.30.1.json` (
 
 ## Pod shutdown
 
-The sidecar is a native sidecar, so it stops only after `postgres` has stopped. PostgreSQL's smart shutdown waits for every open session, and CloudNativePG falls back to a fast shutdown only after `smartShutdownTimeout`, 180 s by default (CloudNativePG v1.30.1 `api/v1/cluster_funcs.go` `GetSmartShutdownTimeout`). Without the probe, the sidecar's idle sessions held the smart shutdown to the full 180 s (182.5 s measured from the smart request to the fast one), against 0.18 s for the same Cluster without the plugin (measured on kind with CloudNativePG v1.30.1 and PostgreSQL 18.7, one instance).
+The sidecar is a native sidecar, so it stops only after `postgres` has stopped. PostgreSQL's smart shutdown waits for every open session, and CloudNativePG falls back to a fast shutdown only after `smartShutdownTimeout`, 180 s by default (CloudNativePG v1.30.1 `api/v1/cluster_funcs.go` `GetSmartShutdownTimeout`). A sidecar that keeps idle sessions open between runs holds the smart shutdown to the full 180 s (182.5 s measured from the smart request to the fast one), against 0.18 s for the same Cluster without the plugin (measured on kind with CloudNativePG v1.30.1 and PostgreSQL 18.7, one instance). Idle sessions also make PostgreSQL refuse `DROP DATABASE` without `FORCE`, `CREATE DATABASE ... TEMPLATE`, `ALTER DATABASE ... RENAME` and `ALTER DATABASE ... SET TABLESPACE` on the database they are in, with SQLSTATE 55006. CloudNativePG's `Database` resource drops without `FORCE`.
 
-The sidecar keeps its sessions between rounds and probes PostgreSQL with one short connection every 10 s (`internal/engine/engine.go` `shutdownProbe`, `internal/pg/pool.go` `Pool.Probe`):
+The sidecar holds no session between runs. Each query run and each facts round opens its own connection and closes it when it ends (`internal/pg/pool.go` `Pool`), as CloudNativePG's exporter does with `SetMaxIdleConns(0)` (CloudNativePG v1.30.1 `pkg/management/postgres/pool/pool.go`). A smart shutdown therefore waits only for the runs in flight. Each run lasts at most the query timeout plus 2 s (`internal/executor/executor.go` `RunTimeout`), 12 s with the default 10 s query timeout. Once the shutdown has started, PostgreSQL refuses new sessions, so no new run joins the wait.
 
-- On SQLSTATE 57P03 (`cannot_connect_now`), the pool closes its idle sessions, and closes each other session when its run ends. PostgreSQL answers 57P03 while it shuts down, starts up or recovers.
-- A successful dial that began after the refusal ends the drain.
-- Any other refusal leaves the sessions alone. Monitoring continues while PostgreSQL is at `max_connections`.
+Cost of a connection per run:
 
-The hold is therefore about 10 s plus the query in flight, whatever `planInterval` and the query intervals are.
+- One connection per query run per database, and one per facts round. `spec.metrics.limits.maxConnections` caps how many are open at once.
+- A new session takes about 1.7 ms on PostgreSQL 18.7 over a local socket with `trust` authentication (AMD Ryzen 7 5800X). A new session that runs 11 monitoring queries took 5.7 ms, against 1.5 ms on a session that was already open.
+- With `log_connections` and `log_disconnections` on, each connection logs up to four lines on PostgreSQL 18 (connection received, authenticated and authorized, then the disconnection). The authenticated line appears only for authentication methods that log it, and PostgreSQL 17 and earlier log fewer lines per connection. Both settings are off by default and CloudNativePG v1.30.1 does not set them.
 
-Cost of the probe:
-
-- One short connection every 10 s per instance, outside `spec.metrics.limits.maxConnections`. The monitoring role's connection limit must be at least `maxConnections` + 1.
-- The probe is 8,640 connections a day (86,400 s / 10 s). With `log_connections` and `log_disconnections` on, each one logs up to four lines on PostgreSQL 18 (connection received, authenticated and authorized, then the disconnection), so up to 34,560 lines a day per instance. The authenticated line appears only for authentication methods that log it, and PostgreSQL 17 and earlier log fewer lines per connection. Both settings are off by default and CloudNativePG v1.30.1 does not set them.
-- While the role's connection limit is reached, PostgreSQL logs one FATAL line every 10 s.
-
-The spec `test/e2e/resilience/shutdown_test.go` deletes the Pod of a one-instance Cluster with the plugin and asserts that the `postgres` container stops within 60 s of the delete. Measured with the probe, five runs: 9.54 s, 12.81 s and 3.02 s on CNPG v1.30.1, 11.60 s and 10.03 s on `main`. In every run the PostgreSQL log shows the smart shutdown request, then only refused new sessions, then the postmaster exit, with no "terminating connection due to administrator command" line, so the fast shutdown never had to end a sidecar session. Closing connections by age instead of probing measured 24.84 s and 25.15 s.
+The spec `test/e2e/resilience/shutdown_test.go` deletes the Pod of a one-instance Cluster with the plugin and asserts that the `postgres` container stops within 60 s of the delete.
 
 ## Environment
 
@@ -199,7 +193,7 @@ The spec `test/e2e/resilience/shutdown_test.go` deletes the Pod of a one-instanc
 | Docker server (`docker version --format '{{.Server.Version}}'`) | 29.2.1 |
 | kind node image | `kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5` (Kubernetes 1.37.0), kind v0.33.0 |
 | CloudNativePG, PostgreSQL | v1.30.1, 18.7 |
-| Code | v0.5.0 with one difference (see the top), for every current result. Runs kept as history, on earlier code: the two 64Mi runs (without and with the pooled map), the earlier 96Mi run, the per-row figures without the pooled map and with it alone, the 149 s token Secret wait of an earlier plugin run, the 182.5 s shutdown without the probe, and the 24.84 s and 25.15 s shutdowns that closed connections by age |
+| Code | v0.5.0 with one difference (see the top), for every current result. Runs kept as history, on earlier code: the two 64Mi runs (without and with the pooled map), the earlier 96Mi run, the per-row figures without the pooled map and with it alone, the 149 s token Secret wait of an earlier plugin run, and the 182.5 s shutdown with idle sessions |
 
 ## Reproducing
 

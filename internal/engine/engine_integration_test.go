@@ -278,6 +278,11 @@ func backends(ctx context.Context, cond string, args ...any) (n int, err error) 
 	return n, err
 }
 
+// engineBackends counts the engine's backends.
+func engineBackends(ctx context.Context) (int, error) {
+	return backends(ctx, "application_name = 'cnpg_otel_engine'")
+}
+
 // sessions counts the backends of user in state, other than its own; an empty state counts every one.
 func sessions(ctx context.Context, user, state string) (int, error) {
 	return backends(ctx, "usename = $1 AND ($2 = '' OR state = $2)", user, state)
@@ -317,9 +322,10 @@ var _ = Describe("Run on a change of the postgres user", func() {
 
 		Eventually(func() (int, error) { return sessions(ctx, other, "") }).
 			WithTimeout(10 * time.Second).WithPolling(50 * time.Millisecond).Should(BeNumerically(">", 0))
-		// hold_probe's connection closes when its run releases it.
-		Eventually(func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "") }).
-			WithTimeout(8 * time.Second).WithPolling(100 * time.Millisecond).Should(BeZero())
+		// hold_probe's connection closes when its run releases it, and no later run opens one as the old user.
+		oldUser := func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "") }
+		Eventually(oldUser).WithTimeout(8 * time.Second).WithPolling(100 * time.Millisecond).Should(BeZero())
+		Consistently(oldUser).WithTimeout(3 * time.Second).WithPolling(100 * time.Millisecond).Should(BeZero())
 	}, SpecTimeout(time.Minute))
 })
 
@@ -787,8 +793,8 @@ var _ = Describe("Run on a superuser session role", func() {
 			g.Expect(got).To(Equal(1.0))
 		}).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 		Expect(points(f.srv, "cnpg_collector_up", time.Time{})).To(BeEmpty())
-		Eventually(func() (int, error) { return backends(ctx, "application_name = 'cnpg_otel_engine'") }).
-			WithTimeout(planInterval).WithPolling(250 * time.Millisecond).Should(BeZero())
+		Eventually(engineBackends).WithArguments(ctx).WithTimeout(planInterval).WithPolling(250 * time.Millisecond).Should(BeZero())
+		Consistently(engineBackends).WithArguments(ctx).WithTimeout(2 * queryInterval).WithPolling(100 * time.Millisecond).Should(BeZero())
 
 		Expect(server.Exec(ctx, "ALTER ROLE "+role+" NOSUPERUSER")).To(Succeed())
 		Eventually(expectUp(f.srv, 1)).WithTimeout(2*planInterval + slack).WithPolling(100 * time.Millisecond).Should(Succeed())
@@ -819,8 +825,8 @@ var _ = Describe("Run on a superuser session role", func() {
 			g.Expect(ok).To(BeTrue())
 			g.Expect(got).To(Equal(1.0))
 		}).WithTimeout(planInterval / 3).WithPolling(100 * time.Millisecond).Should(Succeed())
-		Eventually(func() (int, error) { return backends(ctx, "application_name = 'cnpg_otel_engine'") }).
-			WithTimeout(5 * time.Second).WithPolling(250 * time.Millisecond).Should(BeZero())
+		Eventually(engineBackends).WithArguments(ctx).WithTimeout(5 * time.Second).WithPolling(250 * time.Millisecond).Should(BeZero())
+		Consistently(engineBackends).WithArguments(ctx).WithTimeout(2 * queryInterval).WithPolling(100 * time.Millisecond).Should(BeZero())
 		// The series stop well before the next timed round.
 		Eventually(func() []point {
 			return points(f.srv, "cnpg_backends_total", time.Now().Add(-2*exportInterval))
@@ -836,8 +842,7 @@ var _ = Describe("Run on a superuser session role", func() {
 		writeFile(f.config, f.valid)
 		f.run()
 		Eventually(expectUp(f.srv, 1)).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
-		engineBackends := func() (int, error) { return backends(ctx, "application_name = 'cnpg_otel_engine'") }
-		Eventually(engineBackends).WithTimeout(5 * time.Second).WithPolling(100 * time.Millisecond).Should(BeNumerically(">", 0))
+		Eventually(engineBackends).WithArguments(ctx).WithTimeout(5 * time.Second).WithPolling(100 * time.Millisecond).Should(BeNumerically(">", 0))
 
 		Expect(server.Exec(ctx, "ALTER ROLE "+role+" SUPERUSER")).To(Succeed())
 		check := map[string]string{"check": "superuser"}
@@ -846,7 +851,8 @@ var _ = Describe("Run on a superuser session role", func() {
 			g.Expect(ok).To(BeTrue())
 			g.Expect(got).To(Equal(1.0))
 		}).WithTimeout(2*planInterval + slack).WithPolling(100 * time.Millisecond).Should(Succeed())
-		Eventually(engineBackends).WithTimeout(planInterval).WithPolling(250 * time.Millisecond).Should(BeZero())
+		Eventually(engineBackends).WithArguments(ctx).WithTimeout(planInterval).WithPolling(250 * time.Millisecond).Should(BeZero())
+		Consistently(engineBackends).WithArguments(ctx).WithTimeout(2 * queryInterval).WithPolling(100 * time.Millisecond).Should(BeZero())
 
 		Expect(server.Exec(ctx, "ALTER ROLE "+role+" NOSUPERUSER")).To(Succeed())
 		since := time.Now()

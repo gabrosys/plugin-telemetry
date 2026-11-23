@@ -205,8 +205,10 @@ func (p *Pool) releaser(ctx context.Context, conn *pgx.Conn, database string) fu
 	}
 }
 
-// release closes the connection, then frees the slot. When it returns, the backend has exited or closeTimeout
-// has passed, so a dial that takes the slot is not refused for a backend the role still counts.
+// release closes the connection, then frees the slot. For a connection that is still open and idle, release
+// returns once the backend has exited or closeTimeout has passed. For one that pgx already closed after an
+// error, or one released mid-statement, the slot is freed while the backend may still count against the
+// role's limit.
 func (p *Pool) release(ctx context.Context, conn *pgx.Conn, database string) {
 	p.closeConn(ctx, conn, database)
 	p.mu.Lock()
@@ -231,7 +233,9 @@ func (p *Pool) notifyLocked() {
 // closeConn ends the session within closeTimeout on WithoutCancel(ctx), so a cancelled ctx does not cut the
 // goodbye short. It sends Terminate and reads until the server closes the socket, which PostgreSQL does only
 // once the backend has exited, so when closeConn returns the backend has exited or closeTimeout has passed.
-// The socket is closed whatever fails, so errors are only logged.
+// A ping SyncConn sends can run up to cancelDeadlineDelay past closeTimeout. A connection pgx has already
+// closed is left to pgx, which closes the socket in the background. The socket is closed whatever fails, so
+// errors are only logged.
 func (p *Pool) closeConn(ctx context.Context, conn *pgx.Conn, database string) {
 	if conn.IsClosed() {
 		return
@@ -243,8 +247,8 @@ func (p *Pool) closeConn(ctx context.Context, conn *pgx.Conn, database string) {
 	}
 }
 
-// syncClose takes the socket over from pc, sends Terminate and waits until the server closes the socket or ctx
-// ends, then closes the socket. When pc cannot hand the socket over, pc.Close closes it without waiting.
+// syncClose takes the socket over from pc, sends Terminate and waits until the server closes the socket or
+// ctx's deadline passes, then closes the socket. When pc cannot hand the socket over, pc.Close closes it without waiting.
 func syncClose(ctx context.Context, pc *pgconn.PgConn) error {
 	if err := pc.SyncConn(ctx); err != nil {
 		return errors.Join(fmt.Errorf("sync the connection: %w", err), pc.Close(ctx))

@@ -19,7 +19,7 @@ CNPG operator --> plugin --> sidecar in each instance pod --> OTLP --> your coll
 ## Compatibility
 
 - CNPG v1.30.1 and `main`.
-- Kubernetes 1.34 to 1.37. The e2e workflow tests 1.37 only; 1.34 to 1.36 are not tested in CI.
+- Kubernetes 1.34 to 1.37.
 - PostgreSQL 18.
 - Connection modes `peer` and `password`.
 - OpenShift through `password` mode. Untested.

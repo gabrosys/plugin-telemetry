@@ -17,7 +17,7 @@ The plugin runs in `cnpg-system`, and the example collector in `otel`. Those two
 
 ## 1. What you need
 
-- Kubernetes 1.34 to 1.37. The e2e workflow tests 1.37 only; 1.34 to 1.36 are not tested in CI.
+- Kubernetes 1.34 to 1.37.
 - CloudNativePG v1.30.1 and `main`.
 - cert-manager. It is tested with v1.21.3. The plugin's gRPC server uses mutual TLS with certificates from it.
 - Docker, to build the plugin image, and `make`.

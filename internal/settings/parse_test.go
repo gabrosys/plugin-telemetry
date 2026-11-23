@@ -44,7 +44,7 @@ var _ = Describe("Parse of an empty file", func() {
 })
 
 var _ = Describe("Defaults", func() {
-	It("is what Load starts from", func() {
+	It("is what Parse starts from", func() {
 		d := settings.Defaults()
 		Expect(d.Exporter.Interval).To(Equal(30 * time.Second))
 		Expect(d.Postgres.Host).To(Equal("/controller/run"))

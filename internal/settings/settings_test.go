@@ -57,7 +57,7 @@ func writeConfig(content string) string {
 	return p
 }
 
-var _ = Describe("Load", func() {
+var _ = Describe("Parse of a settings file", func() {
 	It("applies defaults to a minimal file", func() {
 		s := mustLoad("minimal.yaml")
 

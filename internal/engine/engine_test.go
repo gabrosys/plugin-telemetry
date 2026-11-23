@@ -138,23 +138,6 @@ func gaps(times []time.Time) []time.Duration {
 	return out
 }
 
-var _ = Describe("Shutdown probe", func() {
-	It("runs every 10 s and not after the engine stops", func() {
-		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) }, primary)
-		Eventually(h.probeTimersArmed).Should(Equal([]time.Duration{10 * time.Second}))
-
-		h.advanceBy(10*time.Second, func() bool { return len(h.probeTimersArmed()) >= 4 })
-		for _, d := range h.probeTimersArmed() {
-			Expect(d).To(Equal(10 * time.Second))
-		}
-
-		h.stopEngine()
-		armed := len(h.probeTimersArmed())
-		h.clk.Step(time.Minute)
-		Consistently(h.probeTimersArmed).WithTimeout(200 * time.Millisecond).Should(HaveLen(armed))
-	})
-})
-
 var _ = Describe("Facts rounds", func() {
 	It("back off 1s, 2s, 4s ... capped at the planning cycle whatever the early rounds, and start over on a new pool", func() {
 		// The first round plans the queries; after it PostgreSQL is gone, and every run that fails asks for an

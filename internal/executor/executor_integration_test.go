@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net"
 	"os"
-	"strconv"
 	"sync"
 	"time"
 
@@ -70,7 +69,7 @@ func newPoolOf(l settings.Limits, maxConns int) *pg.Pool {
 	cfg := server.MonitorConfig(GinkgoT().TempDir())
 	cfg.QueryTimeout = l.QueryTimeout
 	cfg.LockTimeout = l.LockTimeout
-	pool := pg.NewPool(cfg, maxConns, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
+	pool := pg.NewPool(cfg, maxConns, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 	DeferCleanup(pool.Close)
 	return pool
 }
@@ -147,7 +146,7 @@ var _ = Describe("Executor", func() {
 		conn, release, err := pool.AcquireWithin(ctx, "postgres", 0)
 		Expect(err).NotTo(HaveOccurred())
 		facts, err := planner.GatherFacts(ctx, conn, pool.Guard())
-		release(err != nil)
+		release()
 		Expect(err).NotTo(HaveOccurred())
 
 		s := settings.Settings{
@@ -262,10 +261,6 @@ var _ = Describe("Executor", func() {
 	It("ends an unguarded statement at the run deadline by a server-side cancel", func(ctx SpecContext) {
 		l.QueryTimeout = 4 * time.Second
 		slow := newExecutor(newPool(l), l)
-		pid := jobFor("SELECT 'a' AS datname, pg_backend_pid() AS value")
-		first := slow.Run(ctx, pid)
-		Expect(first.Err).NotTo(HaveOccurred())
-
 		job := definedJob("SELECT pg_sleep(5) FROM pg_catalog.pg_settings LIMIT 1")
 		Expect(job.Def.ReadsSettings).To(BeTrue())
 		deadline, cancel := context.WithTimeout(ctx, time.Second)
@@ -279,10 +274,6 @@ var _ = Describe("Executor", func() {
 		Expect(pgErr.Code).To(Equal("57014"))
 		Expect(pgErr.Message).To(ContainSubstring("canceling statement due to user request"))
 		Expect(res.ConnectionLost).To(BeFalse())
-
-		again := slow.Run(ctx, pid)
-		Expect(again.Err).NotTo(HaveOccurred())
-		Expect(again.Samples[0].Value).To(Equal(first.Samples[0].Value), "the connection is kept")
 	})
 
 	It("records a run that fails with SQLSTATE 42501 as outcome denied", func(ctx SpecContext) {
@@ -296,17 +287,9 @@ var _ = Describe("Executor", func() {
 	})
 
 	It("times out a slow query with statement_timeout", func(ctx SpecContext) {
-		pid := jobFor("SELECT 'a' AS datname, pg_backend_pid() AS value")
-		first := exec.Run(ctx, pid)
-		Expect(first.Err).NotTo(HaveOccurred())
-
 		res := exec.Run(ctx, jobFor("SELECT 'a' AS datname, 1 AS value FROM pg_sleep(5)"))
 		Expect(res.Outcome).To(Equal(selfmetrics.OutcomeTimeout))
 		Expect(res.Err).To(HaveOccurred())
-
-		again := exec.Run(ctx, pid)
-		Expect(again.Err).NotTo(HaveOccurred())
-		Expect(again.Samples[0].Value).To(Equal(first.Samples[0].Value), "the connection is kept")
 	})
 
 	It("times out a query that waits on a lock with lock_timeout", func(ctx SpecContext) {
@@ -322,7 +305,7 @@ var _ = Describe("Executor", func() {
 		Eventually(func(g Gomega) {
 			conn, release, err := pool.AcquireWithin(ctx, "postgres", 0)
 			g.Expect(err).NotTo(HaveOccurred())
-			defer release(false)
+			defer release()
 			var n int
 			g.Expect(conn.QueryRow(ctx, "SELECT count(*) FROM pg_locks WHERE relation = 'public.lock_probe'::regclass AND mode = 'AccessExclusiveLock'").Scan(&n)).To(Succeed())
 			g.Expect(n).To(Equal(1))
@@ -371,24 +354,15 @@ var _ = Describe("Executor", func() {
 		It("cancels the statement at the row cap instead of draining it", func(ctx SpecContext) {
 			l.MaxRowsPerQuery = 3
 			capExec := newExecutor(pool, l)
-			pid := jobFor("SELECT 'a' AS datname, pg_backend_pid() AS value")
-			first := capExec.Run(ctx, pid)
-			Expect(first.Err).NotTo(HaveOccurred())
-
 			start := time.Now()
 			res := capExec.Run(ctx, jobFor("SELECT 'x' || generate_series(1, 50000000) AS datname, 1 AS value"))
 			Expect(time.Since(start)).To(BeNumerically("<", 2*time.Second))
 			Expect(res.Err).NotTo(HaveOccurred())
 			Expect(res.Outcome).To(Equal(selfmetrics.OutcomeCapped))
 			Expect(res.WouldBe).To(Equal(3))
-
-			again := capExec.Run(ctx, pid)
-			Expect(again.Err).NotTo(HaveOccurred())
-			Expect(again.Samples).To(HaveLen(1))
-			Expect(again.Samples[0].Value).To(Equal(first.Samples[0].Value), "the connection is kept")
 		})
 
-		It("logs a failed cancel request and replaces the connection", func(ctx SpecContext) {
+		It("logs a failed cancel request", func(ctx SpecContext) {
 			var out []string
 			logger := funcr.New(func(_, args string) { out = append(out, args) }, funcr.Options{Verbosity: 1})
 			logCtx := ctrllog.IntoContext(ctx, logger)
@@ -400,18 +374,10 @@ var _ = Describe("Executor", func() {
 				cancel()
 				return conn.PgConn().CancelRequest(done)
 			})
-			pid := jobFor("SELECT 'a' AS datname, pg_backend_pid() AS value")
-			first := capExec.Run(logCtx, pid)
-			Expect(first.Err).NotTo(HaveOccurred())
-
 			res := capExec.Run(logCtx, jobFor("SELECT 'x' || g AS datname, 1 AS value FROM generate_series(1, 10) g"))
 			Expect(res.Err).NotTo(HaveOccurred())
 			Expect(res.Outcome).To(Equal(selfmetrics.OutcomeCapped))
 			Expect(out).To(ContainElement(And(ContainSubstring("cancel"), ContainSubstring(`"query"="probe"`), ContainSubstring(`"database"="postgres"`))))
-
-			again := capExec.Run(logCtx, pid)
-			Expect(again.Err).NotTo(HaveOccurred())
-			Expect(again.Samples[0].Value).NotTo(Equal(first.Samples[0].Value), "the connection was replaced")
 		})
 
 		It("keeps a run at the caps", func(ctx SpecContext) {
@@ -504,7 +470,7 @@ var _ = Describe("Executor", func() {
 		cfg := server.MonitorConfig(GinkgoT().TempDir())
 		cfg.Host, cfg.Port = "127.0.0.1", addr.AddrPort().Port()
 		cfg.ConnectTimeout = time.Second
-		slow := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
+		slow := pg.NewPool(cfg, 1, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(slow.Close)
 
 		job := jobFor("SELECT 'a' AS datname, 1 AS value")
@@ -524,12 +490,12 @@ var _ = Describe("Executor", func() {
 		l.QueryTimeout = 500 * time.Millisecond
 		cfg := server.MonitorConfig(GinkgoT().TempDir())
 		cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout
-		one := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
+		one := pg.NewPool(cfg, 1, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(one.Close)
 
 		_, release, err := one.AcquireWithin(ctx, "postgres", 0)
 		Expect(err).NotTo(HaveOccurred())
-		held := time.AfterFunc(3*time.Second, func() { release(false) })
+		held := time.AfterFunc(3*time.Second, func() { release() })
 		DeferCleanup(held.Stop)
 
 		job := jobFor("SELECT 'a' AS datname, 1 AS value")
@@ -541,7 +507,7 @@ var _ = Describe("Executor", func() {
 	It("gives up waiting for a connection after one interval and counts the run as skipped", func(ctx SpecContext) {
 		cfg := server.MonitorConfig(GinkgoT().TempDir())
 		cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout
-		one := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
+		one := pg.NewPool(cfg, 1, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(one.Close)
 
 		holder, release, err := one.AcquireWithin(ctx, "postgres", 0)
@@ -560,7 +526,7 @@ var _ = Describe("Executor", func() {
 		Expect(res.Samples).To(BeNil())
 
 		Expect(holder.IsClosed()).To(BeFalse(), "the slot holder is unaffected")
-		release(false)
+		release()
 		again := newExecutor(one, l).Run(ctx, job)
 		Expect(again.Outcome).To(Equal(selfmetrics.OutcomeOK), "error: %v", again.Err)
 	})
@@ -569,12 +535,12 @@ var _ = Describe("Executor", func() {
 		l.QueryTimeout = 500 * time.Millisecond
 		cfg := server.MonitorConfig(GinkgoT().TempDir())
 		cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout
-		one := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
+		one := pg.NewPool(cfg, 1, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(one.Close)
 
 		_, release, err := one.AcquireWithin(ctx, "postgres", 0)
 		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func() { release(false) })
+		DeferCleanup(func() { release() })
 
 		job := jobFor("SELECT 'a' AS datname, 1 AS value")
 		Expect(job.Interval).To(BeZero())
@@ -597,7 +563,7 @@ var _ = Describe("Executor", func() {
 			cfg := server.MonitorConfig(GinkgoT().TempDir())
 			cfg.User = role
 			cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout
-			superPool = pg.NewPool(cfg, 2, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
+			superPool = pg.NewPool(cfg, 2, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 			DeferCleanup(superPool.Close)
 		})
 
@@ -624,18 +590,12 @@ var _ = Describe("Executor", func() {
 		})
 	})
 
-	It("hands a broken connection back so the pool replaces it", func(ctx SpecContext) {
-		pid := jobFor("SELECT 'a' AS datname, pg_backend_pid() AS value")
-		first := exec.Run(ctx, pid)
-		Expect(first.Err).NotTo(HaveOccurred())
-		Expect(server.Exec(ctx, "SELECT pg_terminate_backend("+formatPID(first.Samples[0].Value)+")")).To(Succeed())
-
-		dead := exec.Run(ctx, pid)
+	It("runs the next job after a run whose backend was terminated", func(ctx SpecContext) {
+		dead := exec.Run(ctx, jobFor(selfTerminate))
 		Expect(dead.Outcome).To(Equal(selfmetrics.OutcomeError))
 
-		next := exec.Run(ctx, pid)
+		next := exec.Run(ctx, jobFor("SELECT 'a' AS datname, 1 AS value"))
 		Expect(next.Err).NotTo(HaveOccurred())
-		Expect(next.Samples[0].Value).NotTo(Equal(first.Samples[0].Value))
 	})
 
 	It("reports a database that refuses the connection as denied on every run, also during the backoff", func(ctx SpecContext) {
@@ -665,21 +625,7 @@ var _ = Describe("Executor on a pool of one connection", func() {
 
 	pidJob := func() planner.Job { return jobFor("SELECT 'a' AS datname, pg_backend_pid() AS value") }
 
-	It("keeps a session that turned default_transaction_read_only off from writing", func(ctx SpecContext) {
-		res := exec.Run(ctx, jobFor("SELECT 'a' AS datname, 1 AS value",
-			withPredicate("SELECT set_config('default_transaction_read_only', 'off', false) IS NOT NULL")))
-		Expect(res.Err).NotTo(HaveOccurred())
-
-		res = exec.Run(ctx, jobFor("CREATE TEMP TABLE t AS SELECT 1 AS v"))
-		var pgErr *pgconn.PgError
-		Expect(errors.As(res.Err, &pgErr)).To(BeTrue(), "error: %v", res.Err)
-		Expect(pgErr.Code).To(Equal("25006"))
-	})
-
-	It("cancels the statement and replaces the connection on a column mismatch", func(ctx SpecContext) {
-		first := exec.Run(ctx, pidJob())
-		Expect(first.Err).NotTo(HaveOccurred())
-
+	It("cancels the statement on a column mismatch and frees the connection slot", func(ctx SpecContext) {
 		start := time.Now()
 		res := exec.Run(ctx, jobFor("SELECT generate_series(1, 50000000) AS a, 1 AS b", func(d *queries.Definition) {
 			d.Columns = map[string]queries.Column{"a": {Name: "a", Role: queries.RoleLabel, Usage: queries.UsageLabel}}
@@ -688,9 +634,7 @@ var _ = Describe("Executor on a pool of one connection", func() {
 		Expect(time.Since(start)).To(BeNumerically("<", 2*time.Second))
 		Expect(res.Err).To(MatchError(queries.ErrColumnMismatch))
 
-		again := exec.Run(ctx, pidJob())
-		Expect(again.Err).NotTo(HaveOccurred())
-		Expect(again.Samples[0].Value).NotTo(Equal(first.Samples[0].Value), "the connection was replaced")
+		Expect(exec.Run(ctx, pidJob()).Err).NotTo(HaveOccurred())
 	})
 
 	It("gets a connection within 2 s after a panic", func(ctx SpecContext) {
@@ -714,14 +658,8 @@ var _ = Describe("Result.ConnectionLost", func() {
 		exec = newExecutor(newPool(l), l)
 	})
 
-	It("is set when the backend was terminated", func(ctx SpecContext) {
-		pid := jobFor("SELECT 'a' AS datname, pg_backend_pid() AS value")
-		first := exec.Run(ctx, pid)
-		Expect(first.Err).NotTo(HaveOccurred())
-		Expect(first.ConnectionLost).To(BeFalse())
-		Expect(server.Exec(ctx, "SELECT pg_terminate_backend("+formatPID(first.Samples[0].Value)+")")).To(Succeed())
-
-		dead := exec.Run(ctx, pid)
+	It("is set when the backend was terminated during the run", func(ctx SpecContext) {
+		dead := exec.Run(ctx, jobFor(selfTerminate))
 		Expect(dead.Outcome).To(Equal(selfmetrics.OutcomeError))
 		Expect(dead.ConnectionLost).To(BeTrue())
 	})
@@ -730,7 +668,7 @@ var _ = Describe("Result.ConnectionLost", func() {
 		cfg := server.MonitorConfig(GinkgoT().TempDir())
 		Expect(os.WriteFile(cfg.PasswordFile, []byte("wrong\n"), 0o600)).To(Succeed())
 		cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout
-		pool := pg.NewPool(cfg, 4, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
+		pool := pg.NewPool(cfg, 4, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(pool.Close)
 		wrong := newExecutor(pool, l)
 
@@ -764,12 +702,12 @@ var _ = Describe("Result.ConnectionLost", func() {
 	It("is not set when the caller's context is cancelled while the run waits for a pool slot", func(ctx SpecContext) {
 		cfg := server.MonitorConfig(GinkgoT().TempDir())
 		cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout
-		one := pg.NewPool(cfg, 1, time.Minute, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
+		one := pg.NewPool(cfg, 1, clocktesting.NewFakePassiveClock(time.Now()), logr.Logger{}, 0)
 		DeferCleanup(one.Close)
 
 		_, release, err := one.AcquireWithin(ctx, "postgres", 0)
 		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func() { release(false) })
+		DeferCleanup(func() { release() })
 
 		waitCtx, cancel := context.WithCancel(ctx)
 		time.AfterFunc(200*time.Millisecond, cancel)
@@ -803,4 +741,5 @@ var _ = Describe("Result.ConnectionLost", func() {
 	})
 })
 
-func formatPID(v float64) string { return strconv.FormatInt(int64(v), 10) }
+// selfTerminate is a query whose backend terminates itself, so the run loses its connection.
+const selfTerminate = "SELECT 'a' AS datname, 1 AS value FROM pg_terminate_backend(pg_backend_pid())"

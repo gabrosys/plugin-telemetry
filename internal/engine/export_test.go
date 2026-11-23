@@ -51,7 +51,7 @@ func RunWithBrokenBookkeeping(ctx context.Context, job planner.Job, n int) (erro
 		Postgres: settings.Postgres{Host: "127.0.0.1", Port: 1, User: "u", Database: "app", MaxConnections: 2},
 		Limits:   settings.Limits{QueryTimeout: time.Second, LockTimeout: time.Second},
 	}
-	e.swapPool(ctx, s, time.Minute)
+	e.swapPool(ctx, s)
 	// record dereferences the replanner first, so a nil one makes it panic.
 	e.plan = nil
 	key := snapshot.Key{Query: job.Query, Database: job.Database}
@@ -83,7 +83,7 @@ func RunWithBrokenBookkeeping(ctx context.Context, job planner.Job, n int) (erro
 	}
 	errorRuns, err = queryRuns(ctx, e, job, selfmetrics.OutcomeError)
 	if r := e.setRunner(nil); r != nil {
-		r.pool.Close(ctx)
+		r.pool.Close()
 	}
 	return errorRuns, kept, errors.Join(err, e.mp.Shutdown(ctx))
 }
@@ -201,10 +201,10 @@ func FactsRoundOnStop(ctx context.Context) (up int64) {
 		Limits:       settings.Limits{QueryTimeout: time.Second, LockTimeout: time.Second},
 		PlanInterval: time.Minute,
 	}
-	e.swapPool(ctx, s, time.Minute)
+	e.swapPool(ctx, s)
 	defer func() {
 		if r := e.setRunner(nil); r != nil {
-			r.pool.Close(ctx)
+			r.pool.Close()
 		}
 	}()
 	e.plan.current = &configuration{settings: s}
@@ -231,10 +231,10 @@ func FactsFailuresAfterPanicOnStop(ctx context.Context) int {
 		Limits:       settings.Limits{QueryTimeout: time.Second, LockTimeout: time.Second},
 		PlanInterval: time.Minute,
 	}
-	e.swapPool(ctx, s, time.Minute)
+	e.swapPool(ctx, s)
 	defer func() {
 		if r := e.setRunner(nil); r != nil {
-			r.pool.Close(ctx)
+			r.pool.Close()
 		}
 	}()
 	e.plan.current = &configuration{settings: s}
@@ -242,35 +242,6 @@ func FactsFailuresAfterPanicOnStop(ctx context.Context) int {
 	e.factsFailures = 3
 	e.factsRound(ctx, true)
 	return e.factsFailures
-}
-
-// IdleTimeoutAfterIdleOnlyApply applies a configuration, then one that differs in the idle timeout only,
-// and reports whether the pool is the same and the idle timeout it has.
-func IdleTimeoutAfterIdleOnlyApply(ctx context.Context) (kept bool, idle time.Duration, err error) {
-	e, err := newEngine(ctx, Options{Config: FileConfig("engine.yaml")}, nil)
-	if err != nil {
-		return false, 0, err
-	}
-	s := settings.Settings{
-		Postgres: settings.Postgres{Host: "127.0.0.1", Port: 1, User: "u", Database: "app", MaxConnections: 2},
-		Limits:   settings.Limits{QueryTimeout: time.Second, LockTimeout: time.Second},
-		Exporter: settings.Exporter{
-			Protocol: "http/protobuf", Endpoint: "http://127.0.0.1:1/v1/metrics", Compression: "none",
-			Interval: time.Second, Timeout: time.Second / 2, MaxPointsPerRequest: 100,
-		},
-		PlanInterval: time.Minute,
-	}
-	first := &configuration{settings: s, idleTimeout: time.Minute}
-	second := &configuration{settings: s, idleTimeout: 2 * time.Minute}
-	defer e.teardown(ctx)
-	if err := e.apply(ctx, nil, first); err != nil {
-		return false, 0, errors.Join(err, e.mp.Shutdown(ctx))
-	}
-	pool := e.runner.pool
-	if err := e.apply(ctx, first, second); err != nil {
-		return false, 0, errors.Join(err, e.mp.Shutdown(ctx))
-	}
-	return e.runner.pool == pool, pool.IdleTimeout(), e.mp.Shutdown(ctx)
 }
 
 // RunJobWhileRefused refuses a superuser session, then runs a job on the engine's runner, which a
@@ -318,9 +289,9 @@ func RunJobWhileRefused(ctx context.Context) (connections int, err error) {
 		Limits:       settings.Limits{QueryTimeout: time.Second, LockTimeout: time.Second},
 		PlanInterval: time.Minute,
 	}
-	e.swapPool(ctx, s, time.Minute)
-	defer e.teardown(ctx)
-	cur := &configuration{settings: s, idleTimeout: time.Minute}
+	e.swapPool(ctx, s)
+	defer e.teardown()
+	cur := &configuration{settings: s}
 	e.plan.current = cur
 	e.refuse(ctx, cur, map[string]bool{"superuser": true})
 	e.runJob(ctx, planner.Job{Query: "backends", Database: "app", Fingerprint: "f"})

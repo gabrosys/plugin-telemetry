@@ -7,11 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"hash"
-	"math"
 	"reflect"
 	"slices"
 	"sync"
-	"time"
 
 	"github.com/cloudnative-pg/machinery/pkg/log"
 
@@ -23,15 +21,11 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/sources"
 )
 
-// idleGrace is added to the longest query interval to get the pool's idle timeout.
-const idleGrace = 10 * time.Second
-
 // configuration is a loaded configuration with the definitions of its queries.
 type configuration struct {
 	settings       settings.Settings
 	result         sources.Result
 	defs           []queries.Definition // in the order of result.Entries
-	idleTimeout    time.Duration        // of the connection pool
 	exporterDigest string               // of the files the exporter reads
 }
 
@@ -75,7 +69,7 @@ func (e *engine) reload(ctx context.Context) error {
 		r.digest = hex.EncodeToString(h.Sum(nil))
 		e.files.Store(nil)
 		if r.current != nil {
-			e.teardown(ctx)
+			e.teardown()
 			r.idle(ctx)
 		}
 		return fmt.Errorf("load settings: %w", err)
@@ -196,7 +190,7 @@ func Definitions(cfg Config, s settings.Settings, res sources.Result) []queries.
 // define builds the configuration of s and res.
 func (r *replanner) define(s settings.Settings, res sources.Result) *configuration {
 	defs := Definitions(r.cfg, s, res)
-	return &configuration{settings: s, result: res, defs: defs, idleTimeout: idleTimeout(defs, s)}
+	return &configuration{settings: s, result: res, defs: defs}
 }
 
 // commit logs the warnings of next and makes it the configuration in force.
@@ -311,24 +305,6 @@ func (r *replanner) whilePlanned(job planner.Job, fn func()) {
 	if fp, ok := r.planned[snapshot.Key{Query: job.Query, Database: job.Database}]; ok && fp == job.Fingerprint {
 		fn()
 	}
-}
-
-// idleTimeout is the longest interval of the queries that can be planned, plus idleGrace. Facts only
-// remove queries from that set, so it is never shorter than the longest planned interval.
-func idleTimeout(defs []queries.Definition, s settings.Settings) time.Duration {
-	var longest time.Duration
-	for i := range defs {
-		d := &defs[i]
-		if d.Disabled != "" || s.ExcludedQuery(d.Key) {
-			continue
-		}
-		_, interval := planner.EffectiveInterval(d, s)
-		longest = max(longest, interval)
-	}
-	if longest > math.MaxInt64-idleGrace {
-		return time.Duration(math.MaxInt64)
-	}
-	return longest + idleGrace
 }
 
 // watchedFiles lists every file the settings name that the engine reads.

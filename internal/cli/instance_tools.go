@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/cloudnative-pg/machinery/pkg/log"
@@ -26,10 +25,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/sources"
 )
 
-const (
-	poolIdle = 30 * time.Second
-	absent   = "-"
-)
+const absent = "-"
 
 // config is a loaded configuration: the settings, the merged sources and their definitions.
 type config struct {
@@ -156,19 +152,19 @@ func connect(ctx context.Context, c *config) (*pg.Pool, planner.Facts, error) {
 	s := c.settings
 	pc := engine.PostgresConfig(s)
 	pc.ReadFile = c.read
-	pool := pg.NewPool(pc, s.Postgres.MaxConnections, poolIdle, clock.RealClock{},
+	pool := pg.NewPool(pc, s.Postgres.MaxConnections, clock.RealClock{},
 		log.FromContext(ctx).GetLogger(), 0)
 	ctx, cancel := context.WithTimeout(ctx, engine.FactsTimeout(s.Limits))
 	defer cancel()
 	conn, release, err := pool.AcquireNow(ctx, s.Postgres.Database)
 	if err != nil {
-		pool.Close(ctx)
+		pool.Close()
 		return nil, planner.Facts{}, fmt.Errorf("connect to PostgreSQL: %w", err)
 	}
 	facts, err := planner.GatherFacts(ctx, conn, pool.Guard())
-	release(err != nil)
+	release()
 	if err != nil {
-		pool.Close(ctx)
+		pool.Close()
 		return nil, planner.Facts{}, fmt.Errorf("gather facts: %w", err)
 	}
 
@@ -185,7 +181,7 @@ func runTest(ctx context.Context, w io.Writer, open func(context.Context) (engin
 	if err != nil {
 		return err
 	}
-	defer pool.Close(ctx)
+	defer pool.Close()
 
 	plan := planner.Build(c.defs, c.settings, facts)
 	server := facts.Version
@@ -315,7 +311,7 @@ func printConfig(ctx context.Context, w io.Writer, open func(context.Context) (e
 	clearEnv(ctx)
 	pool, facts, connectErr := connect(ctx, c)
 	if connectErr == nil {
-		pool.Close(ctx)
+		pool.Close()
 		b.WriteString("# plan\n")
 		b.WriteString(livePlan(planner.Build(c.defs, c.settings, facts)))
 	}

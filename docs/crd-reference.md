@@ -86,7 +86,7 @@ _Appears in:_
 
 | Field | Description | Validation |
 | --- | --- | --- |
-| `maxConnections` _integer_ | MaxConnections is the most database connections the sidecar opens for queries. The default is 4.<br />Every 10 seconds it also opens one more short connection, outside this cap, to see whether<br />PostgreSQL is shutting down, so the monitoring role needs a connection limit of maxConnections + 1<br />or more. | Minimum: 1 <br />Optional: \{\} <br /> |
+| `maxConnections` _integer_ | MaxConnections is the most database connections the sidecar has open at once. Each query run and<br />each facts round opens its own connection and closes it when it ends. The default is 4. | Minimum: 1 <br />Optional: \{\} <br /> |
 | `maxRowsPerQuery` _integer_ | MaxRowsPerQuery is the most rows one query may return. A query with more is stopped and exports<br />nothing in that run. The default is 10000. | Minimum: 1 <br />Optional: \{\} <br /> |
 | `maxSeriesPerQuery` _integer_ | MaxSeriesPerQuery is the most series one query may produce in one database. A query with more<br />exports nothing in that run. The default is 10000. | Minimum: 1 <br />Optional: \{\} <br /> |
 | `maxSeriesTotal` _integer_ | MaxSeriesTotal is the most series all queries may produce together. A result that would pass it is<br />not stored, and that query stops exporting until a later result fits. The default is 50000. | Minimum: 1 <br />Optional: \{\} <br /> |

@@ -262,7 +262,7 @@ var _ = Describe("SQL built-ins", func() {
 			pool := newPool(l)
 			conn, release, err := pool.AcquireWithin(ctx, "postgres", 0)
 			Expect(err).NotTo(HaveOccurred())
-			DeferCleanup(func() { release(false) })
+			DeferCleanup(func() { release() })
 
 			tx, err := conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 			Expect(err).NotTo(HaveOccurred())

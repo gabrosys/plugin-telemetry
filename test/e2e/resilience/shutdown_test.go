@@ -21,8 +21,8 @@ import (
 
 const (
 	shutdownCluster = "smart-shutdown"
-	// maxSmartShutdown is far below CNPG's 180 s smartShutdownTimeout and above the pool's hold: the 10 s shutdown
-	// probe plus the queries in flight.
+	// maxSmartShutdown is far below CNPG's 180 s smartShutdownTimeout and above the sidecar's hold: the runs in
+	// flight, each at most the query timeout plus 2 s.
 	maxSmartShutdown = time.Minute
 	exportWait       = 3 * time.Minute
 	shutdownPoll     = time.Second
@@ -54,7 +54,7 @@ var _ = Describe("smart shutdown", func() {
 			WithContext(ctx).WithTimeout(clusterTimeout).WithPolling(statePoll).Should(BeTrue(), "cluster ready")
 		Eventually(framework.PluginRolledOut).WithContext(ctx).WithArguments(c).
 			WithTimeout(3*time.Minute).WithPolling(statePoll).Should(BeTrue(), "plugin rolled out")
-		// The sidecar's sessions are what held the smart shutdown, so it must be exporting this Cluster first.
+		// The sidecar's sessions are what can hold the smart shutdown, so it must be exporting this Cluster first.
 		reader := framework.NewCollectorReader(cfg)
 		podName := shutdownCluster + "-1"
 		Eventually(func(ctx context.Context) (bool, error) {

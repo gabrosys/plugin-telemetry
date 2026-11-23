@@ -314,10 +314,8 @@ type QueryGroup struct {
 
 // Limits bounds what the queries may cost. A limit left out keeps its default.
 type Limits struct {
-	// MaxConnections is the most database connections the sidecar opens for queries. The default is 4.
-	// Every 10 seconds it also opens one more short connection, outside this cap, to see whether
-	// PostgreSQL is shutting down, so the monitoring role needs a connection limit of maxConnections + 1
-	// or more.
+	// MaxConnections is the most database connections the sidecar has open at once. Each query run and
+	// each facts round opens its own connection and closes it when it ends. The default is 4.
 	//
 	// +kubebuilder:validation:Minimum=1
 	// +optional

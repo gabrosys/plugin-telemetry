@@ -100,6 +100,9 @@ func gatedProxy(ctx context.Context, gate <-chan struct{}, started chan<- struct
 			upstream, err := d.DialContext(dialCtx, "tcp", target)
 			if err != nil {
 				GinkgoWriter.Println("dial the server:", err)
+				if cerr := client.Close(); cerr != nil {
+					GinkgoWriter.Println("close the client connection:", cerr)
+				}
 				return
 			}
 			mu.Lock()
@@ -112,18 +115,22 @@ func gatedProxy(ctx context.Context, gate <-chan struct{}, started chan<- struct
 					close(started)
 				}
 			}
-			go forward(client, upstream, nil, 0)
-			go forward(upstream, client, wait, delay)
+			go forward(ctx, client, upstream, nil, 0)
+			go forward(ctx, upstream, client, wait, delay)
 		}
 	}()
 	return uint16(port)
 }
 
 // forward copies src to dst, after wait is closed when it is not nil, holding each chunk for delay, and
-// closes dst when src ends.
-func forward(dst, src net.Conn, wait <-chan struct{}, delay time.Duration) {
+// closes dst when src ends. It gives up the wait when ctx ends.
+func forward(ctx context.Context, dst, src net.Conn, wait <-chan struct{}, delay time.Duration) {
 	if wait != nil {
-		<-wait
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return
+		}
 	}
 	defer func() {
 		if err := dst.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
@@ -230,6 +237,21 @@ var _ = Describe("Pool", func() {
 			Expect(conn.QueryRow(ctx, "SELECT 1").Scan(&one)).To(Succeed())
 			release()
 		}
+	})
+
+	It("closes a connection released mid-statement and frees its slot", func(ctx SpecContext) {
+		newPool(2)
+		conn, release, err := pool.AcquireWithin(ctx, "app", 2*time.Second)
+		Expect(err).NotTo(HaveOccurred())
+		rows, err := conn.Query(ctx, "SELECT generate_series(1, 100000)")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(rows.Close)
+		Expect(rows.Next()).To(BeTrue())
+
+		release()
+
+		Expect(conn.IsClosed()).To(BeTrue())
+		Expect(pool.FreeSlots()).To(Equal(2))
 	})
 
 	It("leaves the server's values in the session", func(ctx SpecContext) {

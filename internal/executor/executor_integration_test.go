@@ -486,7 +486,7 @@ var _ = Describe("Executor", func() {
 		Expect(again.Err).To(MatchError(pg.ErrBackoff), "the failed connect starts the backoff")
 	})
 
-	It("starts a run's deadline once it has a pool slot", func(ctx SpecContext) {
+	It("starts a run's deadline after its wait for a slot, once it has its connection", func(ctx SpecContext) {
 		l.QueryTimeout = 500 * time.Millisecond
 		cfg := server.MonitorConfig(GinkgoT().TempDir())
 		cfg.QueryTimeout, cfg.LockTimeout = l.QueryTimeout, l.LockTimeout

@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
 	"k8s.io/utils/clock"
 )
 
@@ -76,7 +79,8 @@ func (p *Pool) Guard() string { return p.guard }
 
 // AcquireWithin dials a connection to database. At the cap it waits at most maxWait for a slot (0 or less:
 // no limit) and then returns ErrNoSlot. After a failed connect it returns ErrBackoff until 1s, 2s, 4s ... up
-// to the maximum backoff have passed for that database. maxWait does not bound the connect, which keeps ctx and the connect timeout.
+// to the maximum backoff have passed for that database. maxWait does not bound the connect, which keeps ctx
+// and the connect timeout.
 func (p *Pool) AcquireWithin(ctx context.Context, database string, maxWait time.Duration) (*pgx.Conn, func(), error) {
 	return p.acquire(ctx, database, true, maxWait)
 }
@@ -201,8 +205,8 @@ func (p *Pool) releaser(ctx context.Context, conn *pgx.Conn, database string) fu
 	}
 }
 
-// release closes the connection before it frees the slot, so a dial that waits for the slot starts after
-// the goodbye.
+// release closes the connection, then frees the slot. When it returns, the backend has exited or closeTimeout
+// has passed, so a dial that takes the slot is not refused for a backend the role still counts.
 func (p *Pool) release(ctx context.Context, conn *pgx.Conn, database string) {
 	p.closeConn(ctx, conn, database)
 	p.mu.Lock()
@@ -224,12 +228,52 @@ func (p *Pool) notifyLocked() {
 	p.changed = make(chan struct{})
 }
 
-// closeConn ends the session within closeTimeout on WithoutCancel(ctx), so a cancelled ctx does not cut
-// the goodbye short; the socket is closed even when the goodbye fails, so the error is only logged.
+// closeConn ends the session within closeTimeout on WithoutCancel(ctx), so a cancelled ctx does not cut the
+// goodbye short. It sends Terminate and reads until the server closes the socket, which PostgreSQL does only
+// once the backend has exited, so when closeConn returns the backend has exited or closeTimeout has passed.
+// The socket is closed whatever fails, so errors are only logged.
 func (p *Pool) closeConn(ctx context.Context, conn *pgx.Conn, database string) {
+	if conn.IsClosed() {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
 	defer cancel()
-	if err := conn.Close(ctx); err != nil {
+	if err := syncClose(ctx, conn.PgConn()); err != nil {
 		p.log.V(1).Info("close connection", "database", database, "error", err.Error())
 	}
+}
+
+// syncClose takes the socket over from pc, sends Terminate and waits until the server closes the socket or ctx
+// ends, then closes the socket. When pc cannot hand the socket over, pc.Close closes it without waiting.
+func syncClose(ctx context.Context, pc *pgconn.PgConn) error {
+	if err := pc.SyncConn(ctx); err != nil {
+		return errors.Join(fmt.Errorf("sync the connection: %w", err), pc.Close(ctx))
+	}
+	hc, err := pc.Hijack()
+	if err != nil {
+		return errors.Join(fmt.Errorf("take over the connection: %w", err), pc.Close(ctx))
+	}
+	err = awaitServerClose(ctx, hc)
+	if cerr := hc.Conn.Close(); cerr != nil && !errors.Is(cerr, net.ErrClosed) {
+		err = errors.Join(err, fmt.Errorf("close the socket: %w", cerr))
+	}
+	return err
+}
+
+// awaitServerClose sends Terminate on hc and reads until the server closes the socket or ctx's deadline
+// passes.
+func awaitServerClose(ctx context.Context, hc *pgconn.HijackedConn) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := hc.Conn.SetDeadline(deadline); err != nil {
+			return fmt.Errorf("set the close deadline: %w", err)
+		}
+	}
+	hc.Frontend.Send(&pgproto3.Terminate{})
+	if err := hc.Frontend.Flush(); err != nil {
+		return fmt.Errorf("send terminate: %w", err)
+	}
+	if _, err := io.Copy(io.Discard, hc.Conn); err != nil {
+		return fmt.Errorf("wait for the server to close the connection: %w", err)
+	}
+	return nil
 }

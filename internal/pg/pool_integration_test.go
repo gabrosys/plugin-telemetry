@@ -5,6 +5,8 @@ package pg_test
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"os"
 	"strconv"
 	"sync"
@@ -60,6 +62,92 @@ func plainConn(ctx context.Context) *pgx.Conn {
 	return conn
 }
 
+// gatedProxy forwards to the test server. The client's bytes reach the server delay after they arrive.
+// On the first connection they also wait for gate, when gate is not nil, so that dial stays in flight
+// with its backend already started; started, when not nil, is closed when that connection arrives. When
+// one side ends, the proxy closes the other, so a client sees the server close its connection.
+func gatedProxy(ctx context.Context, gate <-chan struct{}, started chan<- struct{}, delay time.Duration) uint16 {
+	GinkgoHelper()
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
+	Expect(err).NotTo(HaveOccurred())
+	_, portText, err := net.SplitHostPort(ln.Addr().String())
+	Expect(err).NotTo(HaveOccurred())
+	port, err := strconv.ParseUint(portText, 10, 16)
+	Expect(err).NotTo(HaveOccurred())
+
+	var mu sync.Mutex
+	var conns []net.Conn
+	DeferCleanup(func() {
+		Expect(ln.Close()).To(Succeed())
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				GinkgoWriter.Println("close proxied connection:", err)
+			}
+		}
+	})
+	target := net.JoinHostPort(server.Host, strconv.Itoa(int(server.Port)))
+	dialCtx := context.WithoutCancel(ctx)
+	go func() {
+		var d net.Dialer
+		for first := true; ; first = false {
+			client, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			upstream, err := d.DialContext(dialCtx, "tcp", target)
+			if err != nil {
+				GinkgoWriter.Println("dial the server:", err)
+				return
+			}
+			mu.Lock()
+			conns = append(conns, client, upstream)
+			mu.Unlock()
+			var wait <-chan struct{}
+			if first {
+				wait = gate
+				if started != nil {
+					close(started)
+				}
+			}
+			go forward(client, upstream, nil, 0)
+			go forward(upstream, client, wait, delay)
+		}
+	}()
+	return uint16(port)
+}
+
+// forward copies src to dst, after wait is closed when it is not nil, holding each chunk for delay, and
+// closes dst when src ends.
+func forward(dst, src net.Conn, wait <-chan struct{}, delay time.Duration) {
+	if wait != nil {
+		<-wait
+	}
+	defer func() {
+		if err := dst.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			GinkgoWriter.Println("close forwarded connection:", err)
+		}
+	}()
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := src.Read(buf)
+		if n > 0 {
+			time.Sleep(delay)
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return
+			}
+		}
+		if err != nil {
+			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+				GinkgoWriter.Println("forward:", err)
+			}
+			return
+		}
+	}
+}
+
 func backendPID(ctx context.Context, conn *pgx.Conn) uint32 {
 	GinkgoHelper()
 	var pid uint32
@@ -95,11 +183,53 @@ var _ = Describe("Pool", func() {
 		release()
 
 		Expect(conn.IsClosed()).To(BeTrue())
+		var n int
+		Expect(plainConn(ctx).QueryRow(ctx, "SELECT count(*) FROM pg_stat_activity WHERE pid = $1", pid).Scan(&n)).To(Succeed())
+		Expect(n).To(BeZero())
+	})
+
+	It("returns from release only once the backend has left pg_stat_activity", func(ctx SpecContext) {
+		newPool(1)
 		plain := plainConn(ctx)
-		Eventually(func() (n int, err error) {
-			err = plain.QueryRow(ctx, "SELECT count(*) FROM pg_stat_activity WHERE pid = $1", pid).Scan(&n)
-			return n, err
-		}).WithTimeout(2 * time.Second).WithPolling(20 * time.Millisecond).Should(BeZero())
+		for i := range 100 {
+			conn, release, err := pool.AcquireWithin(ctx, "app", 2*time.Second)
+			Expect(err).NotTo(HaveOccurred())
+			pid := backendPID(ctx, conn)
+			release()
+
+			var n int
+			Expect(plain.QueryRow(ctx, "SELECT count(*) FROM pg_stat_activity WHERE pid = $1", pid).Scan(&n)).To(Succeed())
+			Expect(n).To(BeZero(), "cycle %d: backend %d still in pg_stat_activity after release", i, pid)
+		}
+	})
+
+	It("returns from release once the backend has exited, also when its bytes reach the server late", func(ctx SpecContext) {
+		cfg.Host, cfg.Port = "127.0.0.1", gatedProxy(ctx, nil, nil, 100*time.Millisecond)
+		newPool(1)
+		plain := plainConn(ctx)
+		conn, release, err := pool.AcquireWithin(ctx, "app", 10*time.Second)
+		Expect(err).NotTo(HaveOccurred())
+		pid := backendPID(ctx, conn)
+		release()
+
+		var n int
+		Expect(plain.QueryRow(ctx, "SELECT count(*) FROM pg_stat_activity WHERE pid = $1", pid).Scan(&n)).To(Succeed())
+		Expect(n).To(BeZero(), "backend %d still in pg_stat_activity after release", pid)
+	})
+
+	It("stays within a role connection limit equal to maxConns", func(ctx SpecContext) {
+		const role = "cnpg_limit_one"
+		DeferCleanup(func(ctx SpecContext) { Expect(server.Exec(ctx, "DROP ROLE IF EXISTS "+role)).To(Succeed()) })
+		Expect(server.Exec(ctx, "CREATE ROLE "+role+" LOGIN CONNECTION LIMIT 1 PASSWORD '"+pgtest.MonitorPassword+"'")).To(Succeed())
+		cfg.User = role
+		newPool(1)
+		for i := range 200 {
+			conn, release, err := pool.AcquireWithin(ctx, "app", 2*time.Second)
+			Expect(err).NotTo(HaveOccurred(), "cycle %d", i)
+			var one int
+			Expect(conn.QueryRow(ctx, "SELECT 1").Scan(&one)).To(Succeed())
+			release()
+		}
 	})
 
 	It("leaves the server's values in the session", func(ctx SpecContext) {
@@ -286,7 +416,7 @@ var _ = Describe("Pool", func() {
 		Expect(conn.QueryRow(ctx, "SELECT 1").Scan(&one)).NotTo(Succeed())
 		release()
 
-		replacement, release, err := pool.AcquireWithin(ctx, "app", 0)
+		replacement, release, err := pool.AcquireWithin(ctx, "app", 2*time.Second)
 		Expect(err).NotTo(HaveOccurred())
 		defer release()
 		Expect(replacement.IsClosed()).To(BeFalse())
@@ -514,6 +644,31 @@ var _ = Describe("Pool", func() {
 		release()
 
 		Eventually(conn.IsClosed).WithTimeout(time.Second).Should(BeTrue())
+	})
+
+	It("closes the connection of a dial that ends after Close, and frees its slot", func(ctx SpecContext) {
+		gate := make(chan struct{})
+		started := make(chan struct{})
+		cfg.Host, cfg.Port = "127.0.0.1", gatedProxy(ctx, gate, started, 0)
+		newPool(1)
+		plain := plainConn(ctx)
+
+		done := make(chan error, 1)
+		go func() {
+			defer GinkgoRecover()
+			_, _, acquireErr := pool.AcquireWithin(ctx, "app", 0)
+			done <- acquireErr
+		}()
+		Eventually(started).Should(BeClosed())
+		pool.Close()
+		close(gate)
+		Eventually(done).WithTimeout(10 * time.Second).Should(Receive(MatchError(pg.ErrPoolClosed)))
+
+		var n int
+		Expect(plain.QueryRow(ctx, "SELECT count(*) FROM pg_stat_activity WHERE usename = $1 AND datname = 'app' "+
+			"AND application_name = 'cnpg_otel_engine'", pgtest.MonitorUser).Scan(&n)).To(Succeed())
+		Expect(n).To(BeZero(), "the gated dial's backend has left")
+		Expect(pool.FreeSlots()).To(Equal(1))
 	})
 
 	It("fails AcquireWithin after Close", func(ctx SpecContext) {

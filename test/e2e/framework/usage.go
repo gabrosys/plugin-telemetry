@@ -26,7 +26,7 @@ type Usage struct {
 }
 
 // statsSummary is the part of the kubelet's stats summary ParseUsage reads
-// (k8s.io/kubelet/pkg/apis/stats/v1alpha1 types.go).
+// (k8s.io/kubelet v0.37.2 pkg/apis/stats/v1alpha1/types.go).
 type statsSummary struct {
 	Pods []struct {
 		PodRef struct {

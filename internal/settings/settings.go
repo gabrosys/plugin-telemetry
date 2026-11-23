@@ -78,9 +78,11 @@ type Exclude struct {
 	Databases []string `yaml:"databases"`
 }
 
-// Exporter takes the keys endpoint, compression, timeout and tls caFile, certFile and keyFile from the
-// OTel declarative configuration OTLP exporter, in camelCase; protocol, headersFile, interval,
-// maxPointsPerRequest and tls serverName and minVersion are the plugin's own.
+// Exporter takes endpoint, compression, timeout and tls caFile, certFile and keyFile from the OTLP metric
+// exporter of the OTel declarative configuration (opentelemetry-configuration v1.2.0), and interval from its
+// periodic metric reader, in camelCase and as durations. maxPointsPerRequest is the reader's
+// max_export_batch_size/development under another name. protocol, headersFile and tls serverName and
+// minVersion are the plugin's own.
 type Exporter struct {
 	Protocol            string        `yaml:"protocol"` // "http/protobuf" or "grpc"
 	Endpoint            string        `yaml:"endpoint"` // full URL; http:// is plaintext, https:// is TLS

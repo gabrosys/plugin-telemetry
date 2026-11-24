@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
 	"k8s.io/utils/clock"
 )
 
@@ -17,9 +20,6 @@ const (
 	initialBackoff    = time.Second
 	defaultMaxBackoff = 30 * time.Second
 	closeTimeout      = 2 * time.Second
-	// cannotConnectNow is SQLSTATE 57P03: the server accepts no new session because it is shutting down,
-	// starting up or in recovery.
-	cannotConnectNow = "57P03"
 )
 
 // ErrPoolClosed is returned by AcquireWithin once the pool is closed.
@@ -28,7 +28,8 @@ var ErrPoolClosed = errors.New("connection pool is closed")
 // ErrNoSlot is returned by AcquireWithin when no slot came free within maxWait.
 var ErrNoSlot = errors.New("no connection slot")
 
-// Pool hands out connections to databases of one server, with at most maxConns open in total.
+// Pool hands out connections to databases of one server, with at most maxConns open in total. It keeps
+// no idle connection: release closes each one, so no session stays in a database between runs.
 type Pool struct {
 	cfg        Config
 	guard      string
@@ -39,25 +40,12 @@ type Pool struct {
 
 	// mu guards every field below.
 	mu sync.Mutex
-	// idleTimeout is how long a connection may sit idle before CloseIdle closes it.
-	idleTimeout time.Duration
-	// total counts open connections, idle or busy, and dials in flight.
-	total int
-	// idle is ordered from least to most recently released.
-	idle   []*idleConn
+	// total counts open connections and dials in flight.
+	total  int
 	failed map[string]*backoff
 	closed bool
-	// draining is set while PostgreSQL refuses new sessions (57P03): release closes connections instead of
-	// keeping them. A successful dial that began while it was set clears it.
-	draining bool
-	// changed is closed and replaced whenever a slot or an idle connection becomes available.
+	// changed is closed and replaced whenever a slot becomes available.
 	changed chan struct{}
-}
-
-type idleConn struct {
-	conn     *pgx.Conn
-	database string
-	since    time.Time
 }
 
 type backoff struct {
@@ -69,17 +57,16 @@ type backoff struct {
 // NewPool returns a pool that opens no connection until AcquireWithin or AcquireNow. log receives the
 // errors that have no caller to return to; the zero Logger discards them. maxBackoff caps the wait before
 // reconnecting to a failing database; maxBackoff <= 0 keeps the default 30s.
-func NewPool(c Config, maxConns int, idleTimeout time.Duration, clk clock.PassiveClock, log logr.Logger, maxBackoff time.Duration) *Pool {
+func NewPool(c Config, maxConns int, clk clock.PassiveClock, log logr.Logger, maxBackoff time.Duration) *Pool {
 	p := &Pool{
-		cfg:         c,
-		guard:       GuardSQL(c),
-		maxConns:    max(1, maxConns),
-		idleTimeout: idleTimeout,
-		maxBackoff:  defaultMaxBackoff,
-		clk:         clk,
-		failed:      make(map[string]*backoff),
-		changed:     make(chan struct{}),
-		log:         log,
+		cfg:        c,
+		guard:      GuardSQL(c),
+		maxConns:   max(1, maxConns),
+		maxBackoff: defaultMaxBackoff,
+		clk:        clk,
+		failed:     make(map[string]*backoff),
+		changed:    make(chan struct{}),
+		log:        log,
 	}
 	if maxBackoff > 0 {
 		p.maxBackoff = maxBackoff
@@ -90,21 +77,21 @@ func NewPool(c Config, maxConns int, idleTimeout time.Duration, clk clock.Passiv
 // Guard returns GuardSQL of the pool's Config, to run after each BEGIN.
 func (p *Pool) Guard() string { return p.guard }
 
-// AcquireWithin returns a connection to database. At the cap it closes the least recently used idle
-// connection of another database, or waits at most maxWait for a slot (0 or less: no limit) and then returns
-// ErrNoSlot. After a failed connect it returns ErrBackoff until 1s, 2s, 4s ... up to the maximum backoff
-// have passed for that database. maxWait does not bound the connect, which keeps ctx and the connect timeout.
-func (p *Pool) AcquireWithin(ctx context.Context, database string, maxWait time.Duration) (*pgx.Conn, func(broken bool), error) {
+// AcquireWithin dials a connection to database. At the cap it waits at most maxWait for a slot (0 or less:
+// no limit) and then returns ErrNoSlot. After a failed connect it returns ErrBackoff until 1s, 2s, 4s ... up
+// to the maximum backoff have passed for that database. maxWait does not bound the connect, which keeps ctx
+// and the connect timeout.
+func (p *Pool) AcquireWithin(ctx context.Context, database string, maxWait time.Duration) (*pgx.Conn, func(), error) {
 	return p.acquire(ctx, database, true, maxWait)
 }
 
 // AcquireNow is AcquireWithin without the backoff or the wait limit: it connects even while database waits before
 // reconnecting, and a successful connect ends that wait.
-func (p *Pool) AcquireNow(ctx context.Context, database string) (*pgx.Conn, func(broken bool), error) {
+func (p *Pool) AcquireNow(ctx context.Context, database string) (*pgx.Conn, func(), error) {
 	return p.acquire(ctx, database, false, 0)
 }
 
-func (p *Pool) acquire(ctx context.Context, database string, withBackoff bool, maxWait time.Duration) (*pgx.Conn, func(broken bool), error) {
+func (p *Pool) acquire(ctx context.Context, database string, withBackoff bool, maxWait time.Duration) (*pgx.Conn, func(), error) {
 	var giveUp <-chan time.Time // nil blocks forever: no limit
 	if maxWait > 0 {
 		timer := time.NewTimer(maxWait)
@@ -118,70 +105,35 @@ func (p *Pool) acquire(ctx context.Context, database string, withBackoff bool, m
 			return nil, nil, ErrPoolClosed
 		}
 
-		if conn := p.takeIdleLocked(database); conn != nil {
-			p.mu.Unlock()
-			return conn, p.releaser(ctx, conn, database), nil
-		}
-
 		if b := p.failed[database]; withBackoff && b != nil && p.clk.Now().Before(b.retryAt) {
 			last := b.last
 			p.mu.Unlock()
 			return nil, nil, fmt.Errorf("database %s: %w: %w", database, ErrBackoff, last)
 		}
 
-		var evicted *idleConn
-		draining := p.draining
-		switch {
-		case p.total < p.maxConns:
+		if p.total < p.maxConns {
 			p.total++
-		case len(p.idle) > 0:
-			evicted = p.idle[0]
-			p.idle = p.idle[1:]
-		default:
-			wait := p.changed
 			p.mu.Unlock()
-			select {
-			case <-wait:
-				continue
-			case <-giveUp:
-				// select picks at random when the context ended as well.
-				if err := ctx.Err(); err != nil {
-					return nil, nil, fmt.Errorf("wait for a connection slot: %w", err)
-				}
-				return nil, nil, fmt.Errorf("wait for a connection slot: %w", ErrNoSlot)
-			case <-ctx.Done():
-				return nil, nil, fmt.Errorf("wait for a connection slot: %w", ctx.Err())
-			}
+			return p.dial(ctx, database)
 		}
+		wait := p.changed
 		p.mu.Unlock()
-
-		if evicted != nil {
-			p.closeConn(ctx, evicted.conn, evicted.database)
+		select {
+		case <-wait:
+		case <-giveUp:
+			// select picks at random when the context ended as well.
+			if err := ctx.Err(); err != nil {
+				return nil, nil, fmt.Errorf("wait for a connection slot: %w", err)
+			}
+			return nil, nil, fmt.Errorf("wait for a connection slot: %w", ErrNoSlot)
+		case <-ctx.Done():
+			return nil, nil, fmt.Errorf("wait for a connection slot: %w", ctx.Err())
 		}
-		return p.dial(ctx, database, draining)
 	}
 }
 
-// takeIdleLocked removes and returns the most recently released live connection to database.
-func (p *Pool) takeIdleLocked(database string) *pgx.Conn {
-	for i := len(p.idle) - 1; i >= 0; i-- {
-		ic := p.idle[i]
-		if ic.database != database {
-			continue
-		}
-		p.idle = append(p.idle[:i], p.idle[i+1:]...)
-		if ic.conn.IsClosed() {
-			p.total--
-			p.notifyLocked()
-			continue
-		}
-		return ic.conn
-	}
-	return nil
-}
-
-// dial opens a connection. A success ends the drain only when draining was already set as the dial began.
-func (p *Pool) dial(ctx context.Context, database string, draining bool) (*pgx.Conn, func(bool), error) {
+// dial opens a connection in a slot acquire has taken.
+func (p *Pool) dial(ctx context.Context, database string) (*pgx.Conn, func(), error) {
 	conn, err := p.connect(ctx, database)
 	if err != nil {
 		// ConnectError.Config holds the password; keep only the cause.
@@ -209,20 +161,15 @@ func (p *Pool) dial(ctx context.Context, database string, draining bool) (*pgx.C
 		return nil, nil, fmt.Errorf("connect to database %s as %s: %w", database, p.cfg.User, err)
 	}
 	delete(p.failed, database)
-	if draining {
-		p.draining = false
-	}
 	closed := p.closed
-	if closed {
-		p.total--
-	}
 	p.mu.Unlock()
 
+	release := p.releaser(ctx, conn, database)
 	if closed {
-		p.closeConn(ctx, conn, database)
+		release()
 		return nil, nil, ErrPoolClosed
 	}
-	return conn, p.releaser(ctx, conn, database), nil
+	return conn, release, nil
 }
 
 func (p *Pool) connect(ctx context.Context, database string) (*pgx.Conn, error) {
@@ -249,115 +196,33 @@ func BackoffDelay(failures int, maxBackoff time.Duration) time.Duration {
 	return min(delay, maxBackoff)
 }
 
-// releaser returns the function that hands conn back; only its first call has an effect. ctx is
-// accepted for contextcheck; closing conn uses WithoutCancel(ctx) and the 2 s closeTimeout.
-func (p *Pool) releaser(ctx context.Context, conn *pgx.Conn, database string) func(bool) {
+// releaser returns the function that closes conn and frees its slot; only its first call has an effect.
+// ctx is accepted for contextcheck and reaches closeConn.
+func (p *Pool) releaser(ctx context.Context, conn *pgx.Conn, database string) func() {
 	var once sync.Once
-	return func(broken bool) {
-		once.Do(func() { p.release(ctx, conn, database, broken) })
+	return func() {
+		once.Do(func() { p.release(ctx, conn, database) })
 	}
 }
 
-func (p *Pool) release(ctx context.Context, conn *pgx.Conn, database string, broken bool) {
+// release closes the connection, then frees the slot. For a connection that is still open and idle, release
+// returns once the backend has exited or closeTimeout has passed. For one that pgx already closed after an
+// error, or one released mid-statement, the slot is freed while the backend may still count against the
+// role's limit.
+func (p *Pool) release(ctx context.Context, conn *pgx.Conn, database string) {
+	p.closeConn(ctx, conn, database)
 	p.mu.Lock()
-	// A connection left inside a transaction, open or failed, would carry it into the next run.
-	if broken || conn.IsClosed() || conn.PgConn().TxStatus() != 'I' || p.closed || p.draining {
-		p.total--
-		p.notifyLocked()
-		p.mu.Unlock()
-		p.closeConn(ctx, conn, database)
-		return
-	}
-	p.idle = append(p.idle, &idleConn{conn: conn, database: database, since: p.clk.Now()})
+	p.total--
 	p.notifyLocked()
 	p.mu.Unlock()
 }
 
-// SetIdleTimeout sets the idle timeout the next CloseIdle uses.
-func (p *Pool) SetIdleTimeout(d time.Duration) {
+// Close makes AcquireWithin and AcquireNow fail with ErrPoolClosed. Connections in use are closed when they
+// are released.
+func (p *Pool) Close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.idleTimeout = d
-}
-
-// IdleTimeout returns the idle timeout in force.
-func (p *Pool) IdleTimeout() time.Duration {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.idleTimeout
-}
-
-// CloseIdle closes the idle connections that have been unused for the idle timeout. ctx is accepted
-// for contextcheck; each close uses WithoutCancel(ctx) and the 2 s closeTimeout.
-func (p *Pool) CloseIdle(ctx context.Context) {
-	p.mu.Lock()
-	now := p.clk.Now()
-	var stale []*idleConn
-	kept := p.idle[:0]
-	for _, ic := range p.idle {
-		if now.Sub(ic.since) >= p.idleTimeout {
-			stale = append(stale, ic)
-			continue
-		}
-		kept = append(kept, ic)
-	}
-	p.idle = kept
-	p.total -= len(stale)
-	if len(stale) > 0 {
-		p.notifyLocked()
-	}
-	p.mu.Unlock()
-
-	for _, ic := range stale {
-		p.closeConn(ctx, ic.conn, ic.database)
-	}
-}
-
-// Probe dials database once and closes the connection at once. PostgreSQL answers 57P03 (cannot_connect_now)
-// while it shuts down, starts up or recovers: it accepts no new session, and the pool's sessions only hold
-// it, so the pool closes its idle connections and release closes every connection until a dial succeeds.
-// Any other error, such as 53300 while the server is out of slots, leaves the sessions alone. ctx is
-// accepted for contextcheck; each close uses WithoutCancel(ctx) and the 2 s closeTimeout.
-func (p *Pool) Probe(ctx context.Context, database string) {
-	conn, err := p.connect(ctx, database)
-	var pgErr *pgconn.PgError
-	switch {
-	case err == nil:
-		p.closeConn(ctx, conn, database)
-	case errors.As(err, &pgErr) && pgErr.Code == cannotConnectNow:
-		p.mu.Lock()
-		p.draining = true
-		stale := p.takeAllIdleLocked()
-		p.mu.Unlock()
-		for _, ic := range stale {
-			p.closeConn(ctx, ic.conn, ic.database)
-		}
-	default:
-		p.log.V(1).Info("probe connection", "database", database, "error", err.Error())
-	}
-}
-
-// takeAllIdleLocked removes and returns every idle connection.
-func (p *Pool) takeAllIdleLocked() []*idleConn {
-	stale := p.idle
-	p.idle = nil
-	p.total -= len(stale)
-	p.notifyLocked()
-	return stale
-}
-
-// Close closes the idle connections and makes AcquireWithin fail. Connections still in use are
-// closed when they are released. ctx is accepted for contextcheck;
-// each close uses WithoutCancel(ctx) and the 2 s closeTimeout.
-func (p *Pool) Close(ctx context.Context) {
-	p.mu.Lock()
 	p.closed = true
-	stale := p.takeAllIdleLocked()
-	p.mu.Unlock()
-
-	for _, ic := range stale {
-		p.closeConn(ctx, ic.conn, ic.database)
-	}
 }
 
 func (p *Pool) notifyLocked() {
@@ -365,12 +230,54 @@ func (p *Pool) notifyLocked() {
 	p.changed = make(chan struct{})
 }
 
-// closeConn ends the session; the socket is closed even when the goodbye fails, so the error is only logged.
-// A cancelled ctx must not cut the goodbye short, so it is detached with WithoutCancel.
+// closeConn ends the session within closeTimeout on WithoutCancel(ctx), so a cancelled ctx does not cut the
+// goodbye short. It sends Terminate and reads until the server closes the socket, which PostgreSQL does only
+// once the backend has exited, so when closeConn returns the backend has exited or closeTimeout has passed.
+// A ping SyncConn sends can run up to cancelDeadlineDelay past closeTimeout. A connection pgx has already
+// closed is left to pgx, which closes the socket in the background. The socket is closed whatever fails, so
+// errors are only logged.
 func (p *Pool) closeConn(ctx context.Context, conn *pgx.Conn, database string) {
+	if conn.IsClosed() {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
 	defer cancel()
-	if err := conn.Close(ctx); err != nil {
+	if err := syncClose(ctx, conn.PgConn()); err != nil {
 		p.log.V(1).Info("close connection", "database", database, "error", err.Error())
 	}
+}
+
+// syncClose takes the socket over from pc, sends Terminate and waits until the server closes the socket or
+// ctx's deadline passes, then closes the socket. When pc cannot hand the socket over, pc.Close closes it without waiting.
+func syncClose(ctx context.Context, pc *pgconn.PgConn) error {
+	if err := pc.SyncConn(ctx); err != nil {
+		return errors.Join(fmt.Errorf("sync the connection: %w", err), pc.Close(ctx))
+	}
+	hc, err := pc.Hijack()
+	if err != nil {
+		return errors.Join(fmt.Errorf("take over the connection: %w", err), pc.Close(ctx))
+	}
+	err = awaitServerClose(ctx, hc)
+	if cerr := hc.Conn.Close(); cerr != nil && !errors.Is(cerr, net.ErrClosed) {
+		err = errors.Join(err, fmt.Errorf("close the socket: %w", cerr))
+	}
+	return err
+}
+
+// awaitServerClose sends Terminate on hc and reads until the server closes the socket or ctx's deadline
+// passes.
+func awaitServerClose(ctx context.Context, hc *pgconn.HijackedConn) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := hc.Conn.SetDeadline(deadline); err != nil {
+			return fmt.Errorf("set the close deadline: %w", err)
+		}
+	}
+	hc.Frontend.Send(&pgproto3.Terminate{})
+	if err := hc.Frontend.Flush(); err != nil {
+		return fmt.Errorf("send terminate: %w", err)
+	}
+	if _, err := io.Copy(io.Discard, hc.Conn); err != nil {
+		return fmt.Errorf("wait for the server to close the connection: %w", err)
+	}
+	return nil
 }

@@ -1,4 +1,6 @@
-// Package operator serves the plugin's gRPC identity and lifecycle services and tracks the sidecar image they inject.
+// Package operator runs the plugin: it serves the cnpg-i Identity, OperatorLifecycle and Operator gRPC
+// services, reconciles the Cluster identities, tracks the sidecar image the lifecycle hook injects and
+// records the plugin's self-metrics.
 package operator
 
 import (

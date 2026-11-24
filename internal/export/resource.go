@@ -33,8 +33,10 @@ var fixedKeys = []attribute.Key{
 	semconv.K8SContainerNameKey,
 }
 
-// Resource builds design 6.6's resource from settings, the instance name (see Instance) and the
-// downward-API env (POD_NAME, POD_UID, NODE_NAME, NAMESPACE); ResourceAttributes add to it and never
+// Resource builds the exported resource: service.name is the cluster, service.namespace the namespace,
+// service.instance.id "<namespace>.<instance>.otel-metrics" (see Instance), and k8s.namespace.name,
+// k8s.pod.name, k8s.pod.uid and k8s.node.name come from NAMESPACE, POD_NAME, POD_UID and NODE_NAME when
+// set, with k8s.container.name when POD_NAME is set. ResourceAttributes add the other keys and never
 // supply a fixed key.
 func Resource(s settings.Settings, getenv func(string) string, instance string) *resource.Resource {
 	values := make(map[attribute.Key]string, len(s.ResourceAttributes)+8)

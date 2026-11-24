@@ -28,12 +28,12 @@ type TelemetryExporterList struct {
 	Items           []TelemetryExporter `json:"items"`
 }
 
-// TelemetryExporterSpec holds what every signal shares, then one section per signal.
+// TelemetryExporterSpec holds the OTLP connection, the resource attributes and the metrics settings.
 //
 // +kubebuilder:validation:XValidation:rule="(has(self.envFrom) && (has(self.envFrom.configMap) || has(self.envFrom.secret))) || (has(self.exporter) && has(self.exporter.endpoint))",message="set exporter.endpoint or envFrom"
 // +kubebuilder:validation:XValidation:rule="!has(self.exporter) || !has(self.exporter.timeout) || duration(self.exporter.timeout).getMilliseconds() * 2 <= (has(self.metrics) && has(self.metrics.interval) ? duration(self.metrics.interval).getMilliseconds() : 30000)",message="exporter.timeout times 2 must not exceed metrics.interval, which is 30s when not set"
 type TelemetryExporterSpec struct {
-	// Exporter is the OTLP connection every signal shares.
+	// Exporter is the OTLP connection.
 	//
 	// +optional
 	Exporter OTLPExporter `json:"exporter,omitempty"`
@@ -83,7 +83,7 @@ type TelemetryExporterSpec struct {
 	Metrics MetricsSpec `json:"metrics,omitempty"`
 }
 
-// OTLPExporter is the OTLP connection every signal shares.
+// OTLPExporter is the OTLP connection.
 //
 // +kubebuilder:validation:XValidation:rule=`!has(self.endpoint) || self.endpoint.matches(r'^https?://[^@/?#\s]+(/[^?#\s]*)?$')`,fieldPath=".endpoint",message="endpoint must be a base http(s) URL with a host, and no user info, query or fragment"
 // +kubebuilder:validation:XValidation:rule="!has(self.endpoint) || isURL(self.endpoint)",fieldPath=".endpoint",message="endpoint must parse as a URL"
@@ -312,12 +312,10 @@ type QueryGroup struct {
 	Queries []string `json:"queries"`
 }
 
-// Limits bounds what the queries may cost. A limit left unset keeps the sidecar's default.
+// Limits bounds what the queries may cost. A limit left out keeps its default.
 type Limits struct {
-	// MaxConnections is the most database connections the sidecar opens for queries. The default is 4.
-	// Every 10 seconds it also opens one more short connection, outside this cap, to see whether
-	// PostgreSQL is shutting down, so the monitoring role needs a connection limit of maxConnections + 1
-	// or more.
+	// MaxConnections is the most database connections the sidecar has open at once. Each query run and
+	// each facts round opens its own connection and closes it when it ends. The default is 4.
 	//
 	// +kubebuilder:validation:Minimum=1
 	// +optional

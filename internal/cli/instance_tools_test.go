@@ -17,6 +17,7 @@ import (
 
 	"github.com/gabrosys/plugin-telemetry/internal/cli"
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 // execute runs the root command with args and returns its standard output.
@@ -121,8 +122,7 @@ var _ = Describe("instance validate", func() {
 var _ = Describe("instance print-config", func() {
 	// withEndpoint copies engine-unreachable.yaml with another exporter endpoint.
 	withEndpoint := func(endpoint string) string {
-		raw, err := os.ReadFile(testdata("engine-unreachable.yaml"))
-		Expect(err).NotTo(HaveOccurred())
+		raw := fixture.Read(GinkgoTB(), "testdata", "engine-unreachable.yaml")
 		config := strings.Replace(string(raw), "http://127.0.0.1:4318/v1/metrics", endpoint, 1)
 		Expect(config).To(ContainSubstring(endpoint))
 		path := filepath.Join(GinkgoT().TempDir(), "engine.yaml")

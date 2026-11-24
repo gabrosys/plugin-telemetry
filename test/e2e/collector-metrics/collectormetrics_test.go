@@ -18,7 +18,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
@@ -57,19 +56,24 @@ const (
 	fencedFrozen = "fenced-frozen"
 	// primaryOnlyOnStandby: CNPG sets sync_replicas{observed} and the backup timestamps only on a primary
 	// (v1.30.1 pkg/management/postgres/webserver/metricserver/pg_collector.go:445-457) and
-	// manual_switchover_required only on the current primary (internal/management/controller/instance_controller.go:1012-1018).
+	// manual_switchover_required only on the current primary (internal/management/controller/instance_controller.go:1014-1020).
 	primaryOnlyOnStandby = "primary-only-on-standby"
 )
 
-// backupTimestamps stay 0 in e2e: no state takes a backup (R1).
+// backupTimestamps stay 0 in e2e: no state takes a backup.
 var backupTimestamps = []string{
 	"first_recoverability_point", "last_available_backup_timestamp", "last_failed_backup_timestamp",
 }
 
-// selfMeasuring are CNPG's metrics that measure its collector (pg_collector.go:112-141 at v1.30.1).
-var selfMeasuring = []string{
-	"collections_total", "collection_errors_total", "last_collection_error", "collection_duration_seconds",
-}
+// selfMeasuring is parity.SelfMeasuring without the cnpg_collector_ prefix.
+var selfMeasuring = func() []string {
+	out := make([]string, 0, len(parity.SelfMeasuring))
+	for _, m := range parity.SelfMeasuring {
+		out = append(out, strings.TrimPrefix(m, builtinPrefix))
+	}
+
+	return out
+}()
 
 // tallied is CNPG's list of built-in series on PostgreSQL 18 (pg_collector.go:112-272, 320-393 and wal.go:36-61,
 // 151-222 at v1.30.1), by metric without the cnpg_collector_ prefix and, for the three metrics with a value label,
@@ -85,7 +89,7 @@ var tallied = slices.Concat([]string{
 }, backupTimestamps, selfMeasuring)
 
 // frozenMetrics are the PostgreSQL-derived metrics CNPG keeps at their last value on a fenced instance
-// (pg_collector.go:402-409 at v1.30.1); sync_replicas{observed} is the fifth, by series.
+// (pg_collector.go:402-409 at v1.30.1); sync_replicas{observed} is checked by series (observedSeries).
 var frozenMetrics = []string{
 	"up", "pg_wal", "pg_wal_archive_status", "wal_records", "wal_fpi", "wal_bytes", "wal_buffers_full",
 	"postgres_version", "lo_pages",
@@ -339,10 +343,10 @@ var _ = Describe("collector-metrics", Ordered, func() {
 
 		namespace, err := framework.CreateNamespace(ctx, c, "cm")
 		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func(ctx SpecContext) {
-			Expect(client.IgnoreNotFound(c.Delete(ctx, namespace))).To(Succeed())
-		})
 		ns = namespace.Name
+		DeferCleanup(func(ctx SpecContext) {
+			Expect(framework.DeleteNamespace(ctx, c, ns, statePoll)).To(Succeed())
+		}, NodeTimeout(4*time.Minute))
 
 		exporter := framework.ExporterFor(ns, exporterName)
 		exporter.Spec.Metrics.Interval = &metav1.Duration{Duration: exportInterval}
@@ -353,13 +357,6 @@ var _ = Describe("collector-metrics", Ordered, func() {
 
 		create := func(cl *apiv1.Cluster) {
 			Expect(c.Create(ctx, cl)).To(Succeed())
-			// Runs before the namespace's cleanup: a namespace deleted around a live Cluster stays Terminating.
-			DeferCleanup(func(ctx SpecContext) {
-				Expect(client.IgnoreNotFound(c.Delete(ctx, cl))).To(Succeed())
-				Eventually(func(ctx SpecContext) bool {
-					return apierrors.IsNotFound(c.Get(ctx, client.ObjectKeyFromObject(cl), &apiv1.Cluster{}))
-				}).WithContext(ctx).WithTimeout(3 * time.Minute).WithPolling(statePoll).Should(BeTrue())
-			}, NodeTimeout(4*time.Minute))
 		}
 
 		primary := framework.WithExporter(framework.PeerCluster(ns, mainName, env.PostgresImage), exporterName)

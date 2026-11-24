@@ -2,19 +2,22 @@ package selfmetrics_test
 
 import (
 	"bytes"
-	"os"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	"github.com/gabrosys/plugin-telemetry/internal/selfmetrics"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
-const goldenPath = "../../docs/self-metrics.md"
+const (
+	goldenDir  = "../../docs"
+	goldenName = "self-metrics.md"
+)
 
 var _ = Describe("Catalogue", func() {
-	It("has the designed rows", func() {
+	It("lists every self-metric with its instrument, unit and attributes", func() {
 		type row struct {
 			name, instrument, unit string
 			attributes             []string
@@ -92,9 +95,7 @@ var _ = Describe("Catalogue", func() {
 	})
 
 	It("generates a plugin section in docs/self-metrics.md", func() {
-		doc, err := os.ReadFile(goldenPath)
-		Expect(err).NotTo(HaveOccurred())
-		text := string(doc)
+		text := string(fixture.Read(GinkgoTB(), goldenDir, goldenName))
 		Expect(text).To(ContainSubstring("## Engine"))
 		Expect(text).To(ContainSubstring("## Plugin"))
 		Expect(text).To(ContainSubstring("| `cnpg_otel_plugin_hook_calls_total` | counter | `{call}` | `service`, `operation`, `outcome` |"))
@@ -107,7 +108,7 @@ var _ = Describe("Catalogue", func() {
 		for _, m := range selfmetrics.ByComponent(selfmetrics.ComponentEngine) {
 			help[m.Name] = m.Description
 		}
-		// pg_collector.go:112-141 at v1.30.1.
+		// pg_collector.go:112-129,136-141 at v1.30.1.
 		Expect(help).To(HaveKeyWithValue("cnpg_collector_collections_total", "Total number of times PostgreSQL was accessed for metrics."))
 		Expect(help).To(HaveKeyWithValue("cnpg_collector_collection_errors_total", "Total errors occurred accessing PostgreSQL for metrics."))
 		Expect(help).To(HaveKeyWithValue("cnpg_collector_last_collection_error", "1 if the last collection ended with error, 0 otherwise."))
@@ -121,14 +122,12 @@ var _ = Describe("Catalogue", func() {
 	})
 
 	It("documents denied and cnpg_otel_check in docs/self-metrics.md", func() {
-		doc, err := os.ReadFile(goldenPath)
-		Expect(err).NotTo(HaveOccurred())
-		text := string(doc)
+		text := string(fixture.Read(GinkgoTB(), goldenDir, goldenName))
 		Expect(text).To(ContainSubstring("Query runs by outcome (ok, error, timeout, skipped, capped, denied)."))
 		Expect(text).To(ContainSubstring("Configuration loads by source and outcome (ok, error, denied)."))
 		Expect(text).To(ContainSubstring("| `cnpg_otel_check` | gauge |  | `check` |"))
 		Expect(text).To(ContainSubstring("pg_monitor, read_only, track_io_timing, track_wal_io_timing, track_functions"))
-		Expect(text).To(ContainSubstring("read_only checks the engine's transactions"))
+		Expect(text).To(ContainSubstring("read_only checks the sidecar's transactions"))
 		Expect(text).To(ContainSubstring("superuser is 1 while the session role is a superuser; the sidecar then runs no query"))
 	})
 
@@ -136,13 +135,7 @@ var _ = Describe("Catalogue", func() {
 		var buf bytes.Buffer
 		Expect(selfmetrics.Render(&buf, selfmetrics.Catalogue())).To(Succeed())
 
-		if os.Getenv("UPDATE_GOLDEN") != "" {
-			Expect(os.WriteFile(goldenPath, buf.Bytes(), 0o600)).To(Succeed())
-		}
-
-		want, err := os.ReadFile(goldenPath)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(buf.String()).To(Equal(string(want)))
+		Expect(buf.String()).To(Equal(string(fixture.Golden(GinkgoTB(), goldenDir, goldenName, buf.Bytes()))))
 	})
 })
 

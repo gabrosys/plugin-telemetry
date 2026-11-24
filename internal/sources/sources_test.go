@@ -61,7 +61,7 @@ var _ = Describe("Loader", func() {
 		f2 = filepath.Join(dir, "two.yaml")
 	})
 
-	It("loads the builtin query first and always ok", func() {
+	It("loads the built-in queries first and always ok", func() {
 		r := sources.NewLoader(os.ReadFile, nil, nil).Load()
 
 		Expect(keys(r)).To(Equal(builtinKeys))

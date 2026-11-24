@@ -3,7 +3,6 @@ package queries_test
 import (
 	"bytes"
 	"encoding/json"
-	"os"
 	"sort"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -12,25 +11,6 @@ import (
 
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
 )
-
-func testdata() *os.Root {
-	GinkgoHelper()
-
-	root, err := os.OpenRoot("testdata")
-	Expect(err).NotTo(HaveOccurred())
-	DeferCleanup(root.Close)
-
-	return root
-}
-
-func readTestdata(name string) []byte {
-	GinkgoHelper()
-
-	data, err := testdata().ReadFile(name)
-	Expect(err).NotTo(HaveOccurred())
-
-	return data
-}
 
 // configMapQueries returns data.queries of a CNPG default-monitoring ConfigMap.
 func configMapQueries(configMap []byte) string {

@@ -42,14 +42,14 @@ type sidecarMeasurement struct {
 }
 
 var _ = Describe("the sidecar with CNPG's default queries", Ordered, func() {
-	It("keeps the sidecar's working set at most 40 MiB and its CPU at most 10m with CNPG's default queries", func(ctx SpecContext) {
+	It("keeps the sidecar's working set at most 40 MiB and its mean CPU at most 10m with CNPG's default queries", func(ctx SpecContext) {
 		env, out, c, cfg := measureEnv(ctx)
 
 		ns, err := framework.CreateNamespace(ctx, c, "measure-sidecar")
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func(ctx SpecContext) {
-			Expect(client.IgnoreNotFound(c.Delete(ctx, ns))).To(Succeed())
-		})
+			Expect(framework.DeleteNamespace(ctx, c, ns.Name, statePoll)).To(Succeed())
+		}, NodeTimeout(4*time.Minute))
 
 		Expect(c.Create(ctx, measuredExporter(ns.Name))).To(Succeed())
 		key := client.ObjectKey{Namespace: ns.Name, Name: "sidecar"}

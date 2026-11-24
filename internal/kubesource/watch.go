@@ -92,8 +92,9 @@ func dynamicWatcher(client dynamic.Interface) watcher {
 			return func() {}
 		}
 
-		// A panic here is not injectable in a spec: the informer's own goroutines run client-go code, and
-		// ours only starts it. The Source side is spec'd through handler.crashed.
+		// A panic on the goroutine that runs the informer cancels the watch and reports crashed, so the
+		// Source starts it again; a panic on client-go's own goroutines, such as the reflector's, is not
+		// recovered.
 		go func() {
 			if safe.Call(logger, "informer of "+gvr.Resource+" "+name, func() { informer.RunWithContext(ctx) }) {
 				cancel()

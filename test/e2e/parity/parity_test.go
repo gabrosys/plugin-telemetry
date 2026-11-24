@@ -2,7 +2,6 @@ package parity_test
 
 import (
 	"math"
-	"os"
 	"regexp"
 	"slices"
 	"strconv"
@@ -18,6 +17,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/otlp"
 	"github.com/gabrosys/plugin-telemetry/test/e2e/parity"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 // The fixtures were recorded on kind with CNPG main: the primary plugin-peer-1's endpoint, scraped
@@ -83,19 +83,6 @@ var (
 	afterScrape  = time.Unix(afterUpdate, 0)
 )
 
-func fixture(name string) []byte {
-	GinkgoHelper()
-
-	root, err := os.OpenRoot("testdata")
-	Expect(err).NotTo(HaveOccurred())
-	DeferCleanup(root.Close)
-
-	data, err := root.ReadFile(name)
-	Expect(err).NotTo(HaveOccurred())
-
-	return data
-}
-
 // setSample sets the value of the one sample line of text that starts with series and a space.
 func setSample(text []byte, series string, value float64) []byte {
 	GinkgoHelper()
@@ -115,11 +102,18 @@ func parseCNPG(text []byte, at time.Time) []parity.Series {
 	return series
 }
 
+// cnpgText returns CloudNativePG's recorded scrape.
+func cnpgText() []byte {
+	GinkgoHelper()
+
+	return fixture.Read(GinkgoTB(), "testdata", "cnpg.prom")
+}
+
 // beforeText is the fixture computed earlier: its cnpg_last_update_timestamp is beforeUpdate.
 func beforeText() []byte {
 	GinkgoHelper()
 
-	return setSample(fixture("cnpg.prom"), lastUpdate, beforeUpdate)
+	return setSample(cnpgText(), lastUpdate, beforeUpdate)
 }
 
 func index() map[string][]string {
@@ -135,7 +129,7 @@ func ourLines() []otlp.Line {
 	GinkgoHelper()
 
 	var l otlp.Lines
-	Expect(l.Update(fixture("ours.jsonl"))).To(Succeed())
+	Expect(l.Update(fixture.Read(GinkgoTB(), "testdata", "ours.jsonl"))).To(Succeed())
 
 	return l.All()
 }
@@ -207,7 +201,7 @@ func seriesOf(checks []parity.Check) []string {
 func collectorSeries(at time.Time) []parity.Series {
 	GinkgoHelper()
 
-	return slices.DeleteFunc(parseCNPG(fixture("cnpg.prom"), at), func(s parity.Series) bool {
+	return slices.DeleteFunc(parseCNPG(cnpgText(), at), func(s parity.Series) bool {
 		return !strings.HasPrefix(s.Metric, "cnpg_collector_") || s.Metric == "cnpg_collector_lo_pages"
 	})
 }
@@ -266,7 +260,7 @@ var _ = Describe("ParseCNPG", func() {
 	at := time.Unix(1794828100, 500_000_000)
 
 	It("times the built-ins by the scrape and lo_pages and the queries by cnpg_last_update_timestamp", func() {
-		series := parseCNPG(fixture("cnpg.prom"), at)
+		series := parseCNPG(cnpgText(), at)
 
 		Expect(named(series, `cnpg_collector_up{cluster="plugin-peer"}`).At).To(Equal(at))
 		Expect(named(series, walCount).At).To(Equal(at))
@@ -276,7 +270,7 @@ var _ = Describe("ParseCNPG", func() {
 	})
 
 	It("names each series with its labels sorted and gives its kind and value", func() {
-		series := parseCNPG(fixture("cnpg.prom"), at)
+		series := parseCNPG(cnpgText(), at)
 
 		s := named(series, peerBackend)
 		Expect(s.Metric).To(Equal("cnpg_backends_total"))
@@ -291,7 +285,7 @@ var _ = Describe("ParseCNPG", func() {
 	})
 
 	It("reads a histogram's count and sum", func() {
-		text := append(fixture("cnpg.prom"), []byte("# TYPE "+latency+" histogram\n"+
+		text := append(cnpgText(), []byte("# TYPE "+latency+" histogram\n"+
 			latency+`_bucket{le="1"} 2`+"\n"+latency+`_bucket{le="+Inf"} 5`+"\n"+
 			latency+"_sum 2.5\n"+latency+"_count 5\n")...)
 
@@ -302,7 +296,7 @@ var _ = Describe("ParseCNPG", func() {
 	})
 
 	It("fails without cnpg_last_update_timestamp", func() {
-		text := regexp.MustCompile(`(?m)^cnpg_last_update_timestamp \S+\n`).ReplaceAllLiteral(fixture("cnpg.prom"), nil)
+		text := regexp.MustCompile(`(?m)^cnpg_last_update_timestamp \S+\n`).ReplaceAllLiteral(cnpgText(), nil)
 
 		_, err := parity.ParseCNPG(text, at)
 		Expect(err).To(MatchError(parity.ErrNoUpdateTime))
@@ -347,7 +341,7 @@ var _ = Describe("Ours", func() {
 		Expect(parity.Ours(ourLines(), "plugin-peer-9", index())).To(BeEmpty())
 	})
 
-	DescribeTable("times each query by its own last success (PAR-03, PAR-04)",
+	DescribeTable("times each query by its own last success",
 		func(series string, success int64) {
 			Expect(named(ours(), series).At).To(BeTemporally("~", time.UnixMicro(success), time.Microsecond))
 		},
@@ -398,7 +392,7 @@ var _ = Describe("Ours", func() {
 var _ = Describe("the fixtures", func() {
 	It("hold no seeded Secret value", func() {
 		for _, name := range []string{"cnpg.prom", "ours.jsonl"} {
-			Expect(string(fixture(name))).NotTo(ContainSubstring("sentinel-"), name)
+			Expect(string(fixture.Read(GinkgoTB(), "testdata", name))).NotTo(ContainSubstring("sentinel-"), name)
 		}
 	})
 })
@@ -407,7 +401,7 @@ var _ = Describe("Bracket", func() {
 	DescribeTable("the bracket rule",
 		func(series string, before, our, after float64, verdict string) {
 			bs := parseCNPG(setSample(beforeText(), series, before), beforeScrape)
-			as := parseCNPG(setSample(fixture("cnpg.prom"), series, after), afterScrape)
+			as := parseCNPG(setSample(cnpgText(), series, after), afterScrape)
 			mine := with(ours(), series, func(s *parity.Series) { s.Value = our })
 
 			c := checkOf(parity.Bracket(bs, as, mine, parity.Options{}), series)
@@ -415,7 +409,7 @@ var _ = Describe("Bracket", func() {
 			Expect(c.Rule).To(Equal("bracket"))
 		},
 		Entry("a counter between both samples passes", xactApp, 150.0, 168.0, 199.0, "pass"),
-		Entry("a fresh small counter 30 % over the first sample passes under the second (PAR-02)",
+		Entry("a fresh small counter 30 % over the first sample passes under the second",
 			xactApp, 10.0, 13.0, 14.0, "pass"),
 		Entry("a counter equal to a sample passes", xactApp, 168.0, 168.0, 199.0, "pass"),
 		Entry("a counter above the second sample fails", xactApp, 150.0, 200.0, 199.0, "fail"),
@@ -429,15 +423,15 @@ var _ = Describe("Bracket", func() {
 
 	DescribeTable("the bracket times",
 		func(before, after float64, verdict string) {
-			bs := parseCNPG(setSample(setSample(fixture("cnpg.prom"), lastUpdate, before), xactApp, 150), beforeScrape)
-			as := parseCNPG(setSample(fixture("cnpg.prom"), lastUpdate, after), afterScrape)
+			bs := parseCNPG(setSample(setSample(cnpgText(), lastUpdate, before), xactApp, 150), beforeScrape)
+			as := parseCNPG(setSample(cnpgText(), lastUpdate, after), afterScrape)
 
 			c := checkOf(parity.Bracket(bs, as, ours(), parity.Options{}), xactApp)
 			Expect(c.Verdict).To(Equal(verdict), c.Detail)
 		},
 		Entry("samples a margin or more away bracket ours", float64(beforeUpdate), float64(afterUpdate), "pass"),
 		Entry("a CNPG sample 0.5 s before ours is unused", xactSuccess-0.5, float64(afterUpdate), "not compared"),
-		Entry("ours newer than after − margin is not compared (PAR-05)", float64(beforeUpdate), xactSuccess+0.5, "not compared"),
+		Entry("ours newer than after − margin is not compared", float64(beforeUpdate), xactSuccess+0.5, "not compared"),
 		Entry("ours newer than both samples is not compared", float64(beforeUpdate), xactSuccess-1.5, "not compared"),
 	)
 
@@ -462,7 +456,7 @@ var _ = Describe("Bracket", func() {
 					latency+"_count "+strconv.FormatFloat(count, 'g', -1, 64)+"\n")...)
 			}
 			bs := parseCNPG(hist(beforeText(), 5, 2.5), beforeScrape)
-			as := parseCNPG(hist(fixture("cnpg.prom"), 9, 4.5), afterScrape)
+			as := parseCNPG(hist(cnpgText(), 9, 4.5), afterScrape)
 			mine := append(ours(), parity.Series{
 				Name: latency, Metric: latency, Kind: "histogram", Labels: map[string]string{},
 				Value: count, Sum: sum, At: time.UnixMicro(xactSuccessMicro),
@@ -491,8 +485,8 @@ var _ = Describe("Bracket", func() {
 		Expect(checkOf(checks, local).Detail).To(ContainSubstring("only in ours"))
 	})
 
-	It("expects the query-cache metrics on CNPG's side and names our equivalents (PAR-01)", func() {
-		checks := parity.Bracket(parseCNPG(beforeText(), beforeScrape), parseCNPG(fixture("cnpg.prom"), afterScrape), ours(), parity.Options{})
+	It("expects the query-cache metrics on CNPG's side and names our equivalents", func() {
+		checks := parity.Bracket(parseCNPG(beforeText(), beforeScrape), parseCNPG(cnpgText(), afterScrape), ours(), parity.Options{})
 
 		for metric, equivalent := range map[string]string{
 			"cnpg_cache_hits":            "none",
@@ -573,7 +567,7 @@ var _ = Describe("Bracket", func() {
 		bracket := func(mine []parity.Series, o parity.Options) []parity.Check {
 			GinkgoHelper()
 
-			return parity.Bracket(parseCNPG(beforeText(), beforeScrape), parseCNPG(fixture("cnpg.prom"), afterScrape), mine, o)
+			return parity.Bracket(parseCNPG(beforeText(), beforeScrape), parseCNPG(cnpgText(), afterScrape), mine, o)
 		}
 
 		It("fails a CNPG-side metric found in ours", func() {
@@ -585,7 +579,7 @@ var _ = Describe("Bracket", func() {
 		})
 
 		It("fails an ours-side metric found in CNPG", func() {
-			text := append(fixture("cnpg.prom"), []byte("# TYPE cnpg_otel_series gauge\ncnpg_otel_series 1\n")...)
+			text := append(cnpgText(), []byte("# TYPE cnpg_otel_series gauge\ncnpg_otel_series 1\n")...)
 			checks := parity.Bracket(parseCNPG(beforeText(), beforeScrape), parseCNPG(text, afterScrape), ours(), parity.Options{})
 
 			c := checkOf(checks, "cnpg_otel_series")
@@ -606,7 +600,7 @@ var _ = Describe("Bracket", func() {
 				return with(series, xactApp, func(s *parity.Series) { s.Kind = k })
 			}
 			bs := kind(parseCNPG(setSample(beforeText(), xactApp, 150), beforeScrape), before)
-			as := kind(parseCNPG(fixture("cnpg.prom"), afterScrape), after)
+			as := kind(parseCNPG(cnpgText(), afterScrape), after)
 
 			c := checkOf(parity.Bracket(bs, as, ours(), parity.Options{}), xactApp)
 			Expect(c.Verdict).To(Equal("fail"))
@@ -694,13 +688,13 @@ var _ = Describe("Markdown", func() {
 		GinkgoHelper()
 
 		bs := parseCNPG(setSample(beforeText(), xactApp, 150), beforeScrape)
-		as := parseCNPG(fixture("cnpg.prom"), afterScrape)
+		as := parseCNPG(cnpgText(), afterScrape)
 		mine := with(ours(), series, func(s *parity.Series) { s.Value = our })
 
 		return parity.Bracket(bs, as, mine, parity.Options{Gate: func(m string) bool { return m == "cnpg_backends_total" }})
 	}
 
-	It("prints each check's gate inputs (PAR-10)", func() {
+	It("prints each check's gate inputs", func() {
 		md := parity.Markdown("Parity", checks(xactApp, 168))
 
 		Expect(md).To(HavePrefix("# Parity\n"))
@@ -733,7 +727,7 @@ var _ = Describe("Markdown", func() {
 	})
 
 	It("renders the same input the same way, whatever its order", func() {
-		bs, as, mine := parseCNPG(beforeText(), beforeScrape), parseCNPG(fixture("cnpg.prom"), afterScrape), ours()
+		bs, as, mine := parseCNPG(beforeText(), beforeScrape), parseCNPG(cnpgText(), afterScrape), ours()
 		md := parity.Markdown("Parity", parity.Bracket(bs, as, mine, parity.Options{}))
 
 		reorders := []func([]parity.Series) []parity.Series{

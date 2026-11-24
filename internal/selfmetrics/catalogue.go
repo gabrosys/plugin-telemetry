@@ -82,7 +82,7 @@ type section struct {
 }
 
 var sections = []section{
-	{ComponentEngine, "Engine", "Metrics the engine reports about itself."},
+	{ComponentEngine, "Engine", "Metrics the sidecar in each instance Pod reports about itself."},
 	{ComponentPlugin, "Plugin", "Metrics the plugin process reports about itself. They are exported only when `operator` gets `--metrics-endpoint`."},
 }
 

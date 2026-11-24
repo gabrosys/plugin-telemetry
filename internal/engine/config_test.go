@@ -14,6 +14,7 @@ import (
 	"maps"
 	"math/big"
 	mathrand "math/rand/v2"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -273,12 +274,11 @@ type harness struct {
 	clk *clocktesting.FakeClock
 	srv *otlptest.Server
 
-	mu          sync.Mutex // guards lines, rounds, factsTimers, probeTimers and debounces
+	mu          sync.Mutex // guards lines, rounds, factsTimers and debounces
 	lines       []string
 	debounces   int             // the debounce timers the engine armed
 	rounds      []time.Time     // when each facts round started
 	factsTimers []time.Duration // what the engine armed its facts timer with, in order
-	probeTimers []time.Duration // what the engine armed its shutdown probe timer with, in order
 	stopOnce    sync.Once
 	stopEngine  func() // cancels the engine and waits for RunWith to return
 }
@@ -298,12 +298,6 @@ func (c factsClock) NewTimer(d time.Duration) clock.Timer {
 		if first && strings.HasSuffix(f.Function, "engine.(*engine).run") {
 			c.h.mu.Lock()
 			c.h.debounces++
-			c.h.mu.Unlock()
-			break
-		}
-		if strings.HasSuffix(f.Function, "engine.(*engine).setProbeTimer") {
-			c.h.mu.Lock()
-			c.h.probeTimers = append(c.h.probeTimers, d)
 			c.h.mu.Unlock()
 			break
 		}
@@ -437,13 +431,6 @@ func (h *harness) timersArmed() []time.Duration {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return slices.Clone(h.factsTimers)
-}
-
-// probeTimersArmed returns the durations the engine armed its shutdown probe timer with so far.
-func (h *harness) probeTimersArmed() []time.Duration {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return slices.Clone(h.probeTimers)
 }
 
 // debounceTimers counts the debounce timers the engine armed.
@@ -620,14 +607,14 @@ func matches(attrs, want map[string]string) bool {
 	return true
 }
 
-var _ = Describe("An engine on an in-memory Config", func() {
-	It("hands a new idle timeout to the kept pool", func(ctx SpecContext) {
-		kept, idle, err := engine.IdleTimeoutAfterIdleOnlyApply(ctx)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(kept).To(BeTrue())
-		Expect(idle).To(Equal(2 * time.Minute))
+var _ = Describe("FileConfig", func() {
+	It("fails with fs.ErrNotExist when the settings file is missing", func() {
+		_, _, err := engine.FileConfig(filepath.Join(GinkgoT().TempDir(), "absent.yaml")).Settings()
+		Expect(err).To(MatchError(fs.ErrNotExist))
 	})
+})
 
+var _ = Describe("An engine on an in-memory Config", func() {
 	generation := func(g string) map[string]string { return map[string]string{"generation": g} }
 
 	It("reloads once, Debounce after the first change of a burst", func() {
@@ -679,7 +666,7 @@ var _ = Describe("An engine on an in-memory Config", func() {
 		Expect(h.logged(`"msg"="configuration applied"`)).To(Equal(3))
 	})
 
-	It("keeps the pool when only the idle timeout changes", func() {
+	It("keeps the pool when only the query intervals change", func() {
 		h := run(func(url string) *memConfig { return newMemConfig(httpSettings(url), httpFiles()) }, primary)
 		h.advance(func() bool { return h.logged(`"msg"="plan updated"`) == 1 && len(h.timersArmed()) == 2 })
 		timers := len(h.timersArmed())

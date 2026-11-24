@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/gabrosys/plugin-telemetry/test/e2e/framework"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 // strictFieldValidation is fieldValidation=Strict, which kubectl applies by default.
@@ -41,7 +42,7 @@ func fixtureEntries(dir string, run func(file string) TableEntry) []TableEntry {
 	return entries
 }
 
-var _ = Describe("AC1: the CRDs", Ordered, func() {
+var _ = Describe("the CRDs", Ordered, func() {
 	var strict client.Client
 
 	// dryRun applies the fixture the way kubectl does: server-side dry-run with strict field validation.
@@ -64,18 +65,17 @@ var _ = Describe("AC1: the CRDs", Ordered, func() {
 
 		namespace, err := framework.CreateNamespace(ctx, c, "plugin-crd")
 		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func(ctx SpecContext) {
-			Expect(client.IgnoreNotFound(c.Delete(ctx, namespace))).To(Succeed())
-		})
 		ns = namespace.Name
+		DeferCleanup(func(ctx SpecContext) {
+			Expect(framework.DeleteNamespace(ctx, c, ns, time.Second)).To(Succeed())
+		}, NodeTimeout(2*time.Minute))
 	})
 
 	DescribeTable("the API server accepts every valid fixture",
 		func(ctx SpecContext, file string) {
-			raw, err := fs.ReadFile(os.DirFS(fixturesDir), file)
-			Expect(err).NotTo(HaveOccurred())
+			raw := fixture.Read(GinkgoTB(), fixturesDir, file)
 
-			_, err = dryRun(ctx, ns, raw)
+			_, err := dryRun(ctx, ns, raw)
 			Expect(err).NotTo(HaveOccurred())
 		},
 		func() []TableEntry {
@@ -87,12 +87,11 @@ var _ = Describe("AC1: the CRDs", Ordered, func() {
 
 	DescribeTable("the API server rejects every invalid fixture with its message",
 		func(ctx SpecContext, file string) {
-			raw, err := fs.ReadFile(os.DirFS(fixturesDir), file)
-			Expect(err).NotTo(HaveOccurred())
+			raw := fixture.Read(GinkgoTB(), fixturesDir, file)
 			first, _, _ := strings.Cut(string(raw), "\n")
 			Expect(first).To(HavePrefix(wantPrefix), "an invalid fixture starts with a want line")
 
-			_, err = dryRun(ctx, ns, raw)
+			_, err := dryRun(ctx, ns, raw)
 			Expect(err).To(MatchError(ContainSubstring(strings.TrimPrefix(first, wantPrefix))))
 		},
 		func() []TableEntry {
@@ -103,16 +102,15 @@ var _ = Describe("AC1: the CRDs", Ordered, func() {
 	)
 
 	It("reports a rejected endpoint at spec.exporter.endpoint without its value", func(ctx SpecContext) {
-		raw, err := fs.ReadFile(os.DirFS(fixturesDir), "invalid/exporter-endpoint-user-info.yaml")
-		Expect(err).NotTo(HaveOccurred())
+		raw := fixture.Read(GinkgoTB(), fixturesDir, "invalid/exporter-endpoint-user-info.yaml")
 
-		_, err = dryRun(ctx, ns, raw)
+		_, err := dryRun(ctx, ns, raw)
 		Expect(err).To(MatchError(ContainSubstring("spec.exporter.endpoint: ")))
 		Expect(err.Error()).NotTo(ContainSubstring("secret"))
 	}, SpecTimeout(time.Minute))
 
 	It("keeps metric_mapping: {} in a MetricQuerySet", func(ctx SpecContext) {
-		obj, err := dryRun(ctx, ns, readTestdata("metricqueryset-empty-mapping.yaml"))
+		obj, err := dryRun(ctx, ns, fixture.Read(GinkgoTB(), "testdata", "metricqueryset-empty-mapping.yaml"))
 		Expect(err).NotTo(HaveOccurred())
 
 		metrics, found, err := unstructured.NestedSlice(obj.Object, "spec", "queries", "e2e_mapped", "metrics")

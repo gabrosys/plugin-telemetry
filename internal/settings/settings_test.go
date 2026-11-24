@@ -10,6 +10,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 // loadFile reads the file at path and parses it relative to its directory, as the engine does.
@@ -18,16 +19,28 @@ func loadFile(path string) (settings.Settings, error) {
 	if err != nil {
 		return settings.Settings{}, fmt.Errorf("read settings: %w", err)
 	}
-	dir, err := filepath.Abs(filepath.Dir(path))
+
+	return parseIn(data, filepath.Dir(path))
+}
+
+// load reads testdata/name and parses it relative to testdata.
+func load(name string) (settings.Settings, error) {
+	data, err := fixture.Open(GinkgoTB(), "testdata").ReadFile(name)
+	if err != nil {
+		return settings.Settings{}, fmt.Errorf("read settings: %w", err)
+	}
+
+	return parseIn(data, "testdata")
+}
+
+// parseIn parses data with relative paths resolved against dir.
+func parseIn(data []byte, dir string) (settings.Settings, error) {
+	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return settings.Settings{}, fmt.Errorf("resolve settings directory: %w", err)
 	}
 
-	return settings.Parse(data, dir)
-}
-
-func load(name string) (settings.Settings, error) {
-	return loadFile(filepath.Join("testdata", name))
+	return settings.Parse(data, abs)
 }
 
 func mustLoad(name string) settings.Settings {
@@ -44,7 +57,7 @@ func writeConfig(content string) string {
 	return p
 }
 
-var _ = Describe("Load", func() {
+var _ = Describe("Parse of a settings file", func() {
 	It("applies defaults to a minimal file", func() {
 		s := mustLoad("minimal.yaml")
 
@@ -152,11 +165,6 @@ var _ = Describe("Load", func() {
 	It("fails on an unknown key", func() {
 		_, err := load("unknown-key.yaml")
 		Expect(err).To(MatchError(ContainSubstring("retries")))
-	})
-
-	It("fails on a missing file", func() {
-		_, err := load("absent.yaml")
-		Expect(err).To(MatchError(os.ErrNotExist))
 	})
 
 	It("fails on a malformed duration", func() {

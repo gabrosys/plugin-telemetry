@@ -215,26 +215,9 @@ var _ = Describe("the plugin replica with 1000 Clusters", Ordered, ContinueOnFai
 		g, gctx := errgroup.WithContext(ctx)
 		g.SetLimit(pluginCreateLimit)
 		for _, name := range namespaces {
-			g.Go(func() error {
-				return client.IgnoreNotFound(c.Delete(gctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}))
-			})
+			g.Go(func() error { return framework.DeleteNamespace(gctx, c, name, 5*time.Second) })
 		}
 		Expect(g.Wait()).To(Succeed())
-
-		Eventually(func(ctx SpecContext) (int, error) {
-			var all corev1.NamespaceList
-			if err := c.List(ctx, &all); err != nil {
-				return 0, fmt.Errorf("list namespaces: %w", err)
-			}
-			left := 0
-			for _, ns := range all.Items {
-				if slices.Contains(namespaces, ns.Name) {
-					left++
-				}
-			}
-
-			return left, nil
-		}).WithContext(ctx).WithTimeout(10 * time.Minute).WithPolling(5 * time.Second).Should(BeZero())
 	}, NodeTimeout(15*time.Minute))
 
 	It("gives each of 1000 unreconciled Clusters its identity", func(ctx SpecContext) {

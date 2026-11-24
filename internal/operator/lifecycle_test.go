@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"os"
 
 	apiv1 "github.com/cloudnative-pg/api/pkg/api/v1"
 	"github.com/cloudnative-pg/cnpg-i/pkg/lifecycle"
@@ -23,6 +22,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/metadata"
 	"github.com/gabrosys/plugin-telemetry/internal/operator"
 	"github.com/gabrosys/plugin-telemetry/internal/podpatch"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 const testImage = "ghcr.io/gabrosys/plugin-telemetry@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -36,38 +36,18 @@ const (
 	operatorData = "testdata"
 )
 
-func readData(dir, name string) []byte {
-	GinkgoHelper()
-
-	root, err := os.OpenRoot(dir)
-	Expect(err).NotTo(HaveOccurred())
-	DeferCleanup(root.Close)
-
-	data, err := root.ReadFile(name + ".json")
-	Expect(err).NotTo(HaveOccurred())
-
-	return data
-}
-
 // fixturePod reads an input shared with the podpatch goldens.
-func fixturePod(name string) []byte { return readData(podpatchData, name) }
+func fixturePod(name string) []byte { return fixture.Read(GinkgoTB(), podpatchData, name+".json") }
 
-// matchGolden compares a Pod with a golden in internal/operator/testdata; UPDATE_GOLDEN=1 rewrites it.
+// matchGolden compares a Pod with its golden in internal/operator/testdata through fixture.Golden.
 func matchGolden(name string, pod []byte) {
 	GinkgoHelper()
 
-	if os.Getenv("UPDATE_GOLDEN") != "" {
-		var out bytes.Buffer
-		Expect(json.Indent(&out, canonical(pod), "", "  ")).To(Succeed())
-		out.WriteByte('\n')
+	var out bytes.Buffer
+	Expect(json.Indent(&out, canonical(pod), "", "  ")).To(Succeed())
+	out.WriteByte('\n')
 
-		root, err := os.OpenRoot(operatorData)
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(root.Close)
-		Expect(root.WriteFile(name+".json", out.Bytes(), 0o600)).To(Succeed())
-	}
-
-	Expect(canonical(pod)).To(MatchJSON(readData(operatorData, name)))
+	Expect(canonical(pod)).To(MatchJSON(fixture.Golden(GinkgoTB(), operatorData, name+".json", out.Bytes())))
 }
 
 func initContainerNames(raw []byte) []string {
@@ -226,7 +206,7 @@ var _ = Describe("Lifecycle", func() {
 				Expect(resp.GetJsonPatch()).To(BeEmpty())
 			})
 
-			It("is idempotent: a second EVALUATE of the same Pod gives the same result, of its own output nothing", func(ctx context.Context) {
+			It("is idempotent: EVALUATE of the same Pod gives the same patched Pod, and of the patched Pod no patch", func(ctx context.Context) {
 				cluster := clusterJSON(ours(nil))
 				first, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE, cluster, pod))
 				Expect(err).NotTo(HaveOccurred())
@@ -317,7 +297,7 @@ var _ = Describe("Lifecycle", func() {
 	})
 
 	It("keeps another plugin's sidecar and volume and adds ours after them", func(ctx context.Context) {
-		pod := readData(operatorData, "pod-main.other-plugin")
+		pod := fixture.Read(GinkgoTB(), operatorData, "pod-main.other-plugin.json")
 		resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_EVALUATE,
 			clusterJSON(ours(nil)), pod))
 		Expect(err).NotTo(HaveOccurred())
@@ -329,7 +309,7 @@ var _ = Describe("Lifecycle", func() {
 	})
 
 	It("adds the sidecar on CREATE without moving the bootstrap init containers", func(ctx context.Context) {
-		pod := readData(operatorData, "pod-main.create")
+		pod := fixture.Read(GinkgoTB(), operatorData, "pod-main.create.json")
 		resp, err := srv.LifecycleHook(ctx, request(lifecycle.OperatorOperationType_TYPE_CREATE,
 			clusterJSON(ours(nil)), pod))
 		Expect(err).NotTo(HaveOccurred())

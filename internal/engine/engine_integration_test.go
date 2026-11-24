@@ -25,6 +25,7 @@ import (
 	"github.com/gabrosys/plugin-telemetry/internal/pg"
 	"github.com/gabrosys/plugin-telemetry/internal/planner"
 	"github.com/gabrosys/plugin-telemetry/internal/settings"
+	testfixture "github.com/gabrosys/plugin-telemetry/test/fixture"
 	"github.com/gabrosys/plugin-telemetry/test/otlptest"
 	"github.com/gabrosys/plugin-telemetry/test/pgtest"
 )
@@ -78,9 +79,7 @@ func defaultQueries() string {
 	var cm struct {
 		Data map[string]string `yaml:"data"`
 	}
-	raw, err := os.ReadFile("../queries/testdata/default-monitoring-v1.30.1.yaml")
-	Expect(err).NotTo(HaveOccurred())
-	Expect(yaml.Unmarshal(raw, &cm)).To(Succeed())
+	Expect(yaml.Unmarshal(testfixture.Read(GinkgoTB(), "../queries/testdata", "default-monitoring-v1.30.1.yaml"), &cm)).To(Succeed())
 	Expect(cm.Data).To(HaveKey("queries"))
 	return cm.Data["queries"]
 }
@@ -264,7 +263,7 @@ var _ = Describe("Run", Ordered, func() {
 	})
 })
 
-// backends counts the backends that match cond, other than the probe's own.
+// backends counts the backends that match cond, other than its own.
 func backends(ctx context.Context, cond string, args ...any) (n int, err error) {
 	cc, err := pg.ConnConfig(server.MonitorConfig(GinkgoT().TempDir()), "postgres")
 	if err != nil {
@@ -279,7 +278,19 @@ func backends(ctx context.Context, cond string, args ...any) (n int, err error) 
 	return n, err
 }
 
-// sessions counts the backends of user in state, other than the probe's own; an empty state counts every one.
+// engineBackends counts the engine's backends.
+func engineBackends(ctx context.Context) (int, error) {
+	return backends(ctx, "application_name = 'cnpg_otel_engine'")
+}
+
+// heldEngineBackends counts the engine's backends that started more than a query interval ago: sessions held
+// across runs, and not a run or a facts round that connects for a moment.
+func heldEngineBackends(ctx context.Context) (int, error) {
+	return backends(ctx, "application_name = 'cnpg_otel_engine' AND backend_start < now() - make_interval(secs => $1)",
+		queryInterval.Seconds())
+}
+
+// sessions counts the backends of user in state, other than its own; an empty state counts every one.
 func sessions(ctx context.Context, user, state string) (int, error) {
 	return backends(ctx, "usename = $1 AND ($2 = '' OR state = $2)", user, state)
 }
@@ -294,7 +305,7 @@ const holdQuery = `hold_probe:
 `
 
 var _ = Describe("Run on a change of the postgres user", func() {
-	It("closes the old pool's connections at once on a postgres settings change", func(ctx SpecContext) {
+	It("ends the old user's sessions once their runs end on a postgres settings change", func(ctx SpecContext) {
 		const other, otherPassword = "other_monitor", "other-password"
 		Expect(server.Exec(ctx, "CREATE ROLE "+other+" LOGIN PASSWORD '"+otherPassword+"'")).To(Succeed())
 		Expect(server.Exec(ctx, "GRANT pg_monitor TO "+other)).To(Succeed())
@@ -305,11 +316,9 @@ var _ = Describe("Run on a change of the postgres user", func() {
 		writeFile(f.config, f.valid)
 		f.run()
 		Eventually(expectUp(f.srv, 1)).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
-		// A run of hold_probe is in flight while other runs leave idle connections in the pool.
+		// A run of hold_probe is in flight when the user changes.
 		Eventually(func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "active") }).
 			WithTimeout(15 * time.Second).WithPolling(50 * time.Millisecond).Should(BeNumerically(">", 0))
-		Eventually(func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "idle") }).
-			WithTimeout(5 * time.Second).WithPolling(50 * time.Millisecond).Should(BeNumerically(">", 0))
 
 		dir := filepath.Dir(f.config)
 		writeFile(filepath.Join(dir, "other.pw"), otherPassword+"\n")
@@ -320,11 +329,10 @@ var _ = Describe("Run on a change of the postgres user", func() {
 
 		Eventually(func() (int, error) { return sessions(ctx, other, "") }).
 			WithTimeout(10 * time.Second).WithPolling(50 * time.Millisecond).Should(BeNumerically(">", 0))
-		Eventually(func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "idle") }).
-			WithTimeout(2 * time.Second).WithPolling(50 * time.Millisecond).Should(BeZero())
-		// hold_probe's busy connection closes when its run releases it.
-		Eventually(func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "") }).
-			WithTimeout(8 * time.Second).WithPolling(100 * time.Millisecond).Should(BeZero())
+		// hold_probe's connection closes when its run releases it, and no later run opens one as the old user.
+		oldUser := func() (int, error) { return sessions(ctx, pgtest.MonitorUser, "") }
+		Eventually(oldUser).WithTimeout(8 * time.Second).WithPolling(100 * time.Millisecond).Should(BeZero())
+		Consistently(oldUser).WithTimeout(3 * time.Second).WithPolling(100 * time.Millisecond).Should(BeZero())
 	}, SpecTimeout(time.Minute))
 })
 
@@ -595,7 +603,7 @@ var _ = Describe("Run when PostgreSQL stops", func() {
 })
 
 var _ = Describe("Run on a smart shutdown of PostgreSQL", func() {
-	It("lets the postmaster exit within 10 s (the shutdown probe) plus a run although jobs keep running", func(ctx SpecContext) {
+	It("lets the postmaster exit within a run although jobs keep running", func(ctx SpecContext) {
 		f := newFixture(time.Hour)
 		writeFile(f.config, f.valid)
 		f.run()
@@ -604,9 +612,39 @@ var _ = Describe("Run on a smart shutdown of PostgreSQL", func() {
 		DeferCleanup(server.StartServer)
 		Expect(server.Exec(ctx, "CHECKPOINT")).To(Succeed())
 		Expect(server.StopServerSmart(ctx)).To(Succeed())
+		// A run lasts at most the query timeout plus 2 s, 12 s with the defaults.
 		Eventually(func() bool { return server.Running(ctx) }).
 			WithTimeout(15 * time.Second).WithPolling(250 * time.Millisecond).Should(BeFalse())
 	}, SpecTimeout(2*time.Minute))
+})
+
+// droppableQuery runs only in the database droppable.
+const droppableQuery = `droppable_probe:
+  target_databases: ["droppable"]
+  query: SELECT 1 AS value
+  metrics:
+    - value:
+        usage: GAUGE
+        description: A probe in the droppable database.
+`
+
+var _ = Describe("Run on a database it monitors", func() {
+	It("holds no session there between runs, so DROP DATABASE without FORCE succeeds", func(ctx SpecContext) {
+		Expect(server.Exec(ctx, "CREATE DATABASE droppable")).To(Succeed())
+		DeferCleanup(func(ctx SpecContext) {
+			Expect(server.Exec(ctx, "DROP DATABASE IF EXISTS droppable WITH (FORCE)")).To(Succeed())
+		})
+		f := newFixture(time.Second)
+		writeFile(f.config, f.valid)
+		writeFile(f.extra, droppableQuery)
+		start := time.Now()
+		f.run()
+		Eventually(func() []point { return points(f.srv, "cnpg_droppable_probe_value", start) }).
+			WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).ShouldNot(BeEmpty())
+
+		// PostgreSQL waits up to 5 s for the other sessions to leave, which covers a run in flight.
+		Expect(server.Exec(ctx, "DROP DATABASE droppable")).To(Succeed())
+	}, SpecTimeout(time.Minute))
 })
 
 var _ = Describe("Run when PostgreSQL comes back after an outage", func() {
@@ -762,8 +800,8 @@ var _ = Describe("Run on a superuser session role", func() {
 			g.Expect(got).To(Equal(1.0))
 		}).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 		Expect(points(f.srv, "cnpg_collector_up", time.Time{})).To(BeEmpty())
-		Eventually(func() (int, error) { return backends(ctx, "application_name = 'cnpg_otel_engine'") }).
-			WithTimeout(planInterval).WithPolling(250 * time.Millisecond).Should(BeZero())
+		Eventually(engineBackends).WithArguments(ctx).WithTimeout(planInterval).WithPolling(250 * time.Millisecond).Should(BeZero())
+		Consistently(heldEngineBackends).WithArguments(ctx).WithTimeout(2 * queryInterval).WithPolling(100 * time.Millisecond).Should(BeZero())
 
 		Expect(server.Exec(ctx, "ALTER ROLE "+role+" NOSUPERUSER")).To(Succeed())
 		Eventually(expectUp(f.srv, 1)).WithTimeout(2*planInterval + slack).WithPolling(100 * time.Millisecond).Should(Succeed())
@@ -794,8 +832,8 @@ var _ = Describe("Run on a superuser session role", func() {
 			g.Expect(ok).To(BeTrue())
 			g.Expect(got).To(Equal(1.0))
 		}).WithTimeout(planInterval / 3).WithPolling(100 * time.Millisecond).Should(Succeed())
-		Eventually(func() (int, error) { return backends(ctx, "application_name = 'cnpg_otel_engine'") }).
-			WithTimeout(5 * time.Second).WithPolling(250 * time.Millisecond).Should(BeZero())
+		Eventually(engineBackends).WithArguments(ctx).WithTimeout(5 * time.Second).WithPolling(250 * time.Millisecond).Should(BeZero())
+		Consistently(heldEngineBackends).WithArguments(ctx).WithTimeout(2 * queryInterval).WithPolling(100 * time.Millisecond).Should(BeZero())
 		// The series stop well before the next timed round.
 		Eventually(func() []point {
 			return points(f.srv, "cnpg_backends_total", time.Now().Add(-2*exportInterval))
@@ -811,8 +849,7 @@ var _ = Describe("Run on a superuser session role", func() {
 		writeFile(f.config, f.valid)
 		f.run()
 		Eventually(expectUp(f.srv, 1)).WithTimeout(15 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
-		engineBackends := func() (int, error) { return backends(ctx, "application_name = 'cnpg_otel_engine'") }
-		Eventually(engineBackends).WithTimeout(5 * time.Second).WithPolling(100 * time.Millisecond).Should(BeNumerically(">", 0))
+		Eventually(engineBackends).WithArguments(ctx).WithTimeout(5 * time.Second).WithPolling(100 * time.Millisecond).Should(BeNumerically(">", 0))
 
 		Expect(server.Exec(ctx, "ALTER ROLE "+role+" SUPERUSER")).To(Succeed())
 		check := map[string]string{"check": "superuser"}
@@ -821,7 +858,8 @@ var _ = Describe("Run on a superuser session role", func() {
 			g.Expect(ok).To(BeTrue())
 			g.Expect(got).To(Equal(1.0))
 		}).WithTimeout(2*planInterval + slack).WithPolling(100 * time.Millisecond).Should(Succeed())
-		Eventually(engineBackends).WithTimeout(planInterval).WithPolling(250 * time.Millisecond).Should(BeZero())
+		Eventually(engineBackends).WithArguments(ctx).WithTimeout(planInterval).WithPolling(250 * time.Millisecond).Should(BeZero())
+		Consistently(heldEngineBackends).WithArguments(ctx).WithTimeout(2 * queryInterval).WithPolling(100 * time.Millisecond).Should(BeZero())
 
 		Expect(server.Exec(ctx, "ALTER ROLE "+role+" NOSUPERUSER")).To(Succeed())
 		since := time.Now()

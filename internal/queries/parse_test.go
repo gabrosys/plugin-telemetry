@@ -8,11 +8,12 @@ import (
 	yamlv3 "go.yaml.in/yaml/v3"
 
 	"github.com/gabrosys/plugin-telemetry/internal/queries"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 var _ = Describe("Parse", func() {
 	It("parses the postgres_exporter example as CNPG does", func() {
-		result, err := queries.Parse(readTestdata("cnpg-pg-exporter.yaml"))
+		result, err := queries.Parse(fixture.Read(GinkgoTB(), "testdata", "cnpg-pg-exporter.yaml"))
 		Expect(err).ToNot(HaveOccurred())
 
 		Expect(result).ToNot(BeNil())
@@ -113,7 +114,7 @@ q:
 
 	DescribeTable("decodes CNPG's corpus to the same structs as yaml/v3",
 		func(file string, extract bool) {
-			content := readTestdata(file)
+			content := fixture.Read(GinkgoTB(), "testdata", file)
 			if extract {
 				content = []byte(configMapQueries(content))
 			}

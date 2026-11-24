@@ -109,7 +109,7 @@ func toString(t any) (string, bool) {
 }
 
 // mappedValue is CNPG's MAPPEDMETRIC conversion (pkg/management/postgres/metrics/mappings.go:177-197
-// at v1.30.1 and bc0889a):
+// at v1.30.1 and main bc0889a):
 // only string text found in the mapping converts.
 func mappedValue(mapping map[string]float64, in any) (float64, bool) {
 	text, ok := in.(string)
@@ -125,7 +125,7 @@ func mappedValue(mapping map[string]float64, in any) (float64, bool) {
 }
 
 // durationMillis is CNPG's DURATION conversion (pkg/management/postgres/metrics/mappings.go:199-228
-// at v1.30.1 and bc0889a):
+// at v1.30.1 and main bc0889a):
 // Go duration text in whole milliseconds, "-1" and other text rejected.
 func durationMillis(in any) (float64, bool) {
 	var text string

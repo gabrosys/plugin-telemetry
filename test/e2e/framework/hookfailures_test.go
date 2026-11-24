@@ -2,6 +2,7 @@ package framework_test
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -30,25 +31,22 @@ var _ = Describe("ParseFailedHookCalls", func() {
 			"Post-reconcile hook returned an error",
 			"Error while calling SetStatusInCluster",
 		}
-		var (
-			logs strings.Builder
-			want []string
-		)
+		var want []string
 		for _, msg := range messages {
-			l := line(after, "ns-a", msg)
-			want = append(want, l)
-			logs.WriteString(l + "\n")
+			want = append(want, line(after, "ns-a", msg))
 		}
-		logs.WriteString(line(since.Add(-time.Second), "ns-a", messages[0]) + "\n")
-		logs.WriteString(line(after, "ns-b", messages[0]) + "\n")
-		logs.WriteString(line(after, "ns-a", "Detected stale/broken plugin connection, closing and trying again") + "\n")
 		nested := strings.Replace(line(after, "ns-b", messages[0]), `"controller":"cluster"`,
 			`"controller":"cluster","Cluster":{"name":"resilience","namespace":"ns-a"}`, 1)
-		logs.WriteString(nested + "\n")
-		logs.WriteString(line(since, "ns-a", messages[0]) + "\n")
-		logs.WriteString("E1116 10:00:05 not json: Error loading plugins, retrying\n")
+		logs := strings.Join(append(slices.Clone(want),
+			line(since.Add(-time.Second), "ns-a", messages[0]),
+			line(after, "ns-b", messages[0]),
+			line(after, "ns-a", "Detected stale/broken plugin connection, closing and trying again"),
+			nested,
+			line(since, "ns-a", messages[0]),
+			"E1116 10:00:05 not json: Error loading plugins, retrying",
+		), "\n")
 
-		Expect(framework.ParseFailedHookCalls(logs.String(), "ns-a", since)).To(Equal(want))
+		Expect(framework.ParseFailedHookCalls(logs, "ns-a", since)).To(Equal(want))
 	})
 })
 

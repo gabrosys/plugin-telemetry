@@ -2,7 +2,6 @@ package framework_test
 
 import (
 	"context"
-	"os"
 	"sync"
 	"time"
 
@@ -12,17 +11,13 @@ import (
 	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/gabrosys/plugin-telemetry/test/e2e/framework"
+	"github.com/gabrosys/plugin-telemetry/test/fixture"
 )
 
 var _ = Describe("ParseUsage", func() {
 	pod := types.NamespacedName{Namespace: "ns", Name: "pod-1"}
 
-	summary := func() []byte {
-		data, err := os.ReadFile("testdata/kubelet-summary.json")
-		Expect(err).NotTo(HaveOccurred())
-
-		return data
-	}
+	summary := func() []byte { return fixture.Read(GinkgoTB(), "testdata", "kubelet-summary.json") }
 
 	It("reads a native sidecar's working set, RSS and CPU from the stats summary", func() {
 		got, err := framework.ParseUsage(summary(), pod, "otel-metrics")

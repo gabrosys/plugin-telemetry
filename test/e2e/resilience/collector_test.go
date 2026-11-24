@@ -62,9 +62,9 @@ func (s *suite) readyCollector(ctx context.Context) (bool, error) {
 	return len(ready) > 0, err
 }
 
-// collectorSpecs adds ENG-05: the collector down for ten minutes.
+// collectorSpecs adds the spec that takes the collector down for ten minutes.
 func collectorSpecs(s *suite) {
-	It("ENG-05: with the collector down for 10 minutes each sidecar's median working set stays within 10 % of its steady median "+
+	It("with the collector down for 10 minutes each sidecar's median working set stays within 10 % of its steady median "+
 		"and exports resume within two export intervals", func(ctx SpecContext) {
 		s.healthy(ctx)
 

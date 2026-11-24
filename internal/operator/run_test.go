@@ -180,17 +180,6 @@ func freeAddress() string {
 	return addr
 }
 
-func canDial(addr string) bool {
-	d := &net.Dialer{Timeout: 100 * time.Millisecond}
-	conn, err := d.DialContext(context.Background(), "tcp", addr)
-	if err != nil {
-		return false
-	}
-	Expect(conn.Close()).To(Succeed())
-
-	return true
-}
-
 var _ = Describe("Run", func() {
 	var (
 		pki    *testPKI
@@ -254,6 +243,22 @@ var _ = Describe("Run", func() {
 		}
 	}
 
+	// listening reports whether the plugin completes a TLS handshake at the address. A TCP connect alone can succeed
+	// without the plugin: freeAddress hands out a closed ephemeral port, which a TCP self-connect or another process
+	// can take.
+	listening := func() bool {
+		d := &tls.Dialer{NetDialer: &net.Dialer{Timeout: 100 * time.Millisecond}, Config: goodTLS()}
+		ctx, stop := context.WithTimeout(context.Background(), time.Second)
+		defer stop()
+		conn, err := d.DialContext(ctx, "tcp", address())
+		if err != nil {
+			return false
+		}
+		Expect(conn.Close()).To(Succeed())
+
+		return true
+	}
+
 	BeforeEach(func() {
 		cancel, done = nil, nil
 		pki = newTestPKI()
@@ -275,10 +280,10 @@ var _ = Describe("Run", func() {
 
 	It("does not listen before the sidecar image is known", func() {
 		start()
-		Consistently(func() bool { return canDial(address()) }, 500*time.Millisecond, 50*time.Millisecond).Should(BeFalse())
+		Consistently(listening, 500*time.Millisecond, 50*time.Millisecond).Should(BeFalse())
 		close(waiter.ready)
 		close(caches.synced)
-		Eventually(func() bool { return canDial(address()) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
+		Eventually(listening, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
 	})
 
 	It("registers an informer for all seven cached kinds before it listens", func() {
@@ -288,15 +293,15 @@ var _ = Describe("Run", func() {
 			"*v1.Cluster", "*v1alpha1.TelemetryExporter",
 			"*v1.ServiceAccount", "*v1.Role", "*v1.RoleBinding", "*v1.Secret", "*v1.ConfigMap",
 		))
-		Expect(canDial(address())).To(BeFalse())
+		Expect(listening()).To(BeFalse())
 	})
 
 	It("does not listen before the caches have synced", func() {
 		close(waiter.ready)
 		start()
-		Consistently(func() bool { return canDial(address()) }, 500*time.Millisecond, 50*time.Millisecond).Should(BeFalse())
+		Consistently(listening, 500*time.Millisecond, 50*time.Millisecond).Should(BeFalse())
 		close(caches.synced)
-		Eventually(func() bool { return canDial(address()) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
+		Eventually(listening, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
 	})
 
 	Context("once the image is known", func() {
@@ -304,7 +309,7 @@ var _ = Describe("Run", func() {
 			close(waiter.ready)
 			close(caches.synced)
 			start()
-			Eventually(func() bool { return canDial(address()) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
+			Eventually(listening, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
 		})
 
 		It("serves identity over mTLS", func() {
@@ -420,7 +425,7 @@ var _ = Describe("Run", func() {
 			DeferCleanup(release)
 			close(caches.synced)
 			start()
-			Eventually(func() bool { return canDial(address()) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
+			Eventually(listening, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
 
 			conn, err := dial(goodTLS())
 			Expect(err).NotTo(HaveOccurred())
@@ -441,7 +446,7 @@ var _ = Describe("Run", func() {
 		It("lets a call in flight finish after its context ends", func() {
 			cancel()
 			By("accepts no new connection once its context ends")
-			Eventually(func() bool { return canDial(address()) }, 5*time.Second, 50*time.Millisecond).Should(BeFalse())
+			Eventually(listening, 5*time.Second, 50*time.Millisecond).Should(BeFalse())
 			By("finishing the call in flight after the dial is refused")
 			release()
 			Eventually(result, 5*time.Second).Should(Receive(BeNil()))
@@ -465,7 +470,7 @@ var _ = Describe("Run", func() {
 		close(waiter.ready)
 		close(caches.synced)
 		start()
-		Eventually(func() bool { return canDial(address()) }, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
+		Eventually(listening, 5*time.Second, 50*time.Millisecond).Should(BeTrue())
 		cancel()
 		Eventually(done, 5*time.Second).Should(Receive(BeNil()))
 		done <- nil

@@ -181,7 +181,7 @@ func guard(logger logr.Logger, what string, fn func() error) func() error {
 	}
 }
 
-// clearEnv unsets the PG* and OTEL_* variables and logs their names.
+// clearEnv unsets the PG* variables pgx reads (pg.EnvVars) and every OTEL_* variable, and logs their names.
 func clearEnv(ctx context.Context) {
 	removed := append(pg.ClearEnv(), export.ClearEnv()...)
 	if len(removed) > 0 {

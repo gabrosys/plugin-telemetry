@@ -3,7 +3,6 @@ package queries
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -70,7 +69,7 @@ type Column struct {
 	Name        string // result column
 	Role        Role
 	Usage       Usage
-	Metric      string // "cnpg_<ns>_<column or name>", "_milliseconds" for DURATION; empty unless RoleValue
+	Metric      string // Namespace + "_" + (the mapping's name, else the column), "_milliseconds" appended for DURATION; empty unless RoleValue
 	Kind        Kind
 	Description string
 	Mapping     map[string]float64  // MAPPEDMETRIC
@@ -100,8 +99,8 @@ type Definition struct {
 type Options struct {
 	// MaxLabelsPerSeries disables a query with more label columns. Zero turns the check off.
 	MaxLabelsPerSeries int
-	// Sensitive marks a query from a Secret: warnings and Disabled name the query and the column and
-	// quote no value, parse error or relation.
+	// Sensitive marks a query from a Secret: no warning or Disabled reason quotes a value, a parse error
+	// or a relation.
 	Sensitive bool
 }
 
@@ -180,7 +179,7 @@ func Define(key string, q UserQuery, opts Options) Definition {
 	return def
 }
 
-// addColumns fills Columns as CNPG's ToMetricMap does (mappings.go:79-232 at v1.30.1) and returns
+// addColumns fills Columns as CNPG's ToMetricMap does (mappings.go:80-232 at v1.30.1) and returns
 // the pg_version text each column was built with.
 func (d *Definition) addColumns(key string, q UserQuery, sensitive bool) map[string]string {
 	sources := make(map[string]string)
@@ -320,22 +319,22 @@ func (d *Definition) labelColumns(q UserQuery) []string {
 }
 
 type canonicalColumn struct {
-	Name        string            `json:"name"`
-	Role        string            `json:"role"`
-	Usage       string            `json:"usage"`
-	Metric      string            `json:"metric"`
-	Kind        string            `json:"kind"`
-	Description string            `json:"description"`
-	Mapping     map[string]string `json:"mapping"`
-	Versions    string            `json:"versions"`
+	Name        string
+	Role        string
+	Usage       string
+	Metric      string
+	Kind        string
+	Description string
+	Mapping     map[string]string
+	Versions    string
 }
 
 type canonicalDefinition struct {
-	Namespace   string            `json:"namespace"`
-	SQL         string            `json:"sql"`
-	Predicate   string            `json:"predicate"`
-	PrimaryOnly bool              `json:"primaryOnly"`
-	Columns     []canonicalColumn `json:"columns"`
+	Namespace   string
+	SQL         string
+	Predicate   string
+	PrimaryOnly bool
+	Columns     []canonicalColumn
 }
 
 // fingerprint hashes what shapes samples: namespace, SQL, predicate, primary-only and the columns. Written from plain values
@@ -366,8 +365,7 @@ func (d *Definition) fingerprint(versionSources map[string]string) string {
 		})
 	}
 
-	// Strings, a bool and string maps always encode.
-	encoded, _ := json.Marshal(canonical)
+	encoded := fmt.Appendf(nil, "%#v", canonical)
 	sum := sha256.Sum256(encoded)
 
 	return hex.EncodeToString(sum[:])

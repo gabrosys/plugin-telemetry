@@ -153,7 +153,8 @@ func cacheInterval(seconds uint64) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-// expandTargets follows CloudNativePG's expandTargetDatabases (collector.go:262-281 at v1.30.1):
+// expandTargets follows CloudNativePG's createMetricsFromUserQueries (collector.go:161-164) and
+// expandTargetDatabases (collector.go:250-268) at v1.30.1: no targets means the default database,
 // literal names are kept as given, globs match against the connectable databases.
 func expandTargets(targets []string, defaultDB string, databases []string) []string {
 	if len(targets) == 0 {

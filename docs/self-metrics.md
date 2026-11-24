@@ -2,7 +2,7 @@
 
 ## Engine
 
-Metrics the engine reports about itself.
+Metrics the sidecar in each instance Pod reports about itself.
 
 | Name | Instrument | Unit | Attributes | Description |
 |---|---|---|---|---|
@@ -16,7 +16,7 @@ Metrics the engine reports about itself.
 | `cnpg_otel_config_loads_total` | counter | `{load}` | `source`, `outcome` | Configuration loads by source and outcome (ok, error, denied). |
 | `cnpg_otel_config_duplicate_queries_total` | counter | `{query}` | `source` | Duplicate query names found while loading a source. |
 | `cnpg_otel_config_info` | gauge |  | `generation`, `hash` | Always 1; the active configuration generation and hash are attributes. |
-| `cnpg_otel_check` | gauge |  | `check` | 1 if a live check holds, 0 otherwise, from the last facts round (pg_monitor, read_only, track_io_timing, track_wal_io_timing, track_functions, superuser). read_only checks the engine's transactions, so it is 1 while they run read-only (transaction_read_only=on). superuser is 1 while the session role is a superuser; the sidecar then runs no query. |
+| `cnpg_otel_check` | gauge |  | `check` | 1 if a live check holds, 0 otherwise, from the last facts round (pg_monitor, read_only, track_io_timing, track_wal_io_timing, track_functions, superuser). read_only checks the sidecar's transactions, so it is 1 while they run read-only (transaction_read_only=on). superuser is 1 while the session role is a superuser; the sidecar then runs no query. |
 | `cnpg_otel_exports_total` | counter | `{export}` | `outcome` | Export operations by outcome (ok, error, skipped). |
 | `cnpg_otel_last_export_success_timestamp_seconds` | gauge | `s` |  | Unix time of the last successful export. |
 | `otel.sdk.exporter.metric_data_point.exported` | counter | `{data_point}` | `error.type`, `otel.component.type`, `otel.component.name`, `server.address`, `server.port` | Data points an export operation sent; rejected points count as failed with error.type=rejected. error.type is set only on failure. |

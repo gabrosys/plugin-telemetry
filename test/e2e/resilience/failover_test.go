@@ -108,7 +108,8 @@ func (s *suite) failover(
 	return oldPrimary, newPrimary, took
 }
 
-// failoverSpecs adds PLG-03: a failover with one plugin replica down.
+// failoverSpecs adds the specs that measure a failover with both plugin replicas up, then with one replica deleted or
+// hard-killed.
 func failoverSpecs(s *suite) {
 	var baseline time.Duration
 
@@ -120,18 +121,18 @@ func failoverSpecs(s *suite) {
 		}
 	}
 
-	It("PLG-03: measures a failover with both plugin replicas up", func(ctx SpecContext) {
+	It("measures a failover with both plugin replicas up", func(ctx SpecContext) {
 		old, newer, took := s.failover(ctx, nil)
 		Expect(newer).NotTo(Equal(old))
 		baseline = took
 	}, SpecTimeout(6*time.Minute))
 
-	It("PLG-03: a failover with one plugin replica deleted takes at most 30 s more",
+	It("a failover with one plugin replica deleted takes at most 30 s more",
 		check(func(ctx context.Context, plugin *corev1.Pod) {
 			Expect(s.c.Delete(ctx, plugin)).To(Succeed())
 		}), SpecTimeout(6*time.Minute))
 
-	It("PLG-03: a failover with one plugin replica hard-killed takes at most 30 s more",
+	It("a failover with one plugin replica hard-killed takes at most 30 s more",
 		check(func(ctx context.Context, plugin *corev1.Pod) {
 			before := restartCount(plugin, pluginContainer)
 			Expect(framework.KillContainer(ctx, plugin, pluginContainer)).To(Succeed())

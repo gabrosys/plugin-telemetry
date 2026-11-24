@@ -136,7 +136,7 @@ var _ = Describe("Build", func() {
 		Entry("500ms", 500*time.Millisecond),
 	)
 
-	It("orders sources as CNPG does: ConfigMaps, then Secrets, then querySets, all after the builtin query", func() {
+	It("orders sources as CNPG does: ConfigMaps, then Secrets, then querySets, all after the built-in queries", func() {
 		in := newInputs()
 		in.Cluster = monitored()
 		in.Exporter.Spec.Metrics.QuerySets = []string{"qs"}

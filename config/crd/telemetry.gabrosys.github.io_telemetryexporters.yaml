@@ -94,7 +94,7 @@ spec:
                 - message: set at least one of configMap or secret
                   rule: has(self.configMap) || has(self.secret)
               exporter:
-                description: Exporter is the OTLP connection every signal shares.
+                description: Exporter is the OTLP connection.
                 properties:
                   compression:
                     description: Compression is gzip or none. When empty, the COMPRESSION
@@ -334,10 +334,8 @@ spec:
                           rule: duration(self) <= duration('2147483647ms')
                       maxConnections:
                         description: |-
-                          MaxConnections is the most database connections the sidecar opens for queries. The default is 4.
-                          Every 10 seconds it also opens one more short connection, outside this cap, to see whether
-                          PostgreSQL is shutting down, so the monitoring role needs a connection limit of maxConnections + 1
-                          or more.
+                          MaxConnections is the most database connections the sidecar has open at once. Each query run and
+                          each facts round opens its own connection and closes it when it ends. The default is 4.
                         format: int32
                         minimum: 1
                         type: integer

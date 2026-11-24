@@ -179,7 +179,7 @@ Cost of a connection per run:
 
 - One connection per query run per database, and one per facts round. `spec.metrics.limits.maxConnections` caps how many are open at once.
 - A new session took about 1.7 ms, measured on bare PostgreSQL 18.7 over a local socket with `trust` authentication (AMD Ryzen 7 5800X). On the same setup, a new session that runs 11 monitoring queries took 5.7 ms, against 1.5 ms on a session that was already open. Password mode adds a SCRAM exchange to each connection.
-- Each release waits for the backend to exit, one round trip plus the backend's exit, and at most 2 s (`internal/pg/pool.go` `closeTimeout`) on a server that does not answer.
+- Each release waits for the backend to exit, one round trip plus the backend's exit. On a server that does not answer, it gives up after 2 s (`internal/pg/pool.go` `closeTimeout`), and the ping it sends first can run 2 s past that (`internal/pg/config.go` `cancelDeadlineDelay`), about 4 s in all.
 - With `log_connections` and `log_disconnections` on, each connection logs up to four lines on PostgreSQL 18 (connection received, authenticated and authorized, then the disconnection). The authenticated line appears only for authentication methods that log it, and PostgreSQL 17 and earlier log fewer lines per connection. Both settings are off by default and CloudNativePG v1.30.1 does not set them.
 
 The spec `test/e2e/resilience/shutdown_test.go` deletes the Pod of a one-instance Cluster with the plugin and asserts that the `postgres` container stops within 60 s of the delete. In the current runs, on CloudNativePG v1.30.1 and main, the container stopped within 1 s of the delete (its finish time is recorded to the second).

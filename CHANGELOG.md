@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1](https://github.com/gabrosys/plugin-telemetry/compare/v0.5.0...v0.5.1) (2026-11-24)
+
+
+### Bug Fixes
+
+* **engine:** drop the early facts signal on refusal ([36f1178](https://github.com/gabrosys/plugin-telemetry/commit/36f117840c81ad1b0d174eadb29bcffa4f611ba9))
+* **pg:** close each connection when its run ends ([36f1178](https://github.com/gabrosys/plugin-telemetry/commit/36f117840c81ad1b0d174eadb29bcffa4f611ba9))
+
 ## [0.5.0](https://github.com/gabrosys/plugin-telemetry/compare/v0.4.0...v0.5.0) (2026-11-17)
 
 
